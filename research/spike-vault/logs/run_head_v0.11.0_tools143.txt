@@ -1,0 +1,20 @@
+(node:16590) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+Waiting for fees to stabilize 1...
+Waiting for fees to stabilize 2...
+{"label":"init_funded","sig":"RJdbQ8yQZw2PxYat…","ok":true,"err":null,"cu":8869,"txBytes":325,"accounts":6,"feeLamports":5000}
+{"label":"fund_pda","sig":"45HJXnCc9HVjpbxT…","ok":true,"err":null,"cu":300,"txBytes":255,"accounts":4,"feeLamports":5000}
+{"label":"open","sig":"4iFcD1HexP5Ekqdc…","ok":true,"err":null,"cu":144758,"txBytes":774,"accounts":18,"feeLamports":5000}
+{"step":"open-state","order":"6TP7yUL3mjhMLGtZEH92kRayXA9XiYfdFStBsJUvDUJB","orderId":"1227403","escrow":"7Ez3kg1n7TbJYzKGrj7wx77pSe3itF9fRAL5hfHLg342","escrowUsdc":"10000000","pdaLamportsSpent":51004320,"orderLamports":18396000,"positionLamports":26058960,"userLamports":4510080}
+{"label":"place_stop_loss","sig":"5wASgk7oV1oTYxqy…","ok":true,"err":null,"cu":86637,"txBytes":749,"accounts":17,"feeLamports":5000}
+{"label":"cancel_increase","sig":"24DyWjE8tdK3Ne1B…","ok":true,"err":null,"cu":94971,"txBytes":689,"accounts":17,"feeLamports":5000}
+{"label":"cancel_stop_loss","sig":"5ACYfAe9eg2MGYBE…","ok":true,"err":null,"cu":79200,"txBytes":689,"accounts":17,"feeLamports":5000}
+{"step":"cancel-state","usdcBack":"1000000000","pdaLamports":{"beforeOpen":100000000,"afterOpen":48995680,"beforeCancels":28560400,"afterCancelIncrease":48995680,"afterBothCancels":69430960},"netPdaSolLockedAfterRoundTrip":30569040,"strangerBlocked":true}
+{"label":"open_plus_sl_one_tx","sig":"4nN4wuKgLidJSXbK…","ok":true,"err":null,"cu":229532,"txBytes":945,"accounts":20,"feeLamports":6400}
+{"label":"fund_pda_topup","sig":"2GQ5yufJgEmZmY4C…","ok":true,"err":null,"cu":300,"txBytes":255,"accounts":4,"feeLamports":5000}
+{"label":"nonpure_short_open_plus_sl_one_tx","sig":"4tLNPK8UXEiLp7p6…","ok":true,"err":null,"cu":274754,"txBytes":1041,"accounts":23,"feeLamports":6400}
+{"step":"nonpure-open-state","pdaLamportsSpent":73047360,"positionLamports":28098240,"o5Lamports":18396000,"o6Lamports":18396000}
+{"label":"nonpure_cancel_increase","sig":"3Mv94sU6AvsLvNBe…","ok":true,"err":null,"cu":94932,"txBytes":785,"accounts":20,"feeLamports":5000}
+{"label":"nonpure_cancel_stop_loss","sig":"2dsNc8uxhWk3bHCd…","ok":true,"err":null,"cu":83652,"txBytes":785,"accounts":20,"feeLamports":5000}
+{"step":"nonpure","pdaWsolAtaExistsAfterCancel":false,"pdaLamportsEnd":100462160}
+ALL ASSERTIONS PASSED

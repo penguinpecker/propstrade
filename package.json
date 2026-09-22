@@ -1,0 +1,7 @@
+{
+  "name": "propstrade",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*", "server", "app", "tests/program"],
+  "engines": { "node": ">=22" }
+}

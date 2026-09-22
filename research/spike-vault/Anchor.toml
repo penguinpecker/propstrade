@@ -1,0 +1,16 @@
+[toolchain]
+anchor_version = "0.31.1"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+props_vault = "CnFTSE4a4fVdu8DoR7tEBmkdQfJR4uQikx331B6KJrcN"
+
+[provider]
+cluster = "localnet"
+wallet = "keys/payer.json"
+
+[scripts]
+test = "node client/test.mjs"

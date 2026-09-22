@@ -1,0 +1,23 @@
+{
+  "name": "props-trade-interface",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 4187",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4187",
+    "capture": "node scripts/render.mjs export",
+    "test:flows": "node scripts/verify.mjs"
+  },
+  "dependencies": {
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "lucide-react": "1.47.0",
+    "lightweight-charts": "5.2.0"
+  },
+  "devDependencies": {
+    "vite": "8.3.0",
+    "playwright": "^1.58.2"
+  }
+}

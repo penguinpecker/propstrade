@@ -1,0 +1,9 @@
+TradingView Lightweight Charts™
+Copyright (с) 2025 TradingView, Inc. https://www.tradingview.com/
+
+Lightweight Charts is distributed under the Apache License 2.0.
+Source: https://github.com/tradingview/lightweight-charts
+Notice retrieved from the project's official NOTICE file on 23 September 2026.
+
+Props.trade uses Manrope, licensed under the SIL Open Font License 1.1.
+Lucide icons are distributed under the ISC License.

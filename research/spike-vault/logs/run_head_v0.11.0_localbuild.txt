@@ -1,0 +1,57 @@
+(node:15177) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+Waiting for fees to stabilize 1...
+Waiting for fees to stabilize 2...
+Waiting for fees to stabilize 3...
+{"label":"init_funded","sig":"oizLgeycuJZTmhZW…","ok":true,"err":null,"cu":8869,"txBytes":325,"accounts":6,"feeLamports":5000}
+{"label":"fund_pda","sig":"3oATqFehk99NvCVm…","ok":true,"err":null,"cu":300,"txBytes":255,"accounts":4,"feeLamports":5000}
+{"label":"open","sig":"QjEAwrARVZuQc3yF…","ok":false,"err":{"InstructionError":[1,"ProgramFailedToComplete"]},"cu":1400000,"txBytes":774,"accounts":18,"feeLamports":5000}
+Program ComputeBudget111111111111111111111111111111 invoke [1]
+Program ComputeBudget111111111111111111111111111111 success
+Program CnFTSE4a4fVdu8DoR7tEBmkdQfJR4uQikx331B6KJrcN invoke [1]
+Program log: Instruction: Open
+Program ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL invoke [2]
+Program log: CreateIdempotent
+Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [3]
+Program log: Instruction: GetAccountDataSize
+Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA consumed 1622 of 1372476 compute units
+Program return: TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA pQAAAAAAAAA=
+Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA success
+Program 11111111111111111111111111111111 invoke [3]
+Program 11111111111111111111111111111111 success
+Program log: Initialize the associated token account
+Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [3]
+Program log: Instruction: InitializeImmutableOwner
+Program log: Please upgrade to SPL Token 2022 for immutable owner support
+Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA consumed 1405 of 1365944 compute units
+Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA success
+Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA invoke [3]
+Program log: Instruction: InitializeAccount3
+Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA consumed 4241 of 1362113 compute units
+Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA success
+Program ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL consumed 21837 of 1379405 compute units
+Program ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL success
+Program Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo invoke [2]
+Program log: Instruction: PrepareUser
+Program 11111111111111111111111111111111 invoke [3]
+Program 11111111111111111111111111111111 success
+Program Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo consumed 10861 of 1354436 compute units
+Program Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo success
+Program Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo invoke [2]
+Program log: Instruction: PreparePosition
+Program 11111111111111111111111111111111 invoke [3]
+Program 11111111111111111111111111111111 success
+Program 11111111111111111111111111111111 invoke [3]
+Program 11111111111111111111111111111111 success
+Program Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo consumed 12374 of 1339904 compute units
+Program Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo success
+Program Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo invoke [2]
+Program log: Instruction: CreateOrderV2
+Program Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo consumed 5175 of 1315454 compute units
+Program Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo failed: Access violation in stack frame 5 at address 0x200005f18 of size 8
+Program CnFTSE4a4fVdu8DoR7tEBmkdQfJR4uQikx331B6KJrcN consumed 1399850 of 1399850 compute units
+Program CnFTSE4a4fVdu8DoR7tEBmkdQfJR4uQikx331B6KJrcN failed: Program failed to complete
+Error: open failed: {"InstructionError":[1,"ProgramFailedToComplete"]}
+    at send (file://scratch/spike-vault/client/test.mjs:109:66)
+    at process.processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at async main (file://scratch/spike-vault/client/test.mjs:152:5)

@@ -1,0 +1,128 @@
+/* Matte dark is the default. The original paper palette remains available in styles.css. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #131217;
+  --surface: #19181f;
+  --white: #1e1b25;
+  --ink: #f0edf5;
+  --muted: #b0a9b8;
+  --subtle: #938a9f;
+  --line: #35313e;
+  --line-soft: #29262f;
+  --purple: #b28aff;
+  --purple-dark: #c4a5ff;
+  --purple-wash: #2b213d;
+  --green: #75c5a9;
+  --green-wash: #1b322b;
+  --red: #e895a3;
+  --red-wash: #3b232b;
+  --amber: #d4b67b;
+  --amber-wash: #352d20;
+  --graph-fill: #31243f;
+  --graph-muted-fill: #2b2730;
+}
+:root[data-theme="dark"] ::selection { background:#50366c; color:#fff; }
+:root[data-theme="dark"] :is(.button.primary,.skip-link,.mobile-trade-action) { color:#21142e; }
+:root[data-theme="dark"] .button.secondary:hover:not(:disabled) { background:#2b2533; border-color:#5c4a73; }
+:root[data-theme="dark"] .badge { background:#2a2631; color:#c2b8cd; }
+:root[data-theme="dark"] .badge.purple { background:var(--purple-wash); color:#c3a0f5; }
+:root[data-theme="dark"] .badge.green { background:var(--green-wash); color:var(--green); }
+:root[data-theme="dark"] .badge.red { background:var(--red-wash); color:var(--red); }
+:root[data-theme="dark"] .badge.amber { background:var(--amber-wash); color:var(--amber); }
+:root[data-theme="dark"] .progress { background:#31293c; }
+:root[data-theme="dark"] .progress>span { background:#9f77d8; }
+:root[data-theme="dark"] .progress.green { background:#24352d; }
+:root[data-theme="dark"] .progress.green>span { background:#6ca38b; }
+:root[data-theme="dark"] .notice { background:#25212b; color:#c0b8c9; }
+:root[data-theme="dark"] .notice>svg { color:#b69bcf; }
+:root[data-theme="dark"] .notice.purple { background:#2a2137; color:#c6a7e8; }
+:root[data-theme="dark"] .field>span { color:#c1b8ca; }
+:root[data-theme="dark"] :is(.field input:not([type=range]),.field select,.input-unit) { border-color:#4c415b; }
+:root[data-theme="dark"] .tab-count { background:#31293b; color:#c7b6d7; }
+:root[data-theme="dark"] .toggle { background:#51465e; }
+:root[data-theme="dark"] .toggle.checked { background:var(--purple); }
+:root[data-theme="dark"] .market-icon { background:color-mix(in srgb,var(--coin-color) 13%,var(--surface)); border-color:color-mix(in srgb,var(--coin-color) 24%,var(--surface)); color:color-mix(in srgb,var(--coin-color) 64%,#fff); }
+:root[data-theme="dark"] .main-nav>a { color:var(--muted); }
+:root[data-theme="dark"] .main-nav>a.active { color:var(--purple); }
+:root[data-theme="dark"] .wallet-avatar { background:#32273e; color:#c5a6e3; }
+:root[data-theme="dark"] kbd { background:#25212b; }
+:root[data-theme="dark"] .line-graph text { fill:var(--muted); }
+:root[data-theme="dark"] :is(.period-control,.program-picker,.side-toggle) { background:#25212c; }
+:root[data-theme="dark"] .account-footnote>svg { color:#ac96c1; }
+:root[data-theme="dark"] .table-scroll { scrollbar-color:#51445f transparent; }
+:root[data-theme="dark"] th { background:#1d1a22; }
+:root[data-theme="dark"] tbody tr:hover { background:#221e2a; }
+:root[data-theme="dark"] .table-action:hover { border-color:#8d6bac; }
+:root[data-theme="dark"] .account-strip { background:#1c1922; }
+:root[data-theme="dark"] .account-emblem { background:#2b2139; border-color:#4a375e; color:#b995df; }
+:root[data-theme="dark"] .strip-stat { border-left-color:#35303d; }
+:root[data-theme="dark"] .chart-option.active { color:#c3a0e8; }
+:root[data-theme="dark"] .chart-skeleton { background:var(--surface); }
+:root[data-theme="dark"] .feed-bottom { background:#1c1921; }
+:root[data-theme="dark"] .leverage-badge { background:#243229; color:#acc5a9; }
+:root[data-theme="dark"] .position-protection { border-bottom-color:#74548e; }
+:root[data-theme="dark"] .side-toggle button.active.long { background:#203e33; color:#8cd6b6; }
+:root[data-theme="dark"] .side-toggle button.active.short { background:#442732; color:#efabbb; }
+:root[data-theme="dark"] .ticket-subrow button { background:#2a2136; border-color:#4d395e; color:#c8a5e7; }
+:root[data-theme="dark"] .protection-toggle>span>svg { color:#b79ecb; }
+:root[data-theme="dark"] .ticket-account { background:#1c1922; }
+:root[data-theme="dark"] .ticket-account-title { color:#b69dc8; }
+:root[data-theme="dark"] .stale-overlay { background:rgba(25,24,31,.95); }
+:root[data-theme="dark"] :is(.practice-row,.text-panel,.proof-step-icon,.vault-link-panel) { background:#241f2b; }
+:root[data-theme="dark"] :is(.practice-mark,.event-icon,.change-row>span,.account-initial) { color:#c0a0da; }
+:root[data-theme="dark"] .event-icon { background:#2b2337; }
+:root[data-theme="dark"] .market-highlight:hover { background:#24202c; }
+:root[data-theme="dark"] .favorite-button { color:#a69bad; }
+:root[data-theme="dark"] .favorite-button.selected { color:#bc96df; }
+:root[data-theme="dark"] .favorite-button.selected svg { fill:#443055; }
+:root[data-theme="dark"] .steps>div>span { border-color:#584665; }
+:root[data-theme="dark"] .steps .current>span { background:#3b2850; border-color:#8b64ae; }
+:root[data-theme="dark"] .steps .done>span { background:#273c2e; border-color:#48694c; }
+:root[data-theme="dark"] .funding-journey>div>span { border-color:#604874; color:#c19ae2; }
+:root[data-theme="dark"] :is(.funding-bottom,.program-face .program-face-note) { color:#b8a2ca; }
+:root[data-theme="dark"] :is(.program-sheet,.purchase-summary-body) { border-color:var(--line); }
+:root[data-theme="dark"] .program-picker button.active { background:#3a2b4d; outline-color:#71538e; }
+:root[data-theme="dark"] .purchase-summary-top { background:#2b213d; border-color:#4c395e; }
+:root[data-theme="dark"] .purchase-summary-top>.badge { background:#3e2b53; color:#d2b0ef; }
+:root[data-theme="dark"] .wallet-outline { background:#302240; border-color:#58416e; color:#c099e4; }
+:root[data-theme="dark"] .connection-points svg { color:#b08ccc; }
+:root[data-theme="dark"] .wallet-option { background:#251e30; border-color:#624877; }
+:root[data-theme="dark"] .wallet-option-icon { background:#382348; color:#c39be7; }
+:root[data-theme="dark"] .wallet-option:hover { background:#352344; }
+:root[data-theme="dark"] .payment-method>svg { color:#b7a7c1; }
+:root[data-theme="dark"] .usdc-icon { background:#202a3a; color:#9db8de; border-color:#465a75; }
+:root[data-theme="dark"] .outcome-symbol { background:#2f2140; border-color:#5c4375; color:#c19be5; }
+:root[data-theme="dark"] .outcome-symbol.success { background:#243c2d; border-color:#47664e; color:#a1c4a3; }
+:root[data-theme="dark"] .outcome-symbol.error { background:var(--red-wash); border-color:#6b414d; color:var(--red); }
+:root[data-theme="dark"] .activation-timeline>div>span { border-color:#624878; color:#c0a0da; }
+:root[data-theme="dark"] .activation-timeline .done>span { background:#283c2d; border-color:#4c6750; color:#a0c2a0; }
+:root[data-theme="dark"] .activation-timeline .current>span { background:#352344; border-color:#8b64ab; }
+:root[data-theme="dark"] :is(.receipt-top,.receipt-footer) { border-color:#574361; }
+:root[data-theme="dark"] :is(.checkmark,.pending-mark) { background:#2a3c2b; color:#b0c9aa; }
+:root[data-theme="dark"] .activation-changes>.notice { background:#25212b; }
+:root[data-theme="dark"] .payout-available { background:#2b2138; border-color:#523d67; }
+:root[data-theme="dark"] .payout-available>strong { color:#eadbf8; }
+:root[data-theme="dark"] .payout-available>strong>span { color:#bc9ed3; }
+:root[data-theme="dark"] :is(.payout-available-head,.payout-available>strong>small,.payout-available>p,.payout-available-bottom) { color:#c6acd9; }
+:root[data-theme="dark"] .payout-available-bottom { border-top-color:#523d67; }
+:root[data-theme="dark"] .receipt-amount { color:#c39eeb; }
+:root[data-theme="dark"] .verify-search { border-color:#574264; color:#baa3cc; }
+:root[data-theme="dark"] .verify-search-result { background:#2b213d; }
+:root[data-theme="dark"] .proof-step-icon { border-color:#493750; color:#bf98db; }
+:root[data-theme="dark"] .vault-link-panel { color:#baa0cd; }
+:root[data-theme="dark"] .allocation-bar>span:first-child { background:#9a70c5; }
+:root[data-theme="dark"] .allocation-bar>span:last-child { background:#473351; }
+:root[data-theme="dark"] .settings-nav>button.active { background:#30243d; }
+:root[data-theme="dark"] .screen-thumbnail { background:#231d2b; }
+:root[data-theme="dark"] .dialog { border:1px solid #44374f; box-shadow:0 24px 80px rgba(0,0,0,.5); }
+:root[data-theme="dark"] .dialog::backdrop { background:rgba(6,4,10,.66); }
+:root[data-theme="dark"] :is(.market-picker-list>button:hover,.account-picker>button:hover) { background:#2b2236; }
+:root[data-theme="dark"] .market-picker-list>button>svg { color:#b9a3c9; }
+:root[data-theme="dark"] .wallet-large { background:#33233f; border-color:#5c3f70; color:#bf98df; }
+:root[data-theme="dark"] .notification-icon { background:#30233e; color:#c0a2dc; }
+:root[data-theme="dark"] .help-links svg { color:#b799d2; }
+:root[data-theme="dark"] .toast { background:#27202f; border-color:#4d3a60; box-shadow:0 10px 40px rgba(0,0,0,.42); }
+:root[data-theme="dark"] .toast-check { background:#41304f; color:#c7a3e7; }
+:root[data-theme="dark"] .spinner { border-color:#4d395f; border-top-color:var(--purple); }
+:root[data-theme="dark"] .order-panel.mobile-visible { border-color:#584268; box-shadow:0 15px 70px rgba(0,0,0,.6); }
+@media(max-width:800px){.header-end>.theme-toggle{display:flex}}

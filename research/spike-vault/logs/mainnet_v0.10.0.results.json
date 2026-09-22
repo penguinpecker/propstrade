@@ -1,0 +1,112 @@
+[
+  {
+    "label": "init_funded",
+    "sig": "5fV249akh3cgKFkpEv6ht7TxcjJd6fRYF9ohsxNaCUz5k9MV1CzH2iPBujfBzSxthV5o4dNaaubogkgnoDqToLaR",
+    "ok": true,
+    "err": null,
+    "cu": 8869,
+    "txBytes": 325,
+    "accounts": 6,
+    "feeLamports": 5000
+  },
+  {
+    "label": "fund_pda",
+    "sig": "2AiR93ohdH7e4ra8ofT1TWuSE5MEfpYsxAvZvyXpQ3jv7F1Z9sDThQvUmZu9kGGLB1rLCrETadkfqegzUz7J6He9",
+    "ok": true,
+    "err": null,
+    "cu": 300,
+    "txBytes": 255,
+    "accounts": 4,
+    "feeLamports": 5000
+  },
+  {
+    "label": "open",
+    "sig": "3jbjGKHNSqzLqaSfQr25V2xSqMpVAhE6Rbww1gMQnhuGVjAXZkkbZMV3zLgQ1boTq6ZF1nRiPAMnt5wDk3QRhYGk",
+    "ok": true,
+    "err": null,
+    "cu": 144605,
+    "txBytes": 774,
+    "accounts": 18,
+    "feeLamports": 5000
+  },
+  {
+    "label": "place_stop_loss",
+    "sig": "2SYsXHHGCQdrtvZjU1aF2dR9NKuBgEvfkJ9jZXaYczbaZxmLcV28vpJtsqULnDcAcyMeaNKnP96RgcEinkJ24DNm",
+    "ok": true,
+    "err": null,
+    "cu": 86604,
+    "txBytes": 749,
+    "accounts": 17,
+    "feeLamports": 5000
+  },
+  {
+    "label": "cancel_increase",
+    "sig": "3dPk6Haaw4fPNnTboYA4kKfFr1Qkwo1UK5sdYrBXCYAHvoNWXqHB57AWLYtFLGAt8ghpeEQFG9q7co18P7RLCDqQ",
+    "ok": true,
+    "err": null,
+    "cu": 94954,
+    "txBytes": 689,
+    "accounts": 17,
+    "feeLamports": 5000
+  },
+  {
+    "label": "cancel_stop_loss",
+    "sig": "5V1SdQ5sSNNfc8hsJWXZegHDjDzR3jKA2yRVNYNLzEGRJAWseGkT4ETK6ZkVcMNwWLUd2hreED29YAi9C2eQyZLf",
+    "ok": true,
+    "err": null,
+    "cu": 79183,
+    "txBytes": 689,
+    "accounts": 17,
+    "feeLamports": 5000
+  },
+  {
+    "label": "open_plus_sl_one_tx",
+    "sig": "4L4HoquUeqWHtXwtiKcny74WKd6x41a2dJrbCCkU7bBGihTbVpMooMGZz7iHMafTKCkuhnkEGkQHq9rrjXdC5VDM",
+    "ok": true,
+    "err": null,
+    "cu": 229346,
+    "txBytes": 945,
+    "accounts": 20,
+    "feeLamports": 6400
+  },
+  {
+    "label": "fund_pda_topup",
+    "sig": "39uyAEMgFdL9WYPjaLgdMZytdzkdsztzbTDmNMSkK4oo4fsPC4LjiRbfJfbddMURdKqoRzs3xzT3BotJs97pEmAM",
+    "ok": true,
+    "err": null,
+    "cu": 300,
+    "txBytes": 255,
+    "accounts": 4,
+    "feeLamports": 5000
+  },
+  {
+    "label": "nonpure_short_open_plus_sl_one_tx",
+    "sig": "4yLkMAQAtijCKNrh1c3cGgLYXam8czB1Hnk2J82Nr9KoMhCoP8riqzKhEdtJVat7AypauwtAe65dHWKNpxamDcCW",
+    "ok": true,
+    "err": null,
+    "cu": 274569,
+    "txBytes": 1041,
+    "accounts": 23,
+    "feeLamports": 6400
+  },
+  {
+    "label": "nonpure_cancel_increase",
+    "sig": "5by7jEFSp1P8qrFadAMSZEAaZNhk5z1w9yLtHTGSAKr8KVndq9Mxv9gxmsR3dQpVBRuVkRzsf9mphwNZ8D5Fry83",
+    "ok": true,
+    "err": null,
+    "cu": 94915,
+    "txBytes": 785,
+    "accounts": 20,
+    "feeLamports": 5000
+  },
+  {
+    "label": "nonpure_cancel_stop_loss",
+    "sig": "DBJTowzx2GynmmGy9QSw6LmwLS58B978V5cA6rMNtT7zuyi9XBLHhQL2XQaoD2mBXnZMdHFTJ99eewhyxXPtvju",
+    "ok": true,
+    "err": null,
+    "cu": 83635,
+    "txBytes": 785,
+    "accounts": 20,
+    "feeLamports": 5000
+  }
+]
