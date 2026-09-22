@@ -15,7 +15,8 @@ Contents
   8. Numbers (verified 2026-09-22 ~21:00 UTC)
   9. Risk register
  10. Open questions
- 11. Stack decision round (in progress)
+ 11. Stack decision + execution feasibility (verified)
+ 12. Build log
 
 
 1. DECISIONS SO FAR (planning, 2026-09-21)
@@ -426,12 +427,105 @@ What the vault MUST do (design rules):
 - Compute budget + account count for one "open" (ATAs + prepare_position + create_order_v2) from a
   vault program: one tx or two? (Flipper splits into PrepareGmtradeLeg + ExecuteTradeWithCollateral.)
 - Minimum collateral / position size per market -> smallest workable funded account.
-- Can a funded account's equity be computed onchain (gmsol-model) or only offchain?
+- Can a funded account's equity be computed onchain (gms11. STACK DECISION + EXECUTION FEASIBILITY (verified 2026-09-22 21:30-22:45 UTC)
+------------------------------------------------------------------------------
+Raw data: research/2026-09-23-round2-stack.json. Working spike: research/spike-vault/ (run logs in logs/).
+Verdict: FEASIBLE on Solana mainnet. Authoritative build spec: docs/ARCHITECTURE.md.
+
+Local spike (Anchor 0.31.1 + gmsol-programs 0.10.0, mainnet GMTrade binary + cloned accounts, solana-test-validator):
+- A data-less vault PDA opened a real GMTrade MarketIncrease order and a StopLossDecrease via CPI and cancelled both;
+  every USDC came back. header.owner = receiver = rent_receiver = PDA. Stranger authority rejected (ConstraintHasOne).
+- CU: open 144.6k (inner CreateOrderV2 57k), stop-loss 86.6k, open+SL in one tx 229-275k, cancel 79-95k.
+  Sizes: open 774 B / 18 accounts; open+SL 945 B (pure market), 1,041 B (WSOL-USDC); fits one legacy tx, no ALT.
+  (Integrators with more accounts use ALTs; a wrapper with extra accounts may need a v0 tx + ALT.)
+- props_vault.so ~369 KB -> ~1.87 SOL program-data rent.
+- SOL per owner PDA (measured): user account 0.0045 (permanent), position account 0.026 (pure) / 0.028 (two-token)
+  not refunded by cancel (returned when the position account closes), each pending order ~0.0184 + 0.002 per escrow
+  (refunded on cancel), keeper fill fee <= 0.0003. Budget ~0.05 SOL for 1 position + 1 order; ~0.1 with TP/SL;
+  cap open orders per account; add a reclaim path. (Flipper's 0.25 SOL/position is over-funded and returned at close.)
+- Pitfalls: Homebrew cargo shadows rustup (put ~/.cargo/bin first); anchor-spl 0.31.1 idl-build needs token_2022
+  feature; gmsol_programs utils::Account::try_from has a 23 KB stack frame (linker warns; never call onchain);
+  GMTrade order escrows must be ATAs created BEFORE create_order_v2 (payer = owner PDA); local validators need
+  Store.last_restarted_slot (byte 4800) patched to 0 (StoreOutdated 6039 otherwise; mainnet matches); don't round-trip
+  account JSON through JS (rentEpoch u64::MAX); building GMTrade HEAD needs platform-tools v1.43 (v1.52 binary crashes).
+  cargo-build-sbf may remove a stale rustup link '1.79.0-sbpf-solana-v1.43' when relinking (seen once).
+- Not provable locally: keeper execution, liquidation, TP/SL triggering (need ORDER_KEEPER + Chainlink reports).
+  Emulate with written Position accounts (LiteSVM) and confirm with a tiny real mainnet run.
+
+GMTrade numbers that shape the rules:
+- Min position $1 / $1 collateral on every checked market. Round trip on $10k: SOL ~$3.8, BTC ~$3.0, ETH ~$3.1-3.4,
+  gold ~$2.2 (0.02-0.04%). Borrow/funding: only the heavier side pays and it flips within hours -> model live.
+- Scheduled config rewrites create penalty windows (XAU ~21:00-22:00 UTC, EUR from ~21:00 UTC): negative impact factor
+  2e-14 -> 3e-9; a $10k heavy-side open cost ~2.3% (uncapped). Always set acceptable_price.
+- Collateral = loss budget works: a $500-collateral $10k position liquidates after ~4.7-4.9% adverse move, returns
+  ~$3-20; a 10% gap loses exactly $500, never more (no debt). Isolated margin: one position can be liquidated while the
+  account is above its floor.
+- Closed markets: stocks liquidate at 10% factor at the close (4 NVDA positions at 23-36x liquidated 13 s after
+  20:00 UTC on 09-22, one in profit); keep <= 8x through a close or close before ~19:55 UTC. Decreases and size
+  increases refused while closed; collateral-only top-ups allowed. Gold is NOT flagged closed in its daily break.
+- Non-pure BTC/ETH markets (WBTC/WETH-USDC) can't take $5k and charge ~75% APR funding -> pure USDC-USDC only.
+- Onchain equity: ~23k CU/position is cheap but GMTrade PriceFeed accounts are stale (ETH 7 h, XAU 1.7 h). Pyth push
+  accounts: shard 1 (seed 0x0100) ~10-25 s fresh for SOL/BTC/ETH/XAU/XAG/EUR/AAPL (undocumented pusher); shard 0
+  sponsored ~55 s. Decision: equity offchain; onchain settlement uses realized USDC only.
+- Fill confirmation: GMTrade's keeper closes the Order account in the same tx it executes -> confirm via Position
+  account before/after; a missing Order = finished (filled or cancelled). Keeper latency measured 2-5 s.
+- Fee discounts exist (10% referred users + GT VIP); unknown whether a PDA owner can use a referral via CPI.
+- Excess negative impact (> 0.5% cap) goes to a claimable account needing an ORDER_KEEPER delegate approval.
+
+Offchain:
+- Practice/evaluation engine can reproduce GMTrade fills with GMTrade's own model: exact on EUR; ~0.2 bps on others when
+  using the market state from just before the fill. Fill at first tick >= submit + ~2 s.
+- Released SDK liquidation price is WRONG on all 93 markets (uses min_collateral_factor; HEAD uses
+  min_collateral_factor_for_liquidation): SOL 150x long 0.238% vs correct 0.438%. Use the HEAD fix.
+- npm @gmsol-labs/gmsol-sdk "latest" 0.10.0 is empty; 0.9.0 works but lacks a fix; build 0.10.0 WASM from the repo
+  Cargo.lock with wasm-bindgen 0.2.100 (fresh deps fail).
+- Keeper WS wss://keeper-prod-api.gmtrade.xyz/graphql-ws ~1 tick/s per open token, pauses 3-8 s about every 30 s
+  (11.5 s seen) -> stale alert >= 20 s; ~5% of HTTP polls go backwards in ts -> keep a monotonic filter.
+  Subsquid lags ~35 s. All undocumented, no SLA.
+- Chainlink Data Streams fallback: $150/feed/month; all 68 markets ~ $10k/month -> only for a few markets.
+- RPC: Helius Free (hackathon) -> Developer $49 (ws + 30 s re-read); LaserStream replay only on $499. Helius Sender
+  for landing. Railway: one replica + Postgres advisory lock; Railway volume backups have no PITR -> add off-platform
+  dumps (or Neon Launch ~$19/mo) for the fee/payout ledger. Vercel Hobby is non-commercial -> Pro when fees are charged.
+  TradingView Advanced Charts not free for paid products -> Lightweight Charts with attribution.
+- Alerts: Sentry free, Better Stack heartbeat, Telegram, PagerDuty free.
+
+Wallets, payments, abuse, geo:
+- Privy: free to 499 MAU, $299/2,499, $499/9,999; >50K signatures/month -> $2,000 base + $0.01/signature. Solana
+  sponsorship rewrites fee payer + blockhash (can't sponsor co-signed txs). Chosen for v1: Wallet Standard wallet adapter
+  (no vendor, no key, no MAU pricing); Privy/Dynamic + own fee payer is the upgrade path for email onboarding.
+- Checkout = USDC transfer_checked inside the program (atomic, no chargebacks). Card onramps: skip for launch.
+- Hedge farming nets 0.8L - 2F per cycle; the real controls are one funded account per PERSON (key the lock on a
+  person-level hash, e.g. keyed hash of document country+type+number, and refuse on the vendor's duplicate flag),
+  payout review for opposite/correlated positions, terms. A fee >= 0.4L rule is commercially unrealistic.
+- KYC: Persona startup (500 free/month for a year, application), Sumsub Compliance $1.85/check ($299 min) for
+  sanctions/PEP; Civic Pass is dead (July 2025). Solana Attestation Service can mirror "verified" (~0.0017 SOL/record).
+- GMTrade terms (updated 2026-01-26): no US persons, no restricted territories, no VPN circumvention, no acting for others
+  (individuals, via the site), no coordinated trading; 10.1(c) mentions smart contracts/scripts. Block US + sanctioned
+  regions at the edge; the binding gate is the KYC country (the program is permissionless).
+- Every live competitor keeps funded accounts simulated; Hyro plans real LP-backed capital (not live). Get counsel
+  before a company launch; keep the vault team-funded (no outside deposits) for now.
+
+Venues:
+- GMTrade stays v1 (proven PDA ownership, 68 markets incl. FX/stocks/metals, oracle-priced isolated positions).
+- Jupiter Perps: ~$939M, SOL/ETH/BTC only, PDA owners live (376 owners), 45 s request expiry -> phase 2 for size.
+- Phoenix Perps (EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih): onchain order book, USDC, 87 markets (no FX), official
+  CPI SDK + LiteSVM fixtures, PDA authorities (6,618), built-in trade-but-not-withdraw role, same-tx fills, 24/7 equities
+  within bounds; but Phoenix API must co-sign account registration, no US, leverage <= 40x, self-dealing risk on books.
+  Serious phase-2 candidate for stocks/commodities and closed-session gaps.
+- Drift was drained 2026-04-01 (~$285-296M, social-engineered 2/5 security council); relaunch "Velocity" is USDT-only
+  beta. Flash moved to a MagicBlock rollup (V1 drained, $98K exploit July 2026). Adrena in maintenance. All rejected.
+- Venue-neutral money layer: one owner PDA per trader, a venue byte per position; second venue = one more CPI branch.
+
+Prior art: Flipper (FQ8Uuy..., 5pUXJ95...) is the closest live system (async fill confirm/timeout, stop-out, settlement
+close, Pyth shard-1 checks), small (~62 tx/day, $1k caps, unaudited). Imperial routes GMTrade/Phoenix/Flash via a
+passthrough program. Hyro: CEX execution, onchain results only. Carrot: simulated + partial copy on Hyperliquid.
+Patterns adopted: per-trader owner PDA, pending/confirm/timeout order flow, keeper stop-outs, first-loss collateral cap,
+bounded keeper list, trader-signed trades, init gated to upgrade authority, store pinned at init, Squads at handover,
+rules pinned at purchase, payout only when flat from realized USDC, equity from records not raw balances.
 
 
-11. STACK DECISION ROUND (in progress, 2026-09-23)
---------------------------------------------------
-Running: local build of a test vault (Anchor 0.31 + gmsol-programs 0.10.0) placing and cancelling a
-GMTrade order on a local mainnet clone; GMTrade integration numbers; offchain infra pricing; wallets,
-payments and abuse controls; alternative Solana venues (Jupiter, Drift, Flash, Adrena); prior art
-(Flipper, Imperial, Hyro, Carrot). Results and the final stack will be appended here.
+12. BUILD LOG
+-------------
+2026-09-23 Interface imported into app/ (source: /Users/pp/Props.trade-interface, 22 screens, synthetic data only).
+           Spec docs/ARCHITECTURE.md + contract packages/shared/src/api.ts written. Build round 1 started
+           (program + tests + sdk; GMTrade data + WASM model + marketdata; server core; app foundation).
