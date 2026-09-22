@@ -1,0 +1,15 @@
+node_modules/
+dist/
+target/
+.anchor/
+test-ledger/
+*.log
+.env
+.env.*
+!.env.example
+keys/
+*-keypair.json
+.DS_Store
+.vercel/
+coverage/
+tests/program/fixtures/*.so
