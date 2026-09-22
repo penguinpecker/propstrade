@@ -1,0 +1,437 @@
+PROPS.TRADE — LEARNINGS
+=======================
+Onchain prop firm on Solana. Traders pass a challenge, then trade REAL perps on GMTrade with capital
+from a Props.trade vault program. Status: idea + research stage, no code yet (2026-09-23).
+Times are UTC. Raw research with full evidence (file:line, tx signatures, commands): research/*.json
+
+Contents
+  1. Decisions so far (planning, 2026-09-21)
+  2. Hackathon copy: what was drafted and what must change
+  3. Execution on GMTrade: can the vault own trades? (verified)
+  4. Markets on GMTrade (verified)
+  5. Trust / "decentralised" claims (verified)
+  6. Tech stack facts (verified)
+  7. Domain, name, competitors (verified)
+  8. Numbers (verified 2026-09-22 ~21:00 UTC)
+  9. Risk register
+ 10. Open questions
+ 11. Stack decision round (in progress)
+
+
+1. DECISIONS SO FAR (planning, 2026-09-21)
+------------------------------------------
+- Chain: Solana. Money: USDC only. Venue: GMTrade (gmtrade.xyz) = the GMX-DAO-authorised Solana
+  deployment of GMX v2 (ex GMX-Solana). Code: github.com/gmsol-labs/gmx-solana. Name: Props.trade.
+- Model:
+    challenge fee (USDC) -> simulated challenge (offchain) -> funded account.
+    Funded account = real GMTrade positions opened from a Props vault program. Trader can trade,
+    cannot withdraw capital. Drawdown limit (e.g. 5%) closes/caps losses.
+    GMTrade's GM pools are the counterparty and pay winners. Props' vault only posts margin.
+    Profit split 80% trader / 20% vault.
+- Why the vault must NOT take the opposite side of trades: in a prop firm the trader only pays a
+  fee. If the vault also hedges, trader losses net to zero and trader wins become pure cost
+  (it just moves the loss from "when they lose" to "when they win", plus double fees).
+- Vault P&L = challenge fees + 20% of funded profits - drawdown losses.
+  Worked example from planning: $10k account, 5% drawdown -> $500 real risk. If ~1 in 10 pass at a
+  $100 fee, that is ~$1k of fees per funded trader. (Pass rate is an industry guess, not data.)
+- Start lean: seed the vault with own money ($5k-$20k), no outside LP deposits at first
+  (outside deposits start to look like a pooled investment), small accounts first, cap funded slots
+  to vault size, waitlist the rest. Open LP deposits only after real pass/payout data.
+- Checkout can be chain-agnostic later; the margin vault must be on the venue's chain (Solana).
+- Build the vault so the venue is swappable (GMTrade first; a deeper venue later for big accounts).
+- Things that kill a prop firm: hedge farming (two accounts, long + short), gaming simulated fills
+  (latency arbitrage vs the price feed), real winners draining the vault, oversized positions,
+  regulation (geo-block the US).
+- Idea from planning: GMX's Builder Program pays integrators a cut. On GMTrade, builder fees are
+  NOT live (unreleased code, cap 0) and would be circular for Props anyway (see section 6).
+
+
+2. HACKATHON COPY: WHAT WAS DRAFTED AND WHAT MUST CHANGE
+--------------------------------------------------------
+Tagline drafted:
+  "Prop trading you can verify. Get funded and trade crypto, gold, forex and stocks, all onchain."
+  !! "Prop trading you can verify" is Propr's exact slogan (propr.xyz footer: "Prop Trading You Can
+  Verify.", section heading "Crypto Prop Trading You Can Verify"). Our X account @propstrade
+  (created 2026-09-21 08:30 UTC) opens its bio with it. CHANGE BOTH.
+
+Description drafted (492 chars):
+  "Prop firms have a trust problem. Many run fake accounts, hide their books, deny payouts, and some
+  vanish with traders' money. Props.trade is a decentralised prop firm on Solana. Pass a challenge,
+  trade real perps on GMTrade with capital from an onchain USDC vault. It's all public, so anyone
+  can check every trade and payout. The smart contract handles risk limits and pays you, so we
+  can't hold anything back. Profits get paid from GMTrade's pool. We're the first to build this on
+  GM vaults."
+
+Q1 drafted ("What are you building, and who is it for?", 899 chars):
+  "We're building Props.trade, a prop firm that runs onchain on Solana. Traders pay a small fee in
+  USDC and take a challenge on a simulated account. If they pass, they get a funded account and
+  trade real perps on GMTrade using capital from our onchain vault. They keep 80% of the profit and
+  the vault keeps 20%.
+  The smart contract holds the money and sets the limits. A trader can open and close positions but
+  can't withdraw the capital, and if they hit the max loss the position gets closed automatically.
+  Profits are paid by GMTrade's liquidity pool, so payouts don't depend on us. Every trade and
+  payout is public.
+  It's for traders who are good but don't have much capital. Right now their main option is prop
+  firms that run fake accounts, hide how they work, and sometimes don't pay. Later it's also for
+  people who want to put money in the vault and earn from challenge fees and the profit share."
+
+Q2 drafted ("Why build this, and why now?", 967 chars):
+  "Prop trading is a big business but traders keep getting burned. Most firms never put your trades
+  on a real market. They pay winners out of the fees from people who failed, so when too many
+  people win, payouts get delayed, rules change, or the firm shuts down. A few big ones did exactly
+  that in the last couple of years. Nobody can check what these firms are doing because it's all
+  private.
+  Putting it onchain fixes most of that, and the pieces to do it only showed up recently. GMTrade
+  brought GMX-style pools to Solana in 2025 and now lists 60+ markets, including gold, oil and
+  forex, so a funded trader can trade more than just crypto. Solana is fast and cheap enough to
+  close a losing position on time. Onchain prop firms have started to appear over the last year,
+  mostly on Hyperliquid or for memecoins. As far as we know, nobody has built one on GM vaults,
+  where the pool pays the winners and the contract handles payouts. We want to be the first to
+  ship that."
+
+Q3 drafted ("What technologies?") — superseded, see corrected version below.
+
+Required edits (from the verified research):
+- "decentralised prop firm" -> drop. Honest + strong: "a prop firm where the money is onchain".
+  Reason: challenge runs on our servers; GMTrade is run by a 4-of-7 multisig; only 8
+  GMTrade-approved addresses can execute any trade or liquidation.
+- "The smart contract handles risk limits and pays you" -> "Our Solana program holds the capital.
+  You can open and close trades, but you can't take the capital out." Only claim "we can't change
+  the rules" once our program's upgrade key is locked or behind a timelock multisig.
+- "the position gets closed automatically" -> depends on design:
+    collateral = remaining loss budget: "Each trade only gets what you're still allowed to lose,
+      so one bad trade can't cost more than that."
+    bot-based stop: "If you hit the max loss, our risk bot closes your trades. In a fast market the
+      close can land past the limit."
+- "Profits are paid by GMTrade's liquidity pool" -> true for trade PnL, but the 80% payout is sent
+  by OUR program. Fine to keep "the pool pays winning trades".
+- "the first to build this on GM vaults" -> keep "as far as we know". No prop firm on GMTrade was
+  found, but Hyro Protocol is building a similar Solana vault prop protocol (mainnet target Oct 2026).
+- "60+ markets" is correct (68 live). Do NOT write "50+", "75", "S&P 500 index", or "24/7 stocks".
+- "Solana is fast and cheap enough to close a losing position on time" -> not true for stocks/forex
+  outside market hours (closed markets refuse close orders). Soften or drop.
+- "Onchain prop firms ... mostly on Hyperliquid or for memecoins" -> add that Propr's funded
+  accounts are 100% simulated by its own terms; that is our real difference (our funded trades ARE
+  the real positions).
+- Q3 corrected:
+  "Solana, USDC, an Anchor (Rust) vault program that trades on GMTrade through their gmsol-programs
+  crate, GMTrade GM pools as the counterparty, Chainlink Data Streams prices (the same feed GMTrade
+  uses), a TypeScript risk bot on an always-on server, Next.js on Vercel, Supabase, Privy embedded
+  Solana wallets." (+ the AI-tools line as in the form)
+
+
+3. EXECUTION ON GMTRADE: CAN THE VAULT OWN TRADES? — YES (verified in code + live mainnet)
+-----------------------------------------------------------------------------------------
+Key addresses (mainnet):
+  store program   Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo  (upgradeable)
+  store           CTDLvGGXnoxvqLyTpGzdGLg9pD6JexKxKXSV8tqqo8bN
+  token map       7cEiyyEB2VGMtnKLb7Ro7SsJKYZVBZjpS8ihBD8jR938
+  upgrade auth    6qp7veALWas5rxXJRQXUEbffRtDyhB8koxenBpS51SrA = Squads vault 0 of multisig
+                  CxnEVpQQcYa628TywzHGXeJ2jdVmbU51rnERat9xunP1 (4-of-7, 600 s timelock)
+  USDC            EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v (standard Circle mint)
+  SOL/USD[USDC-USDC] market  CJg17Dn4xgUyEW3gKSSyteNw7LhP1o9pzm9eLtvuNjkQ
+  BTC  4tM9cPqNpEYmstNdJMCc6rwdq42939w1SRFYoqMsqPQF   ETH  6EnZdBzJsGznoh857PuhbrnrzWYGtZe6xMZiQjAPyFGT
+  XAU  59uFARJWg7B8wcEuXzvkafiT4DuKemdNCN5bshDbwun9
+Mainnet binary = OtterSec-verified build of commit 665fe60a (release v0.10.0, deployed 2026-08-12
+07:34 UTC). Repo HEAD (0.11.0) is unreleased: adds builder fees + a new rule that an increase
+order's final_output_token must equal the collateral mint. BUILD AGAINST v0.10.0, pass USDC as
+final_output_token for increases anyway (forward-compatible).
+
+Why it works:
+- Every owner check is "owner signed" + "matches stored owner". No wallet-only / curve / CPI /
+  stack-height / instructions-sysvar checks on owners (order.rs:43-44, :189-193, :1008-1009;
+  user.rs:17-18; utils/internal/action.rs:154-170). create_order_v2 has no role gate (lib.rs:2216).
+- A program address signs via invoke_signed, so a vault PDA can be the owner.
+
+Proof it already happens on mainnet:
+- GMTrade's own treasury program: PDA owner = receiver, CPIs prepare_user + create_order_v2 +
+  close_order_v2 (programs/treasury/src/instructions/swap.rs:62-68, :142-172, :188-223, :298-339).
+  Swaps only (no leveraged positions). tx 4VdjtGys437CKs3KDipRuMaPzNSwu4Xsr5v3UdaJqbyqnL3ZXxshNKj1ydhVvvvb4GX9nwPA2k8SkmZFmDwu4Yra
+- Flipper (perps aggregator; programs FQ8UuyJF2Zpz5L8Q5jULfFyNrvRFytf4qTXq7K8BrXuj and
+  5pUXJ95rfcdQ17FpVqreMgfeCXiwHyVXf7vfYh4Rp9YG, authority 2ayLCAikHC5Ns93ozpnER9dapdYDFNfVvqsuZS353pcY)
+  opens and closes leveraged GMTrade positions for PDA owners. Live 2026-09-22:
+  create tx 26TLAR15eXFGBrGgSAtptjg22aCqugAYjNs82AUAeYHhnAc9W7gMgqC6ooWHH1KcdC2U9CuGEVuiuFE2HgXFyZLX
+  keeper fill 4 s later tx 2aqVfmoW536EPG9y1frw2BBdnWCV841HYHphCMxfZtBJ41bocox9VmTZebA7kjrhjnwyX4hcXJQQSi9fJ9d2SEKh
+  (+0.867668 USDC and +0.015211609 wSOL paid to accounts only the PDA controls).
+  Its binary shows the lifecycle we need: confirm_async_fill, timeout_async_fill (with rollback),
+  execute_stop_out / confirm_stop_out_close, force_cancel_orders, emergency_close_sub_position,
+  close_gmtrade_settlement_order, circuit breaker, its own trigger-order crank.
+- Imperial (router; program pASsDHVUtgG5uomQ29SVMv1sQxon4Gi6g5bJV7KKqZ8, source path
+  imperial_passthrough/src/gmtrade/...) did the same April-June 2026 (e.g. tx
+  33P3AKTARNK6f2WubHrTHxogd3Jb5WpMEPg9TSELAkDRhqe3KcxL1fqtaux2tBZEEYtf55ebwG1s7ujJb9dJv3Dh), also sets
+  GMTrade referrer by CPI. No GMTrade CPIs in its latest ~950 txs (not current).
+- 797 of 33,616 GMTrade user accounts are owned by program addresses (getProgramAccounts on
+  UserHeader, owner at offset 24).
+- Audits (10 reports, Sherlock + Zenith, in github.com/gmsol-labs/gmx-solana-audits): no finding
+  restricts program-owned orders.
+
+What the vault MUST do (design rules):
+- ONE signer PDA per funded account, e.g. seeds ["funded", vault_state, account_id]. It must hold NO
+  data and be system-owned (GMTrade uses the owner as rent payer and as 'from' of system
+  transfers; a data-carrying account cannot be 'from'). Keep vault state in a separate PDA.
+  Keep its lamports at >= 890,880 (zero-data rent floor) or exactly 0.
+  Positions are keyed by (store, owner, market, collateral token, side): one shared owner would
+  MERGE different traders' positions.
+- Fund each signer PDA with ~0.05 SOL. Costs (approx): user account 0.0045 SOL once; position
+  ~0.0056 rent + ~0.0225 liquidation reserve; each order ~0.0245 up front (order rent 0.0181,
+  escrow token accounts, execution fee >= 0.0003). Most is refunded when orders/positions close.
+- Pre-create the PDA's token accounts (USDC + every allowed market's long/short token). If the
+  receiver lacks an ATA for an output token, the keeper's close is SKIPPED and funds + ~0.02 SOL rent
+  sit in escrow until the owner closes the order. 30 such stuck program-owned orders exist on
+  mainnet today (wSOL dust). Build a "close finished order" step (Flipper and Imperial both did).
+- owner = receiver = the signer PDA, set by OUR program. Never pass trader-chosen receiver, source
+  account, referrer or builder-fee accounts through. Receiver is fixed at creation and cannot be
+  changed later (states/order.rs:740-773). Refunds, liquidation/ADL proceeds and claimable rebates
+  always go to the OWNER.
+- Nobody but the owner can move the owner's funds out through GMTrade. Keeper/unsigned-owner
+  instructions only pay TO the owner. So "trader can't withdraw" depends only on our program.
+- Payouts are not always USDC: profit on longs arrives in the market's long token (e.g. wSOL)
+  unless decrease_position_swap_type = PnlTokenToCollateralToken and that swap succeeds; with
+  should_unwrap_native_token it arrives as plain SOL. For liquidations the KEEPER picks that flag.
+  The sweep step must handle USDC, wSOL and SOL. (Pure USDC-USDC markets pay in USDC.)
+- Two-step orders: our program creates; only ORDER_KEEPER (8 addresses; 7 plain keys + 1 multisig
+  vault) executes, observed 4-8 s later, execute + close in one tx. Market orders expire 30 min
+  after last update (store request_expiration = 1800 s; lazy: applied when a keeper retries).
+  min_position_age_for_manual_close = 0.
+- NO fill notifications: GMTrade callbacks only accept an allowlist = GMTrade's competition program
+  2AxuNr6euZPKQbTwNsLBjzFTZFAevA85F4PW9m9Dv8pc (programs/callback/src/interface.rs:9-26; locked down
+  after Zenith Jun-2025 C-1). We need our own sync step (read Position account + token balances)
+  run by a bot / permissionless crank.
+- Native TP/SL exist (LimitDecrease, StopLossDecrease), executed by GMTrade keepers, updatable,
+  no expiry. BUT: not guaranteed ("trigger orders are market orders and are not guaranteed to
+  execute at the trigger price" - docs); cancelled (not "frozen" - the docs are wrong for Solana)
+  on non-temporary failure; cannot close an insolvent position (user decreases run with
+  is_insolvent_close_allowed = false); stay open after a manual close and would hit the trader's
+  NEXT position in that market/side; keepers can cancel them once the position account is gone.
+  No program-owned native trigger order exists on mainnet today to copy.
+- CLOSED MARKETS (big): while a market is flagged Closed (stocks/ETFs outside US hours, forex at
+  weekends), GMTrade refuses to CREATE or EXECUTE decrease orders (states/market/mod.rs:337-344;
+  allow_closed only for collateral-only MarketIncrease, order.rs:361-367). Only liquidation runs,
+  and prices are frozen at the close, so the real risk is the gap at reopen. Neither our bot nor a
+  stop-loss can close stock/forex trades outside hours.
+- HARD LOSS CAP that needs no bot: GMTrade positions carry no debt to the owner, so a position can
+  never lose more than the collateral posted. If the vault posts only the trader's REMAINING loss
+  budget as collateral, the vault can never lose more than that, even if a close is late, the
+  market is closed, or liquidation is slow/disabled. Liquidation only ends the position.
+  Trade-offs: "$10k account" becomes buying power on leverage (e.g. $500 collateral on $10k = 20x);
+  account-wide limits across several positions still need our own accounting.
+- Anchor side: vault uses crate gmsol-programs = 0.10.0 (declare_program!(gmsol_store); CPI via
+  gmsol_programs::gmsol_store::cpi), anchor-lang 0.31.x ONLY (^0.31.1 excludes 0.32 and 1.x).
+  GMTrade builds with Anchor 0.31.1 / Solana 2.1.21. Keep the vault instruction top-level or 1 CPI
+  deep (GMTrade self-CPIs for events + ATA program -> depth).
+- Devnet: store program + same store address + 34 markets exist, but GMTrade's devnet USDC
+  (UsdsBvJe6sPKBzZhEo9bDDVg6d3695gJonz9eVSAUpP) has no mint authority, no devnet order fills were
+  seen recently, and the devnet build differs (test-only feature). Plan real tests on mainnet with
+  a few dollars.
+- GMTrade can change the rules: program upgradeable by the 4-of-7 multisig with a 10-minute delay;
+  FEATURE_KEEPER can disable order creation/execution/liquidation per kind.
+
+
+4. MARKETS ON GMTRADE (verified 3 ways: onchain, official UI, GMTrade keeper API)
+-------------------------------------------------------------------------------
+- 68 distinct markets from 93 enabled pools (101 Market accounts; 8 old pools disabled, all their
+  assets still live via other pools). Snapshot 2026-09-22 ~21:00 UTC.
+- 43 crypto: AAVE ADA APE ARB ASTER AVAX BCH BNB BOME BONK BTC DOGE DOT ENA ETH FARTCOIN GMX HYPE
+  LINK LIT LTC MELANIA NEAR ONDO PEPE PUMP SHIB SOL SUI TAO TON TRUMP TRX UNI VVV WIF WLD WLFI XLM XMR
+  XPL XRP ZEC
+- 8 forex: EUR/USD GBP/USD AUD/USD NZD/USD USD/JPY USD/CAD USD/CHF USD/MXN
+- 6 commodities: gold XAU, silver XAG, platinum XPT, palladium XPD, copper XCU, WTI oil
+- 11 "Stock" tab: 9 US stocks AAPL AMZN GOOGL META MSFT MSTR NVDA TSLA SPCX (SpaceX, Nasdaq since
+  2026-06-12, GMTrade since 2026-06-15) + SPY (S&P 500 ETF) + QQQ (Nasdaq-100 ETF).
+  No direct index market; no "indices" category. No Brent or natural gas market yet (price configs
+  for BZ and NATGAS exist, no market; CRCL config disabled).
+- Where other counts came from: "60+" = press 2026-09-01; "50+" = QuickNode guide (old);
+  "75" = DefiLlama pool count (drops pools < $10k TVL); "86" = a KuCoin post (don't use).
+- Hours: stocks/ETFs US regular hours only (flip Closed at 20:00 UTC in daylight time); forex closes
+  weekends (reopened Sun ~21:00 UTC); all 6 commodities 24/7 (XPT since ~09-13, XPD ~09-04);
+  crypto 24/7. Sept-1 press wrongly says gold/silver/oil "launched" then (they launched Jan/Apr 2026;
+  24/7 trading is what started).
+- Max leverage: BTC 500x, SOL 250x, ETH ~294x, XAU/XAG 200x, WTI 100x, XCU/XPT/XPD 50x, stocks 50x,
+  forex 268x-500x.
+- Collateral: 55 assets have a pure USDC-USDC pool (all stocks, forex, commodities) -> payouts in
+  USDC. 13 crypto assets only have mixed pools (WSOL-USDC etc.) -> long profits in the other token.
+- Thin: ~18 of 68 markets had < $50k available liquidity; ARB, XLM, ASTER, HYPE had $0 24h volume.
+  Usable markets for funded accounts are far fewer than 68.
+- Index tokens for RWAs are placeholder SPL mints; prices from Chainlink Data Streams. No real
+  shares/metal.
+- Safe copy: "Trade 60+ markets: crypto, gold and oil, forex and US stocks."
+
+
+5. TRUST / "DECENTRALISED" CLAIMS (verified)
+-------------------------------------------
+- Don't say "decentralised". Honest, strong: "funded accounts are real GMTrade positions held by
+  our Solana program; every funded trade and payout is public."
+- The strongest safety claim is structural: "the vault can never lose more than it puts into a
+  trade" (collateral = loss budget design). Say "designed to" until built and tested.
+- "Trader can't take the capital out" holds only if our program pins every order's receiver to the
+  vault-controlled PDA and never exposes withdrawals. "We can't change the rules" holds only once our
+  upgrade key is locked or behind a timelocked multisig.
+- Anyone-can-call "check and close" instruction in the vault is possible (verifiable rule), but
+  GMTrade's keepers still execute closes and the price input is the weak point: GMTrade's onchain
+  PriceFeed accounts are stale (updated only when orders execute; SOL 109-398 s old, ETH ~6 h);
+  Chainlink Data Streams onchain verification needs an allowlisted, paid account; Pyth sponsored
+  feeds move only every 55 s or 0.5% (at 10x that is 5% of equity = the whole limit).
+- The challenge stays offchain. Best you can do: publish every challenge trade + commit a hash
+  onchain (tamper-evident, not proof of fair fills). Small real-money challenges would send losers'
+  money to GMTrade's pool, which breaks the fee model.
+- Competitors (primary sources, 2026-09-23):
+    Propr (propr.xyz; Hyperliquid + Polymarket + Lighter; SwissBorg-backed; Propr Limited, BVI,
+      unregulated): "All Propr accounts, including 'Funded Accounts', are 100% simulated." It copies
+      ("A-books") some signals at its discretion. Still says "All execution is transparent and
+      verifiable on-chain". Hiring a "Software Engineer - Solana" (Rust/Anchor).
+    Carrot Funding: challenge params in an NFT, A/B booking, 50% of fees to a rethink.finance vault,
+      Hyperliquid execution, "24h Guaranteed Payout", integrating Oasis ROFL. Deploys some real capital.
+    Hyro Protocol (HyroTrader): Solana vault prop protocol, rules fixed at vault creation, devnet,
+      Ackee audit, mainnet target Oct 2026 (their claims). Closest to our design.
+- Wording to avoid: decentralised, guaranteed, yield, investment, "we pay you". Others call payouts
+  "rewards" and say most traders fail. Outside LP deposits = pooled-investment risk. (Not legal
+  advice.) CFTC v. My Forex Funds was dismissed over the regulator's own misconduct; it does not
+  make the model legal.
+- Hedge risk we cannot see onchain: a funded trader hedging on another venue gets a free option paid
+  by the vault; losing on purpose into a thin pool they LP in. Rules + market allowlist + identity.
+
+
+6. TECH STACK FACTS (verified)
+-----------------------------
+- Prices: GMTrade prices EVERY trade with Chainlink Data Streams (all 78 token configs
+  expected_provider = 0; 3,783 PriceFeed accounts all Chainlink). Program rejects other providers
+  (states/oracle/mod.rs:395-398). Operators (MARKET_KEEPER) can switch any of 34 tokens that carry a
+  Pyth id to Pyth at any time (lib.rs:962-975); docs call Pyth/Switchboard backups. The sim must read
+  each token's expected_provider, not hard-code Chainlink.
+- Getting the same prices offchain:
+    Chainlink Data Streams: paid, no free tier, from $150/month per feed, self-serve at
+      app.chain.link (HMAC credentials).
+    GMTrade keeper API https://keeper-prod-api.gmtrade.xyz/graphql (query KeeperTokenPrices ->
+      min/max/ts/isOpen; units 10^(20-decimals)): free, no key, CORS *, undocumented, no terms/limits.
+      Matched onchain Chainlink values in spot checks. Ask GMTrade before relying on it.
+    Candles: https://price-candle-mainnet.gmtrade.xyz/graphql
+    Market info: https://market-info-mainnet-prod.gmtrade.xyz/api/v2/solana/pairs
+      ("liquidity_in_usd" there = spare open-interest capacity, NOT deposits; don't quote it).
+    Stats: https://r2.gmtrade.xyz/common/stats-new.json
+    Indexer (subsquid): https://gmx-solana-sqd.squids.live/gmx-solana-base:prod/api/graphql
+    Pyth Hermes requires an API key since 2026-08-26 (free trial, then paid).
+- SDKs: Rust crates gmsol-programs / gmsol-store / gmsol-sdk / gmsol-model 0.10.0 (2026-08-12).
+  npm @gmsol-labs/gmsol-sdk: "latest" 0.10.0 is EMPTY (package.json only); 0.9.0 (2026-02-11) is a
+  working WASM build (create_orders/close_orders/update_orders, Position, PositionModel, Simulator,
+  MarketGraph; loads in Node 22) but predates PnL-math fixes in 0.9.1/0.10.0. Better: build the WASM
+  package from the v0.10.0 tag (wasm-pack --features js) or use @coral-xyz/anchor 0.31.1 + the
+  v0.10.0 IDL. GMTrade's own website runs the WASM SDK in production.
+- Anchor: vault must be Anchor 0.31.x (gmsol-programs needs ^0.31.1; Anchor 0.32 and 1.x are
+  incompatible; 1.x sits on Solana 3.x crates). Hand-writing CPI from the IDL avoids the pin but is
+  error-prone.
+- License: GMTrade code is Business Source License 1.1 (non-production use; change date earliest
+  2027-12-01 -> GPL-2.0-or-later). Source-available, not open source. Additional-use grant is
+  circular. Fine for a hackathon; ask GMTrade before a real-money launch that links their crates.
+- Risk bot needs an always-on host (Vercel functions max 300-800 s; cron at best once/minute).
+- Privy supports Solana embedded wallets (@privy-io/react-auth 3.45.0, /solana, @solana/kit peer);
+  Anchor 0.31 TS client uses @solana/web3.js 1.x -> some glue. GMTrade's own app uses the standard
+  Solana wallet adapter.
+- Paid RPC is effectively required for a real bot (public RPC rate limits).
+- Builder fees: only in unreleased HEAD (set/settle/claim builder fee, cap MaxBuilderFeeFactor = 0
+  until raised); not in the deployed program or the 0.10.0 crate. For Props they would pay vault
+  money to itself. Only built-in integrator reward today: referral (referees get 10% off order
+  fees; referrers earn GT). Imperial sets referrers by CPI.
+
+
+7. DOMAIN, NAME, COMPETITORS (verified 2026-09-23)
+-------------------------------------------------
+- props.trade: UNREGISTERED (Vercel, RDAP rdap.nic.trade 404, whois.nic.trade "No Data Found",
+  Porkbun). Price $385 first year / $55 renewal at Vercel; Porkbun $382.61 / $55.11. It is a
+  REGISTRY premium (tier "Tier_2_TRADE_350": $350 registry fee, $50/yr renew), not a Vercel markup.
+  The renewal is premium too.
+- Alternatives (Vercel first-year/renewal): getprops.trade $27/$27, useprops.trade $27/$27,
+  tradeprops.trade $27/$27, props.trading $19.99/$19.99, props.finance $11.99/$55, props.fund
+  $15.99/$59, props.capital $9.99/$59, propstrade.xyz $1.99/$13, propstrade.io $30/$46,
+  trade-props.com / propsfi.com $11.25. Porkbun is far cheaper for ordinary .trade ($4.61 / $5.64)
+  and .trading ($16.99).
+- Taken: props.com, props.xyz (2018), props.io (for sale on Sedo $100,000), props.fun (2026-03),
+  props.markets (parked, expires 2026-10-17), props.exchange (2026-02), propstrade.com (GoDaddy
+  parked), propsfirm.com, props.fi (Finnish film-props company).
+- X: @propstrade is OURS (created 2026-09-21 08:30 UTC). @props = Props Labs (8.4k). @tradeprops,
+  @getprops, @Propsfi taken/dormant. @props_trade / @propsdottrade looked free via a mirror.
+- US trademarks: no live "PROPS" mark in class 36 (finance); no PROPS TRADE / PROPSTRADE marks.
+  Live PROPS marks cover media software, an employee app, luggage, supplements, real-estate training.
+  Betting marks: MAD PROPS, PROPS OPTIMIZER. Propr has no US mark. (Quick search, not clearance;
+  EU/UK not searched.)
+- Other conflicts: propr.trade is a Cloudflare-flagged phishing domain (registered 2026-06-17);
+  $PROPS ticker used by Propbase (~$3M mcap) and a pump.fun "prop firm" memecoin (Trench Capital);
+  "props" reads as sports betting in the US; old YouNow "Props" token issuer (Open Props Inc.)
+  ceased operations 2021-12-16, its PROPS finance mark abandoned.
+- Propr detail: 15.7k X followers, joined 2025-02, $1.5M seed at $17.5M FDV (press), accounts
+  $10k-$100k (site says up to $300k), 80% split paid in USDC, 140-200+ markets. Token not launched.
+- Verdict: "Props" is OK for the hackathon; renaming is still free (nothing bought, account has no
+  posts). Don't pay $385 unless keeping the brand. Don't pitch "on Solana" as the difference
+  (Propr is hiring Solana engineers); pitch "our funded trades are the real positions, in a public
+  onchain vault".
+
+
+8. NUMBERS (verified 2026-09-22 ~21:00 UTC)
+------------------------------------------
+                               21 Sep planning     now
+  GMTrade TVL                  $29.64M             $28.22M (about -11% in 30 d; DefiLlama now "GMX Solana")
+  open interest (DefiLlama)    $116.74M            ~$95M (halved basis); $200.9M long+short; 82% in 8 FX pairs
+  30-day volume                $25B                $24.0B (23 Aug-21 Sep); prior 30 d $17.7B
+  30-day fees                  $3.48M              $3.34M (~0.014% of volume)
+  avg LP APY                   ~72%                mean 62%, median 47%; SOL 262% XAU 254% ETH 217% BTC 199% (fee-only, self-reported)
+  Jupiter Perps TVL            $790.78M            $823.1M
+- Real LP money that pays winners (Market.state.pools.primary, pure pools split 50/50 long/short):
+  SOL $1,171,565   BTC $829,617   ETH $872,751   XAU $1,800,208.
+  DefiLlama per-pool TVL (pool + trader collateral): SOL $1.29M, BTC $0.87M, ETH $0.89M, XAU $1.98M.
+- GLV auto-vaults own 40% of SOL, 83% of BTC, 82% of ETH, 67% of XAU pool tokens and can shift every
+  60 s -> pool depth can change within a day. XAU pool -22% since 09-19, BTC -19% since 09-20.
+- Risk config: OI reserve factor SOL 4.5x, BTC 5.5x, ETH 4.5x, XAU 10x of each side's pool; max OI
+  $25M/side ($50M XAU); winners' PnL cap 90% of side pool (SOL $527k, BTC $373k, ETH $393k,
+  XAU $810k per side, shared by all traders); ADL at 0.85. Spare capacity: SOL ~$1.5M each way,
+  BTC $1.18M/$1.25M, ETH ~$1.1M, XAU $3.4M long / only $0.30M short.
+- Gold is the MOST crowded pool: OI ~7.9x pool money; a ~9% move could push winners to ADL/cap.
+- Price impact negligible at prop sizes ($100k order ~0.01%).
+- Sizing (1-2% of LP pool per position, a self-imposed rule): SOL $12-23k, BTC $8-17k,
+  ETH $9-17k, XAU $18-36k position size (halve if applied to the paying half-pool). The planning
+  "$25-50k max on majors" was 2-3x too high for SOL/BTC/ETH (~1.4x for gold).
+  Launch: $5k accounts, or $10k at low leverage; per-position caps ~$15k SOL, $10k BTC/ETH;
+  all funded accounts together <= ~10% of a pool's LP money per market; re-check pools DAILY.
+- Activity: weekday volume on Mon 09-21 was 58-83% below earlier Mondays; daily traders down
+  55-85% (also on weekends). Cause not found. GT points still minting (56.98M GT, ~$2.79 fees per
+  GT, no season end). Galaxy Research (2026-08-10): GMTrade's ~$90B volume jump was "consistent with
+  points and airdrop farming on FX-pair perps rather than real demand".
+- LP reality: SOL and BTC GM tokens lost value over the week to 09-22 (-1.07%, -0.10%) despite the
+  headline fee APYs.
+
+
+9. RISK REGISTER
+----------------
+  [high]   Closed markets refuse closes (stocks/forex) -> weekend/overnight gaps break the drawdown.
+           Fix: collateral = remaining loss budget, and/or fund only 24/7 markets (crypto+commodities).
+  [high]   Thin venue: real pools $0.8-1.8M, GLVs move liquidity daily, volume falling, points-driven.
+           Fix: small accounts, per-market exposure caps, daily pool checks, venue-swappable design.
+  [high]   Name/slogan clash with Propr (live, funded, same model, one letter off, moving to Solana).
+  [high]   Hedge farming / multi-accounting / external hedging. Fix: identity, rules, market allowlist,
+           cross-account opposite-position detection.
+  [medium] No fill callbacks -> must build sync, timeouts, stuck-order cleanup (copy Flipper's flow).
+  [medium] Stop-loss orders not guaranteed; stale TP/SL hit the next position -> cancel leftovers.
+  [medium] Non-USDC payouts (wSOL/SOL) -> pre-create ATAs, sweep and swap.
+  [medium] GMTrade upgradeable by 4-of-7 multisig (10-min delay); can disable features; BUSL license.
+  [medium] Price data for the sim: Chainlink paid; GMTrade keeper API free but undocumented.
+  [medium] Regulation of real-money funded accounts and any outside LP deposits (not legal advice).
+  [low]    Devnet unusable for full tests (no mintable USDC) -> test on mainnet with a few dollars.
+
+
+10. OPEN QUESTIONS
+------------------
+- GMTrade user terms not yet read verbatim (US persons are barred from perps per a summary;
+  anything on programmatic/pooled use?).
+- Will GMTrade allow third-party use of its keeper price API? Rate limits?
+- Does BUSL "non-production use" cover a mainnet vault that links gmsol-programs? Ask GMTrade.
+- Why did GMTrade volume/traders drop after 2026-09-19? GT season end / TGE date?
+- Compute budget + account count for one "open" (ATAs + prepare_position + create_order_v2) from a
+  vault program: one tx or two? (Flipper splits into PrepareGmtradeLeg + ExecuteTradeWithCollateral.)
+- Minimum collateral / position size per market -> smallest workable funded account.
+- Can a funded account's equity be computed onchain (gmsol-model) or only offchain?
+
+
+11. STACK DECISION ROUND (in progress, 2026-09-23)
+--------------------------------------------------
+Running: local build of a test vault (Anchor 0.31 + gmsol-programs 0.10.0) placing and cancelling a
+GMTrade order on a local mainnet clone; GMTrade integration numbers; offchain infra pricing; wallets,
+payments and abuse controls; alternative Solana venues (Jupiter, Drift, Flash, Adrena); prior art
+(Flipper, Imperial, Hyro, Carrot). Results and the final stack will be appended here.
