@@ -161,6 +161,7 @@ export function buildCatalog({ feed, pairs, opens24h, limits, onError, now }: Ca
       ...(props.unavailableReason ? { unavailableReason: props.unavailableReason } : {}),
       price: tick?.mid ?? null,
       priceDecimals: displayDecimals(symbol, category, token.meta.precision),
+      indexTokenDecimals: token.meta.decimals,
       change24h: mid !== null && open24h ? ((mid - open24h) / open24h) * 100 : null,
       volume24h: volumes.length ? volumes.reduce((a, v) => a + v, 0).toFixed(2) : null,
       openInterestLong: s ? usdString(s.openInterestForLong) : null,

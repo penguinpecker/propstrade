@@ -279,9 +279,9 @@ The four main sections use a quiet horizontal row, with purple text and a two-pi
 
 ### Account context and charts
 
-The account strip combines account identity, stage, equity and remaining loss allowance in a ruled band. Account and market switching preserve the surrounding workspace. The chart uses the active theme on its canvas and refits after width changes, while normal pan and zoom remain user-controlled. A paused-data overlay makes stale preview state visible.
+The account strip combines account identity, stage, equity and remaining loss allowance in a ruled band. Account and market switching preserve the surrounding workspace. The chart uses the active theme on its canvas and refits after width changes, while normal pan and zoom remain user-controlled. A paused-data overlay makes stale or unavailable prices visible.
 
-All balances, prices, rules and protocol interactions in this build are simulated. The persistent preview labeling is part of the interface's truthful presentation, not evidence of live trading or onchain execution.
+Every figure comes from the Props.trade API, GMTrade or the chain; nothing synthetic renders. Practice and evaluation accounts are labelled Simulated; funded orders, purchases and payouts are wallet-signed transactions. Loading, empty, stale, unavailable, pending and failed states replace a value rather than invent one.
 
 ## Do's and Don'ts
 
@@ -291,7 +291,7 @@ All balances, prices, rules and protocol interactions in this build are simulate
 - **Do** preserve Manrope, tabular figures and the selected #31 symbol.
 - **Do** use tone and fine rules to organize persistent working surfaces.
 - **Do** pair semantic color with explicit text or signed values.
-- **Do** preserve visible focus, reduced motion and the preview context.
+- **Do** preserve visible focus, reduced motion and the Simulated / Funded context.
 
 ### Don'ts:
 
@@ -299,5 +299,5 @@ All balances, prices, rules and protocol interactions in this build are simulate
 - **Don't** add grain, gloss, gradients or decorative shadows to the working panels.
 - **Don't** carry a light-only hard-coded surface or label into dark mode.
 - **Don't** use purple as a substitute for gain, loss or pending status.
-- **Don't** imply that sample records or account figures prove a live integration.
+- **Don't** show a figure the data does not provide; show its unavailable state instead.
 

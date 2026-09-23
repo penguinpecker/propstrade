@@ -45,6 +45,7 @@ export interface Market {
   unavailableReason?: string;  // plain-English reason when !tradable
   price: Decimal | null;       // mid of GMTrade min/max, null when unavailable
   priceDecimals: number;       // display decimals; prices may carry more
+  indexTokenDecimals: number;  // GMTrade unit prices (trigger/acceptable) are USD × 10^(20 − this)
   change24h: number | null;    // percent
   volume24h: Decimal | null;   // USD, summed over all pools of the asset
   openInterestLong: Decimal | null;       // preferred pool (as are funding, borrow and capacity below)

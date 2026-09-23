@@ -51,5 +51,10 @@ export function bundledLicenses() {
 
 export default defineConfig(({ command, mode }) => {
   if (command === 'build') checkBuildEnv(loadEnv(mode, appDir, 'VITE_'));
-  return { plugins: [bundledLicenses()] };
+  return {
+    plugins: [bundledLicenses()],
+    // The Solana wallet stack loads as its own chunk next to the app code; @props/sdk (Anchor, spl-token) is loaded
+    // only when a transaction is built (src/lib/transactions.ts).
+    build: { rolldownOptions: { output: { codeSplitting: { groups: [{ name: 'wallet', test: /[\\/]node_modules[\\/](@solana|@wallet-standard|@noble|bs58|base-x|buffer|superstruct|rpc-websockets|jayson|bn\.js|borsh|eventemitter3)[\\/]/, tags: ['$initial'] }] } } } },
+  };
 });
