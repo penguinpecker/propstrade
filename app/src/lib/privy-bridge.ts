@@ -1,4 +1,6 @@
 // Loaded lazily by privy.ts. Everything that imports the Privy SDK lives here.
+// Privy's Solana signing reads the Node `Buffer` global when it signs ("Buffer is not defined" left sign-in hanging).
+import './buffer';
 import { createElement, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PrivyProvider, useLoginWithOAuth, usePrivy, type PrivyClientConfig } from '@privy-io/react-auth';
 import { useCreateWallet, useSignMessage, useSignTransaction, useWallets } from '@privy-io/react-auth/solana';
@@ -22,6 +24,13 @@ const config: PrivyClientConfig = {
 };
 
 // Declines arrive as Privy errors; wallet-adapter errors carry them to describeError, which words them for the trader.
+// A request Privy never answers (an error thrown inside its own callbacks) fails here instead of hanging the app.
+const SIGN_TIMEOUT_MS = 60_000;
+const answered = <T>(request: Promise<T>, what: string): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`Your Google wallet did not answer the ${what} request. Try again.`)), SIGN_TIMEOUT_MS); });
+  return Promise.race([request, late]).finally(() => clearTimeout(timer));
+};
 const asWalletError = (Kind: typeof WalletSignMessageError) => (error: unknown): never => {
   throw new Kind(error instanceof Error ? error.message : String(error), error);
 };
@@ -83,12 +92,12 @@ function Bridge({ onChange }: { onChange(wallet: PrivyWallet): void }) {
     async signMessage(message) {
       const { wallet, signMessage } = latest.current;
       if (!wallet) throw new WalletNotConnectedError();
-      return (await signMessage({ message, wallet }).catch(asWalletError(WalletSignMessageError))).signature;
+      return (await answered(signMessage({ message, wallet }), 'sign-in').catch(asWalletError(WalletSignMessageError))).signature;
     },
     async signTransaction(tx) {
       const { wallet, signTransaction } = latest.current;
       if (!wallet) throw new WalletNotConnectedError();
-      const { signedTransaction } = await signTransaction({ transaction: tx.serialize(), wallet, chain: 'solana:mainnet' })
+      const { signedTransaction } = await answered(signTransaction({ transaction: tx.serialize(), wallet, chain: 'solana:mainnet' }), 'signature')
         .catch(asWalletError(WalletSignTransactionError));
       return VersionedTransaction.deserialize(signedTransaction);
     },
