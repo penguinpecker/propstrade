@@ -1,6 +1,6 @@
 // Loaded lazily by privy.ts. Everything that imports the Privy SDK lives here.
 import { createElement, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { PrivyProvider, useLogin, usePrivy, type PrivyClientConfig } from '@privy-io/react-auth';
+import { PrivyProvider, useLoginWithOAuth, usePrivy, type PrivyClientConfig } from '@privy-io/react-auth';
 import { useCreateWallet, useSignMessage, useSignTransaction, useWallets } from '@privy-io/react-auth/solana';
 import { createSolanaRpc, createSolanaRpcSubscriptions } from '@solana/kit';
 import { WalletNotConnectedError, WalletSignMessageError, WalletSignTransactionError } from '@solana/wallet-adapter-base';
@@ -10,11 +10,14 @@ import type { PrivyWallet } from './privy';
 
 const rpcUrl = env.rpcUrl!; // main.jsx refuses to start without one
 const config: PrivyClientConfig = {
-  loginMethods: ['email'],
+  loginMethods: ['google'],
+  // The wallet signs without Privy's confirmation window: the trader's click in the app is the approval. Privy creates
+  // the wallet right after the first Google sign-in.
+  embeddedWallets: { showWalletUIs: false, solana: { createOnLogin: 'users-without-wallets' } },
   // The symbol has no intrinsic size (viewBox only), so the logo is an element with one.
   appearance: { theme: 'dark', accentColor: '#b28aff', logo: createElement('img', { src: '/brand/symbol.svg', alt: 'Props.trade', width: 58, height: 45 }), walletChainType: 'solana-only' },
-  // Privy simulates each request before showing it to the trader, reading through the app's RPC. It only opens the websocket to
-  // follow a transaction it sent itself, and this app sends its own, so that URL is never used.
+  // Privy reads through the app's RPC. It only opens the websocket to follow a transaction it sent itself, and this app
+  // sends its own, so that URL is never used.
   solana: { rpcs: { 'solana:mainnet': { rpc: createSolanaRpc(rpcUrl), rpcSubscriptions: createSolanaRpcSubscriptions(rpcUrl.replace(/^http/, 'ws')) } } },
 };
 
@@ -48,32 +51,34 @@ function Bridge({ onChange }: { onChange(wallet: PrivyWallet): void }) {
       finish(error);
     }
   }, [createWallet, finish]);
-  const { login } = useLogin({
+  // Google sign-in leaves the page and comes back to it: this hook finishes the sign-in on return (then `flow` is empty,
+  // and Privy creates the wallet itself).
+  const { initOAuth } = useLoginWithOAuth({
     onComplete: ({ user }) => {
-      if (!flow.current) return; // also called on page load for a trader who is already signed in to Privy
+      if (!flow.current) return;
       void ensureWallet(user.linkedAccounts.some(a => a.type === 'wallet' && a.chainType === 'solana' && a.walletClientType === 'privy'));
     },
-    onError: code => finish(code === 'exited_auth_flow' ? undefined : new Error(`Email sign-in did not complete (${code}). Try again.`)),
+    onError: code => finish(code === 'exited_auth_flow' ? undefined : new Error(`Google sign-in did not complete (${code}). Try again.`)),
   });
 
   // Privy's hooks return new functions on every render: the wallet handed to the app changes only with its address or
   // pending state (anything more re-renders the app into a loop), and reads the latest of everything else when called.
-  const latest = useRef({ ready, authenticated, wallet, login, logout, ensureWallet, signMessage, signTransaction });
-  latest.current = { ready, authenticated, wallet, login, logout, ensureWallet, signMessage, signTransaction };
+  const latest = useRef({ ready, authenticated, wallet, initOAuth, logout, ensureWallet, signMessage, signTransaction });
+  latest.current = { ready, authenticated, wallet, initOAuth, logout, ensureWallet, signMessage, signTransaction };
   const address = wallet?.address ?? null;
 
   const value = useMemo<PrivyWallet>(() => ({
     address,
     pending,
     open: () => new Promise<void>((resolve, reject) => {
-      const { ready, authenticated, wallet, login, ensureWallet } = latest.current;
+      const { ready, authenticated, wallet, initOAuth, ensureWallet } = latest.current;
       if (wallet) return resolve();
-      if (!ready) return reject(new Error('Email sign-in is still loading. Try again in a moment.'));
+      if (!ready) return reject(new Error('Google sign-in is still loading. Try again in a moment.'));
       flow.current?.resolve();
       flow.current = { resolve, reject };
       setPending(true);
       if (authenticated) void ensureWallet(false); // signed in to Privy, but the wallet was never created
-      else login();
+      else initOAuth({ provider: 'google' }).catch(finish); // leaves the page on success
     }),
     async signMessage(message) {
       const { wallet, signMessage } = latest.current;
@@ -88,7 +93,7 @@ function Bridge({ onChange }: { onChange(wallet: PrivyWallet): void }) {
       return VersionedTransaction.deserialize(signedTransaction);
     },
     disconnect: () => latest.current.logout(),
-  }), [address, pending]);
+  }), [address, finish, pending]);
 
   useEffect(() => { onChange(value); }, [onChange, value]);
   return null;

@@ -36,7 +36,7 @@ export interface TxResult<T> { prepared: T; signature: string; execution?: Execu
  */
 export function useWalletTransaction() {
   const { connection } = useConnection();
-  const { publicKey, signTransaction } = useSigner();
+  const { publicKey, signTransaction, autoSigns } = useSigner();
   const programId = useConfig().data?.programId;
   const [state, setState] = useState<TxState>(IDLE);
   const sending = useRef(false);
@@ -67,7 +67,8 @@ export function useWalletTransaction() {
         const c = chain = await loadChain();
         c.assertProgram(programId);
         prepared = await prepare(c, connection, publicKey);
-        show({ phase: 'signing', message: null, signature: null });
+        // A wallet that signs without a prompt has no approval step to show.
+        if (!autoSigns) show({ phase: 'signing', message: null, signature: null });
         signature = await c.signAndSend(connection, prepared, signTransaction).catch((error: unknown) => {
           if (error instanceof c.TxError && error.uncertain && error.signature) return error.signature; // it may still land: follow it
           throw error;
@@ -95,7 +96,7 @@ export function useWalletTransaction() {
       show({ phase: 'failed', message: known ? known.message : describeError(error), signature: signature ?? known?.signature ?? null });
       return null;
     }
-  }, [connection, programId, publicKey, signTransaction]);
+  }, [autoSigns, connection, programId, publicKey, signTransaction]);
 
   /** Clears the shown state; runs still in flight keep going but no longer update it. */
   const reset = useCallback(() => { if (sending.current) return; latest.current += 1; setState(IDLE); }, []);

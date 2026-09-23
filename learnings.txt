@@ -782,18 +782,30 @@ Deployment learnings:
   cookies); TRUST_PROXY_HOPS=2 behind it. SSE survives the external rewrite.
 - The browser-side RPC is the server's allowlisted relay POST /v1/rpc, so no provider key ships in the bundle.
 
-Privy email wallet (2026-09-23, branch r5-privy):
-- What it is: an "Email wallet" option in the existing wallet list. Privy's email code -> the app creates
-  the trader's Privy embedded Solana wallet -> the same Sign-In With Solana as any wallet. Browser wallets still connect
-  through @solana/wallet-adapter (unchanged, so every e2e still drives the Wallet Standard test wallet). One wallet at a
-  time: choosing either kind disconnects the other.
+Privy Google wallet (2026-09-23; email first, switched to Google the same day):
+- What it is: a "Google" option in the existing wallet list. Google sign-in (Privy, redirect: the page leaves for Google
+  and comes back) -> Privy creates the trader's embedded Solana wallet (createOnLogin users-without-wallets) -> the app
+  signs in with the same Sign-In With Solana as any wallet, automatically. Browser wallets still connect through
+  @solana/wallet-adapter (unchanged, so every e2e still drives the Wallet Standard test wallet). One wallet at a time.
+- "We sign on their behalf" = showWalletUIs: false (client config overrides the dashboard's enforce_wallet_uis): the
+  Google wallet signs sign-in messages and transactions with no Privy window; the trader's click in the app is the
+  approval. Signing still happens in the trader's own browser session (their Privy login); the server holds no key and
+  no Privy secret. Server-side signing while the trader is offline would need Privy server signers (app secret on
+  the server + an authorization key + a policy limited to our program): NOT built.
+- Auto sign-in: once per address per page load when the Google wallet has no session (after the redirect, and after
+  a session expires); a failure shows a notice instead of looping. The connect page remembers the pending choice in
+  localStorage because the redirect reloads the page.
+- Copy that promised a wallet approval step now says the app signs for Google users (wallet dialog, settings
+  permissions, checkout footnote); the transaction flow skips its "Approve in your wallet" phase for them.
+- Google wallets start empty: they need USDC for fees and SOL for network fees/rent. Fee sponsorship: NOT built.
 - No secret anywhere: the Privy app secret only serves Privy's management API. The app needs just the public app id
   (VITE_PRIVY_APP_ID, stored "sensitive" on Vercel like the rest); the server never talks to Privy, because SIWS already
   proves the wallet. The secret was pasted in chat once: rotate it in the Privy dashboard.
-- Privy app config (public GET auth.privy.io/api/v1/apps/<id>): email login on, captcha off, allowed_domains EMPTY
-  (= any site may use the id; proven by running it from 127.0.0.1), solana create_on_login "off",
-  enforce_wallet_uis true (every signature shows Privy's confirmation). The app calls createWallet() itself after the
-  email code when the user has no Solana embedded wallet, so the dashboard's create_on_login does not matter.
+- Privy app config (public GET auth.privy.io/api/v1/apps/<id>), as the owner set it on 2026-09-23: Google login on,
+  email off, captcha off, allowed_domains https://propstrade.vercel.app (+ www); solana create_on_login
+  users-without-wallets. An empty allowed_domains lets any site use the id; with the list set, Google sign-in from
+  any other origin fails at POST /api/v1/oauth/init with 403 "Origin not allowed" (seen from 127.0.0.1): local Google
+  testing needs 127.0.0.1 added in the dashboard.
 - @privy-io/react-auth 3.45.0: the /solana entry statically imports @solana/kit, so kit (+ @solana-program/system,
   token, memo) must be installed. Its sign screens simulate through the configured solana.rpcs (pointed at the app's
   relay; methods used: simulateTransaction, getFeeForMessage, getAccountInfo, getBalance, getLatestBlockhash — all
@@ -807,6 +819,6 @@ Privy email wallet (2026-09-23, branch r5-privy):
 - Build: @phosphor-icons/webcomponents (a Privy dependency) bundles lit inside its dist with no package.json; the
   licenses plugin now credits the enclosing package (lit's BSD-3 text is present from the installed lit packages).
 - Verified: tsc, app unit 106/106 (new CSP test mutation-checked), e2e + review e2e + SIWS review (no Privy), full-stack
-  journey 10/10 PASS, and in Chrome under the production CSP: Email wallet shows, Privy window opens with the logo,
-  closing it resets the app with no notice. NOT verified: an actual email code -> wallet -> sign-in (needs a real inbox
-  or a Privy test account).
+  journey 10/10 PASS, and in Chrome under the production CSP: the Google option shows with its mark; from 127.0.0.1 the
+  click reaches Privy's oauth/init and the refusal is shown, options re-enabled. NOT verified: a real Google sign-in ->
+  wallet -> automatic sign-in -> silent transaction (needs a Google account on the live domain).
