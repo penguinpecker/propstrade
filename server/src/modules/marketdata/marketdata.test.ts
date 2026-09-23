@@ -159,7 +159,10 @@ test('live: routes, stream events and service API without a deployed program', {
     assert.match(by.AAVE!.unavailableReason!, /no USDC-only pool/);
     assert.deepEqual([by.BTC!.maxLeverage, by.EUR!.maxLeverage, by.XAU!.maxLeverage, by.NVDA!.maxLeverage], [25, 20, 15, 8]);
     assert.deepEqual([by.BTC!.closedMaxLeverage, by.EUR!.closedMaxLeverage, by.NVDA!.closedMaxLeverage], [null, 8, 8]);
-    assert.ok(rows.filter((r) => r.change24h !== null && r.volume24h !== null).length >= rows.length * 0.8, '24h change and volume');
+    // 24h change and volume arrive after ready, whenever GMTrade's market-info and candle services answer.
+    const withStats = async () => (await get<Market[]>('/v1/markets')).body.filter((r) => r.change24h !== null && r.volume24h !== null).length;
+    for (let waited = 0; (await withStats()) < rows.length * 0.8 && waited < 60_000; waited += 1_000) await new Promise((r) => setTimeout(r, 1_000));
+    assert.ok((await withStats()) >= rows.length * 0.8, '24h change and volume');
 
     assert.equal((await get<Market>('/v1/markets/btc')).body.symbol, 'BTC');
     const missing = await get<ApiError>('/v1/markets/NOPE');

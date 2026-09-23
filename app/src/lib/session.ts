@@ -8,7 +8,7 @@ import type { AppConfig, Me } from '@props/shared';
 import { SIWS_STATEMENT, buildSiwsMessage } from '@props/shared/siws';
 import { api, ApiRequestError } from './api';
 import { env, type Cluster } from './env';
-import { PRIVY_ICON, PRIVY_WALLET, usePrivyWallet } from './privy';
+import { GOOGLE_ONLY, PRIVY_ICON, PRIVY_WALLET, usePrivyWallet } from './privy';
 import { clearUserData, keys, meOptions, useConfig, useMe } from './queries';
 
 export type SessionStatus = 'no-wallet' | 'disconnected' | 'connecting' | 'needs-sign-in' | 'signing' | 'signed-in';
@@ -40,7 +40,7 @@ export interface WalletOption { name: WalletName; icon: string; privy?: boolean 
 
 export interface Session {
   status: SessionStatus;
-  /** Detected wallets (Wallet Standard auto-detection plus the mobile adapter on phones), then the Google wallet. */
+  /** Google alone in a build with Privy; otherwise detected wallets (Wallet Standard plus the mobile adapter on phones). */
   wallets: WalletOption[];
   walletName: WalletName | null;
   /** Address of the connected wallet account (may differ from `me.wallet` until signed in). */
@@ -175,7 +175,7 @@ export function useSession(): Session {
       select(name);
       return;
     }
-    if (!privy) return;
+    if (!privy) { setNotice('Google sign-in is still loading. Try again in a moment.'); return; }
     if (adapter) void disconnectWallet().catch(() => undefined);
     privy.open().catch(error => setNotice(describeError(error))); // then the Google wallet signs in on its own (below)
   }, [adapter, address, disconnectWallet, me, privy, select, signIn]);
@@ -225,10 +225,10 @@ export function useSession(): Session {
     previousMe.current = me;
   }, [me]);
 
-  const options = wallets
+  // Google only when this build has Privy (shown while its SDK loads); browser wallets otherwise.
+  const options: WalletOption[] = GOOGLE_ONLY ? [{ name: PRIVY_WALLET as WalletName, icon: PRIVY_ICON, privy: true }] : wallets
     .filter(w => w.readyState === WalletReadyState.Installed || w.readyState === WalletReadyState.Loadable)
-    .map((w): WalletOption => ({ name: w.adapter.name, icon: w.adapter.icon }))
-    .concat(privy ? [{ name: PRIVY_WALLET as WalletName, icon: PRIVY_ICON, privy: true }] : []);
+    .map(w => ({ name: w.adapter.name, icon: w.adapter.icon }));
 
   const status: SessionStatus = signing ? 'signing'
     : connecting || privy?.pending ? 'connecting'
