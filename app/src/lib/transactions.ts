@@ -1,10 +1,10 @@
 import { useCallback, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { useConnection, useWallet } from '@solana/wallet-adapter-react';
+import { useConnection } from '@solana/wallet-adapter-react';
 import type { Connection, PublicKey } from '@solana/web3.js';
 import type { Execution, OrderFollow, Prepared } from './chain';
 import { useConfig } from './queries';
-import { describeError } from './session';
+import { describeError, useSigner } from './session';
 
 /** The transaction module (Anchor, spl-token, the program IDL) loads on first use. */
 export const loadChain = () => import('./chain');
@@ -36,7 +36,7 @@ export interface TxResult<T> { prepared: T; signature: string; execution?: Execu
  */
 export function useWalletTransaction() {
   const { connection } = useConnection();
-  const { publicKey, signTransaction } = useWallet();
+  const { publicKey, signTransaction } = useSigner();
   const programId = useConfig().data?.programId;
   const [state, setState] = useState<TxState>(IDLE);
   const sending = useRef(false);
@@ -108,7 +108,7 @@ export function useWalletTransaction() {
  */
 export function useTxCost(key: readonly unknown[], prepare: (chain: Chain, connection: Connection, trader: PublicKey) => Promise<Prepared>, enabled = true) {
   const { connection } = useConnection();
-  const { publicKey } = useWallet();
+  const { publicKey } = useSigner();
   return useQuery({
     queryKey: ['tx-cost', publicKey?.toBase58(), ...key],
     queryFn: async () => {

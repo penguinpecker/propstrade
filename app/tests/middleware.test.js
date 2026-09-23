@@ -57,6 +57,14 @@ describe('content security policy', () => {
       .toEqual(['http://127.0.0.1:4000', 'ws://127.0.0.1:4001', 'ws://localhost:*', 'http://localhost']);
   });
 
+  it('allows Privy only when the build has a Privy app id: its frame and its API, nothing else', () => {
+    const privy = directives(contentSecurityPolicy({ ...MAINNET, VITE_PRIVY_APP_ID: 'app123' }));
+    expect(privy['frame-src']).toEqual(['https://auth.privy.io']);
+    expect(privy['connect-src']).toEqual(['https://api.props.test', 'https://mainnet.helius-rpc.com', 'wss://mainnet.helius-rpc.com', 'https://auth.privy.io', 'ws://localhost:*', 'http://localhost']);
+    expect({ ...privy, 'frame-src': undefined, 'connect-src': undefined }).toEqual({ ...directives(contentSecurityPolicy(MAINNET)), 'frame-src': undefined, 'connect-src': undefined });
+    expect(directives(contentSecurityPolicy(MAINNET))['frame-src']).toBeUndefined();
+  });
+
   it('allows the inline scripts of index.html by hash, and no others', () => {
     const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
     const inline = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(([, code]) => `'sha256-${createHash('sha256').update(code).digest('base64')}'`);

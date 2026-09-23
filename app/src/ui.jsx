@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { ArrowUpRight, ArrowRight, ArrowLeft, Bitcoin, CircleDollarSign, Cpu, Euro, PoundSterling, Smartphone, Check, X, ChevronDown, Info, ExternalLink, TriangleAlert, Wallet } from 'lucide-react';
+import { ArrowUpRight, ArrowRight, ArrowLeft, Bitcoin, CircleDollarSign, Cpu, Euro, PoundSterling, Smartphone, Check, X, ChevronDown, Info, ExternalLink, TriangleAlert, Wallet, Mail } from 'lucide-react';
 import { bpsPercent, date, freshnessLabel, usd, utcTime } from './data.js';
 
 export function Brand({ compact = false }) {
@@ -82,5 +82,5 @@ export function SessionNotice({ session, children }) {
 export function WalletOptions({ session, onChoose }) {
   if (!session.wallets.length) return <Notice tone="amber">No Solana wallet was found in this browser. Install <InlineLink href="https://phantom.com/download" external>Phantom</InlineLink>, <InlineLink href="https://solflare.com/download" external>Solflare</InlineLink> or <InlineLink href="https://backpack.app/download" external>Backpack</InlineLink>, then reload this page.</Notice>;
   const waiting = session.status === 'connecting' || session.status === 'signing';
-  return session.wallets.map(w => { const busy = waiting && session.walletName === w.name; return <button key={w.name} className="wallet-option" onClick={() => onChoose(w.name)} disabled={waiting}><span className="wallet-option-icon">{w.icon ? <img src={w.icon} alt="" width="23" height="23" /> : <Wallet size={23} />}</span><span><strong>{w.name}</strong><small>{busy ? (session.status === 'signing' ? 'Approve the sign-in message in your wallet' : 'Approve the connection in your wallet') : 'Detected in this browser'}</small></span>{busy ? <span className="spinner" /> : <ArrowRight size={17} />}</button>; });
+  return session.wallets.map(w => { const busy = waiting && session.walletName === w.name; return <button key={w.name} className="wallet-option" onClick={() => onChoose(w.name)} disabled={waiting}><span className="wallet-option-icon">{w.email ? <Mail size={23} /> : w.icon ? <img src={w.icon} alt="" width="23" height="23" /> : <Wallet size={23} />}</span><span><strong>{w.name}</strong><small>{busy ? (session.status === 'signing' ? 'Approve the sign-in message in your wallet' : w.email ? 'Continue in the Privy window' : 'Approve the connection in your wallet') : w.email ? 'Sign in with an email code. No extension needed' : 'Detected in this browser'}</small></span>{busy ? <span className="spinner" /> : <ArrowRight size={17} />}</button>; });
 }

@@ -30,7 +30,8 @@ const LOCALNET_RPC = 'http://127.0.0.1:8899';
  * @solana/web3.js derives from it (ws/wss, port + 1 when the URL names a port). On Android, the Solana Mobile Wallet Adapter
  * that @solana/wallet-adapter-react registers connects to the wallet app through a localhost websocket (after one
  * `fetch('http://localhost')` for Chrome's local-network permission) and styles its dialog with inline <style> and a
- * Google font; wallet icons are data: URIs. Everything else is the app's own files.
+ * Google font; wallet icons are data: URIs. With VITE_PRIVY_APP_ID set, Privy's email sign-in and wallet run in a frame
+ * from auth.privy.io, which the app also calls. Everything else is the app's own files.
  */
 export function contentSecurityPolicy(env) {
   const api = new URL(env.VITE_API_URL).origin;
@@ -38,13 +39,15 @@ export function contentSecurityPolicy(env) {
   const rpc = new URL(rpcUrl);
   const port = /^[a-z]+:\/\/(?:\[[^\]]+\]|[^/?#:]+):(\d+)/i.exec(rpcUrl)?.[1];
   const ws = `${rpc.protocol === 'https:' ? 'wss:' : 'ws:'}//${rpc.hostname}${port ? `:${Number(port) + 1}` : ''}`;
+  const privy = env.VITE_PRIVY_APP_ID ? ['https://auth.privy.io'] : [];
   return [
     "default-src 'none'",
     `script-src 'self' ${THEME_SCRIPT}`,
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com",
     "img-src 'self' data:",
-    `connect-src ${[...new Set([api, rpc.origin, ws])].join(' ')} ws://localhost:* http://localhost`,
+    `connect-src ${[...new Set([api, rpc.origin, ws, ...privy])].join(' ')} ws://localhost:* http://localhost`,
+    ...privy.length ? [`frame-src ${privy.join(' ')}`] : [],
     "base-uri 'none'",
     "form-action 'none'",
     "frame-ancestors 'none'",

@@ -4,6 +4,7 @@ import { QueryClientProvider } from '@tanstack/react-query';
 import { ConnectionProvider, WalletProvider } from '@solana/wallet-adapter-react';
 import App from './App.jsx';
 import { env } from './lib/env';
+import { WithPrivy } from './lib/privy';
 import { createQueryClient } from './lib/queries';
 import './styles.css';
 import './themes.css';
@@ -20,7 +21,9 @@ createRoot(document.getElementById('root')).render(
   <QueryClientProvider client={queryClient}>
     <ConnectionProvider endpoint={env.rpcUrl} config={{ commitment: 'confirmed' }}>
       <WalletProvider wallets={extraAdapters} autoConnect onError={ignoreWalletError}>
-        <App />
+        <WithPrivy>
+          <App />
+        </WithPrivy>
       </WalletProvider>
     </ConnectionProvider>
   </QueryClientProvider>,
