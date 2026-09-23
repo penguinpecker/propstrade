@@ -8,7 +8,7 @@ import type { AppConfig, Me } from '@props/shared';
 import { SIWS_STATEMENT, buildSiwsMessage } from '@props/shared/siws';
 import { api, ApiRequestError } from './api';
 import { env, type Cluster } from './env';
-import { PRIVY_WALLET, usePrivyWallet } from './privy';
+import { PRIVY_ICON, PRIVY_WALLET, usePrivyWallet } from './privy';
 import { clearUserData, keys, meOptions, useConfig, useMe } from './queries';
 
 export type SessionStatus = 'no-wallet' | 'disconnected' | 'connecting' | 'needs-sign-in' | 'signing' | 'signed-in';
@@ -35,16 +35,18 @@ export function signInMessageProblem(message: string, expected: { address: strin
 }
 /** `wrong` blocks sign-in; `unreachable` only warns (sign-in does not need the RPC). */
 export interface NetworkCheck { state: 'checking' | 'ok' | 'wrong' | 'unreachable'; reason?: string }
-/** `email`: the Privy wallet, which needs no browser extension. */
-export interface WalletOption { name: WalletName; icon: string; email?: boolean }
+/** `privy`: the Google wallet, which needs no browser extension. */
+export interface WalletOption { name: WalletName; icon: string; privy?: boolean }
 
 export interface Session {
   status: SessionStatus;
-  /** Detected wallets (Wallet Standard auto-detection plus the mobile adapter on phones), then the Privy email wallet. */
+  /** Detected wallets (Wallet Standard auto-detection plus the mobile adapter on phones), then the Google wallet. */
   wallets: WalletOption[];
   walletName: WalletName | null;
   /** Address of the connected wallet account (may differ from `me.wallet` until signed in). */
   address: string | null;
+  /** The connected wallet signs without a prompt (the Google wallet): the trader's click in the app is the approval. */
+  autoSigns: boolean;
   me: Me | null;
   network: NetworkCheck;
   /** Plain-English reason for the last failure or session change, cleared by the next action. */
@@ -167,15 +169,15 @@ export function useSession(): Session {
       if (me?.wallet !== address) void signIn();
       return;
     }
-    wantsSignIn.current = true;
     if (!email) {
+      wantsSignIn.current = true;
       if (privy?.address) void privy.disconnect();
       select(name);
       return;
     }
     if (!privy) return;
     if (adapter) void disconnectWallet().catch(() => undefined);
-    privy.open().catch(error => { wantsSignIn.current = false; setNotice(describeError(error)); });
+    privy.open().catch(error => setNotice(describeError(error))); // then the Google wallet signs in on its own (below)
   }, [adapter, address, disconnectWallet, me, privy, select, signIn]);
 
   const disconnect = useCallback(async () => {
@@ -191,6 +193,19 @@ export function useSession(): Session {
     wantsSignIn.current = false;
     if (me?.wallet !== address) void signIn();
   }, [address, me, meQuery.isFetched, signIn]);
+
+  // The Google wallet signs without a prompt, so it signs in on its own: when it appears (Google sign-in comes back to a
+  // reloaded page) and when its session expires. Once per address until it succeeds, so a failure is shown, not looped.
+  const autoTried = useRef<string | null>(null);
+  useEffect(() => {
+    const own = privy?.address;
+    if (!own) { autoTried.current = null; return; } // a later sign-in with the same account tries again
+    if (!meQuery.isFetched) return;
+    if (me?.wallet === own) { autoTried.current = null; return; }
+    if (autoTried.current === own) return;
+    autoTried.current = own;
+    void signIn();
+  }, [privy?.address, me, meQuery.isFetched, signIn]);
 
   // The session belongs to one wallet account: end it when the wallet switches accounts or disconnects.
   const previousAddress = useRef<string | null>(null);
@@ -213,7 +228,7 @@ export function useSession(): Session {
   const options = wallets
     .filter(w => w.readyState === WalletReadyState.Installed || w.readyState === WalletReadyState.Loadable)
     .map((w): WalletOption => ({ name: w.adapter.name, icon: w.adapter.icon }))
-    .concat(privy ? [{ name: PRIVY_WALLET as WalletName, icon: '', email: true }] : []);
+    .concat(privy ? [{ name: PRIVY_WALLET as WalletName, icon: PRIVY_ICON, privy: true }] : []);
 
   const status: SessionStatus = signing ? 'signing'
     : connecting || privy?.pending ? 'connecting'
@@ -222,7 +237,7 @@ export function useSession(): Session {
     : options.length ? 'disconnected' : 'no-wallet';
 
   const walletName = privy?.address || privy?.pending ? PRIVY_WALLET as WalletName : adapter?.name ?? null;
-  return { status, wallets: options, walletName, address, me: me ?? null, network, notice, connect, signIn, disconnect };
+  return { status, wallets: options, walletName, address, autoSigns: !!privy?.address, me: me ?? null, network, notice, connect, signIn, disconnect };
 }
 
 /** The connected account and its transaction signer: the Privy wallet when that is connected, else the browser wallet. */
@@ -230,5 +245,5 @@ export function useSigner() {
   const { publicKey, signTransaction } = useWallet();
   const privy = usePrivyWallet();
   const privyKey = useMemo(() => privy?.address ? new PublicKey(privy.address) : null, [privy?.address]);
-  return privy && privyKey ? { publicKey: privyKey, signTransaction: privy.signTransaction } : { publicKey, signTransaction };
+  return privy && privyKey ? { publicKey: privyKey, signTransaction: privy.signTransaction, autoSigns: true } : { publicKey, signTransaction, autoSigns: false };
 }
