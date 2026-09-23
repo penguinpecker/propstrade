@@ -37,7 +37,8 @@ import {
 import type { AccountName, FundedAccount, FundedRef, VaultEvent } from '@props/sdk';
 
 const FIXTURES = new URL('../fixtures/', import.meta.url);
-const PROGRAM_SO = new URL('../../../target/deploy/props_vault.so', import.meta.url);
+/** The props_vault binary under test: PROPS_VAULT_SO (absolute path), else the Anchor build. */
+const PROGRAM_SO = process.env.PROPS_VAULT_SO || new URL('../../../target/deploy/props_vault.so', import.meta.url).pathname;
 /** GMTrade's own IDL (gmsol-programs 0.10.0), used as an independent decoder of GMTrade accounts. */
 const gmCoder = new BorshAccountsCoder(JSON.parse(readFileSync(new URL('gmsol_store.idl.json', FIXTURES), 'utf8')));
 /** Store.last_restarted_slot (u64 at byte 4800), checked against the LastRestartSlot sysvar by GMTrade. */
@@ -112,7 +113,7 @@ export class Env {
     // Builders never touch the network; the connection only satisfies Anchor's provider type.
     this.vault = new PropsVaultClient(new Connection('http://127.0.0.1:1'));
     this.svm.addProgramFromFile(GMTRADE_PROGRAM_ID, new URL('gmsol_store.so', FIXTURES).pathname);
-    this.svm.addProgramFromFile(PROPS_VAULT_PROGRAM_ID, PROGRAM_SO.pathname);
+    this.svm.addProgramFromFile(PROPS_VAULT_PROGRAM_ID, PROGRAM_SO);
     this.setUpgradeAuthority(this.admin.publicKey);
     this.loadFixtures();
     this.svm.setClock(new Clock(449_600_000n, 1_790_000_000n, 1040n, 1041n, BigInt(Math.floor(Date.now() / 1000))));
