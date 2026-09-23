@@ -5,7 +5,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import postgres from 'postgres';
 
 /** Advisory lock keys in use (one namespace for the whole app). */
-export const LOCK_KEYS = { keeper: 0x70726f70, sim: 0x73696d31 } as const; // "prop", "sim1"
+export const LOCK_KEYS = { keeper: 0x70726f70, sim: 0x73696d31, chain: 0x70726f71 } as const; // "prop", "sim1", "proq"
 
 export interface LeaderOptions {
   databaseUrl: string;
@@ -14,8 +14,11 @@ export interface LeaderOptions {
   log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>;
   /** How often to retry the lock as follower, and to confirm it is still held as leader. */
   intervalMs?: number;
-  /** Runs while leader; must stop promptly once `lost` aborts (shutdown, or the lock's session is gone). */
-  run: (lost: AbortSignal) => Promise<void>;
+  /**
+   * Runs while leader; must stop promptly once `lost` aborts (shutdown, or the lock's session is gone). `held` asks the
+   * database now whether this session still holds the lock (for a check right before an irreversible action).
+   */
+  run: (lost: AbortSignal, held: () => Promise<boolean>) => Promise<void>;
 }
 
 /** Competes for leadership until `signal` aborts. Resolves once the last term has ended and the lock is released. */
@@ -58,7 +61,7 @@ export async function runAsLeader({ databaseUrl, key, signal, log, intervalMs = 
       }
     }, intervalMs);
     try {
-      await run(term.signal);
+      await run(term.signal, () => held().catch(() => false));
     } finally {
       clearInterval(check);
       signal.removeEventListener('abort', stop);

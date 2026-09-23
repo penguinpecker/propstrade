@@ -199,7 +199,8 @@ test('live: routes, stream events and service API without a deployed program', {
     assert.deepEqual([state.symbol, state.pure, state.isClosed, state.indexDecimals], ['SOL', true, false, 9]);
     // Collateral is USDC (unit price 1e14 = $1) and the index price is the live SOL price in unit form.
     assert.ok(state.prices.short.min > 99n * 10n ** 12n && state.prices.short.max < 101n * 10n ** 12n);
-    assert.ok(Math.abs(Number(state.prices.index.min) / 1e11 / Number(sol.price) - 1) < 0.01);
+    assert.ok(Math.abs(Number(state.prices.index.min) / 1e11 / Number(sol.price) - 1) < 0.01, `SOL unit price ${state.prices.index.min} vs ${sol.price}`);
+    assert.ok(state.prices.index.min <= state.prices.index.max);
 
     const heard: string[] = [];
     const off = service.onTick((t) => heard.push(t.symbol));

@@ -3,22 +3,13 @@
 // JSON-RPC with v0 transactions (one through a lookup table). Nothing here talks to mainnet except the
 // optional read-only --clone-feature-set (disable with CLONE_FEATURES=0).
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import type { ChildProcess } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { AccountLayout, TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from '@solana/spl-token';
-import { Connection, Keypair, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
-import type { AddressLookupTableAccount, TransactionInstruction } from '@solana/web3.js';
+import { Keypair, LAMPORTS_PER_SOL, PublicKey } from '@solana/web3.js';
+import type { Connection } from '@solana/web3.js';
 import {
   GMTRADE_PROGRAM_ID,
-  GMTRADE_STORE,
   PROPS_VAULT_PROGRAM_ID,
   PropsVaultClient,
-  USDC_MINT,
-  buildTransaction,
   capitalVaultAddress,
   createLookupTableInstructions,
   enumName,
@@ -33,12 +24,8 @@ import {
   solTreasuryPda,
 } from '@props/sdk';
 import { CONFIG_PARAMS, LEVERAGE, MARKETS, TIERS, USD, hash32, marketParams, tierParams, usdc } from './env.ts';
+import { sendTx as send, startValidator, type Validator } from './validator.ts';
 
-const FIXTURES = new URL('../fixtures/', import.meta.url);
-const PROGRAM_SO = new URL('../../../target/deploy/props_vault.so', import.meta.url).pathname;
-const RPC_PORT = 18899;
-const RPC = `http://127.0.0.1:${RPC_PORT}`;
-const STORE_LAST_RESTART_OFFSET = 4800;
 const LAST_RESTART_SLOT_SYSVAR = new PublicKey('SysvarLastRestartS1ot1111111111111111111111');
 
 const admin = Keypair.generate();
@@ -46,92 +33,18 @@ const risk = Keypair.generate();
 const kyc = Keypair.generate();
 const trader = Keypair.generate();
 
-/** Account fixtures for --account-dir: mainnet snapshots (Store restart slot patched to the local 0) + USDC balances. */
-function writeAccountDir(dir: string): void {
-  for (const file of readdirSync(new URL('accounts/', FIXTURES))) {
-    // Keep the raw text: rentEpoch is u64::MAX and must not pass through a JS number.
-    let raw = readFileSync(new URL(`accounts/${file}`, FIXTURES), 'utf8');
-    const { pubkey, account } = JSON.parse(raw);
-    if (pubkey === GMTRADE_STORE.toBase58()) {
-      const data = Buffer.from(account.data[0], 'base64');
-      data.writeBigUInt64LE(0n, STORE_LAST_RESTART_OFFSET);
-      raw = raw.replace(account.data[0], data.toString('base64'));
-    }
-    writeFileSync(join(dir, file), raw);
-  }
-  for (const [owner, amount] of [[admin.publicKey, usdc('1000')], [trader.publicKey, usdc('200')]] as const) {
-    const data = Buffer.alloc(AccountLayout.span);
-    AccountLayout.encode(
-      {
-        mint: USDC_MINT, owner, amount, delegateOption: 0, delegate: PublicKey.default, state: 1, isNativeOption: 0,
-        isNative: 0n, delegatedAmount: 0n, closeAuthorityOption: 0, closeAuthority: PublicKey.default,
-      },
-      data,
-    );
-    const address = getAssociatedTokenAddressSync(USDC_MINT, owner);
-    const account = { lamports: 2_039_280, data: [data.toString('base64'), 'base64'], owner: TOKEN_PROGRAM_ID.toBase58(), executable: false, rentEpoch: 0, space: data.length };
-    writeFileSync(join(dir, `${address.toBase58()}.json`), JSON.stringify({ pubkey: address.toBase58(), account }));
-  }
-}
-
-async function startValidator(workDir: string): Promise<ChildProcess> {
-  const accounts = join(workDir, 'accounts');
-  mkdirSync(accounts);
-  writeAccountDir(accounts);
-  const args = [
-    '--reset', '--quiet', '--ledger', join(workDir, 'ledger'),
-    '--rpc-port', String(RPC_PORT), '--faucet-port', '19900', '--gossip-port', '18001', '--dynamic-port-range', '18002-18040',
-    '--upgradeable-program', GMTRADE_PROGRAM_ID.toBase58(), new URL('gmsol_store.so', FIXTURES).pathname, 'none',
-    '--upgradeable-program', PROPS_VAULT_PROGRAM_ID.toBase58(), PROGRAM_SO, admin.publicKey.toBase58(),
-    '--account-dir', accounts,
-  ];
-  if (process.env.CLONE_FEATURES !== '0') args.push('--clone-feature-set', '--url', 'https://api.mainnet-beta.solana.com');
-  const validator = spawn('solana-test-validator', args, { stdio: ['ignore', 'ignore', 'inherit'] });
-  const connection = new Connection(RPC, 'confirmed');
-  for (let i = 0; i < 120; i++) {
-    if (validator.exitCode !== null) break;
-    try {
-      await connection.getSlot();
-      return validator;
-    } catch {
-      await new Promise((r) => setTimeout(r, 1000));
-    }
-  }
-  validator.kill('SIGKILL');
-  throw new Error('solana-test-validator did not start');
-}
-
-/** Sends a v0 transaction and polls for confirmation (no websocket, so nothing keeps the process alive). */
-async function send(
-  connection: Connection,
-  instructions: TransactionInstruction[],
-  signers: Keypair[],
-  lookupTables: AddressLookupTableAccount[] = [],
-): Promise<{ cu: number; size: number; logs: string[] }> {
-  const { blockhash } = await connection.getLatestBlockhash();
-  const tx = buildTransaction({ payer: signers[0]!.publicKey, instructions, recentBlockhash: blockhash, lookupTables, computeUnits: 400_000 });
-  tx.sign(signers);
-  const raw = tx.serialize();
-  const signature = await connection.sendRawTransaction(raw, { skipPreflight: true });
-  for (let i = 0; i < 60; i++) {
-    const { value } = await connection.getSignatureStatuses([signature]);
-    if (value[0]?.confirmationStatus === 'confirmed' || value[0]?.confirmationStatus === 'finalized') break;
-    await new Promise((r) => setTimeout(r, 400));
-  }
-  const t = await connection.getTransaction(signature, { commitment: 'confirmed', maxSupportedTransactionVersion: 0 });
-  assert.ok(t?.meta, `transaction ${signature} not found`);
-  assert.equal(t.meta.err, null, `transaction failed: ${JSON.stringify(t.meta.err)}\n${t.meta.logMessages?.join('\n')}`);
-  return { cu: t.meta.computeUnitsConsumed ?? 0, size: raw.length, logs: t.meta.logMessages ?? [] };
-}
-
 describe('solana-test-validator smoke (real CPIs through @props/sdk)', () => {
-  const workDir = mkdtempSync(join(tmpdir(), 'props-vault-validator-'));
-  const connection = new Connection(RPC, 'confirmed');
-  const vault = new PropsVaultClient(connection);
-  let validator: ChildProcess;
+  let validator: Validator;
+  let connection: Connection;
+  let vault: PropsVaultClient;
 
   before(async () => {
-    validator = await startValidator(workDir);
+    validator = await startValidator({
+      rpcPort: 18899, faucetPort: 19900, gossipPort: 18001, dynamicPortRange: '18002-18040', upgradeAuthority: admin.publicKey,
+      usdc: [[admin.publicKey, usdc('1000')], [trader.publicKey, usdc('200')]],
+    });
+    connection = validator.connection;
+    vault = new PropsVaultClient(connection);
     for (const k of [admin, risk, kyc, trader]) {
       await connection.requestAirdrop(k.publicKey, 20 * LAMPORTS_PER_SOL);
     }
@@ -139,10 +52,7 @@ describe('solana-test-validator smoke (real CPIs through @props/sdk)', () => {
     await new Promise((r) => setTimeout(r, 1500));
   });
 
-  after(() => {
-    validator?.kill('SIGINT');
-    rmSync(workDir, { recursive: true, force: true });
-  });
+  after(() => validator?.stop());
 
   it('runs the funded lifecycle against the mainnet GMTrade binary', async () => {
     const restart = await connection.getAccountInfo(LAST_RESTART_SLOT_SYSVAR);
@@ -224,10 +134,15 @@ describe('solana-test-validator smoke (real CPIs through @props/sdk)', () => {
     const capitalAfter = BigInt((await connection.getTokenAccountBalance(capitalVaultAddress())).value.amount);
     assert.equal(capitalAfter - capitalBefore, usdc('500'));
     assert.equal(enumName((await vault.fetchFunded(funded))!.status), 'closed');
-    const perInstruction = withTable.logs
-      .map((l) => new RegExp(`^Program ${PROPS_VAULT_PROGRAM_ID.toBase58()} consumed (\\d+)`).exec(l)?.[1])
-      .filter(Boolean)
-      .map(Number);
+    // Top-level props_vault instructions only (each also self-invokes once per event it emits).
+    const perInstruction: number[] = [];
+    let depth = 0;
+    for (const l of withTable.logs) {
+      if (/^Program \w+ invoke \[\d+\]$/.test(l)) depth++;
+      else if (/^Program \w+ (success|failed)/.test(l)) depth--;
+      const cu = new RegExp(`^Program ${PROPS_VAULT_PROGRAM_ID.toBase58()} consumed (\\d+)`).exec(l)?.[1];
+      if (cu && depth === 1) perInstruction.push(Number(cu));
+    }
     console.log(JSON.stringify({ openCu: perInstruction[0], stopLossCu: perInstruction[1], txCu: withTable.cu, txBytes: withTable.size }));
   });
 });

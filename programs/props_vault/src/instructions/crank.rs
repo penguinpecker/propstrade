@@ -13,6 +13,7 @@ use crate::{
     state::*,
 };
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct SyncFunded<'info> {
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
@@ -110,10 +111,11 @@ pub(crate) fn sync<'info>(ctx: Context<'_, '_, 'info, 'info, SyncFunded<'info>>)
         f.release_slot_if_idle(i);
     }
     f.last_sync_at = ts;
-    emit!(Synced { funded: funded_key, slots, orders_dropped, ts });
+    emit_cpi!(Synced { funded: funded_key, slots, orders_dropped, ts });
     Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct TopUpOwner<'info> {
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
@@ -139,10 +141,11 @@ pub(crate) fn top_up_owner(ctx: Context<TopUpOwner>) -> Result<()> {
         a.config.sol_treasury_bump,
         a.config.owner_sol_target,
     )?;
-    emit!(OwnerToppedUp { funded: a.funded.key(), lamports, ts: now()? });
+    emit_cpi!(OwnerToppedUp { funded: a.funded.key(), lamports, ts: now()? });
     Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct CloseCompletedOrder<'info> {
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
@@ -192,6 +195,6 @@ pub(crate) fn close_completed_order(ctx: Context<CloseCompletedOrder>) -> Result
     let owner_seeds: &[&[u8]] = &[OWNER_SEED, funded_key.as_ref(), &[a.funded.owner_bump]];
     close_order_cpi!(a).invoke(&[owner_seeds], "completed")?;
     ctx.accounts.funded.orders[idx] = TrackedOrder::default();
-    emit!(CompletedOrderClosed { funded: funded_key, order, ts: now()? });
+    emit_cpi!(CompletedOrderClosed { funded: funded_key, order, ts: now()? });
     Ok(())
 }

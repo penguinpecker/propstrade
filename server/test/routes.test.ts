@@ -35,6 +35,18 @@ describe('GET /v1/health', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ status: 'ok', db: 'ok', modules: { marketdata: 'absent' } });
     expect(res.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(res.json()).not.toHaveProperty('keeper');
+  });
+
+  it('includes the keeper status when the keeper module runs', async () => {
+    const gmtradeUpgrade = { slot: 7, detectedAt: 1_000, restrictedAt: null, acknowledgedAt: null };
+    const k = await makeApp({ services: { keeper: { status: () => ({ leader: true, lastTickAt: 2_000, gmtradeUpgrade }) } } });
+    try {
+      const res = await k.app.inject({ method: 'GET', url: '/v1/health' });
+      expect(res.json()).toMatchObject({ status: 'ok', keeper: { leader: true, lastTickAt: 2_000, gmtradeUpgrade } });
+    } finally {
+      await k.close();
+    }
   });
 });
 

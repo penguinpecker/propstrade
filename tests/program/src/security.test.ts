@@ -2,11 +2,14 @@
 // comments) and tries to break it. A failing test here is a finding.
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { Keypair, PublicKey } from '@solana/web3.js';
+import { Keypair, PublicKey, TransactionInstruction } from '@solana/web3.js';
 import { createAssociatedTokenAccountIdempotentInstruction } from '@solana/spl-token';
 import {
+  PROPS_VAULT_IDL,
+  PROPS_VAULT_PROGRAM_ID,
   USDC_MINT,
   capitalVaultAddress,
+  eventAuthorityPda,
   gmOrderEscrow,
   gmPositionPda,
   marketConfigPda,
@@ -153,5 +156,28 @@ describe('security review', () => {
       [f.trader],
     );
     assert.ok(!r.ok, 'restricted trader moved a limit increase trigger to fill immediately');
+  });
+
+  it('events cannot be cut off with the logs (self-CPI, not log lines), and nobody but the program can emit one', async () => {
+    const env = new Env();
+    await env.setUpVault();
+    const trader = env.wallet();
+    const evaluation = await env.passedEvaluation(trader);
+    // Cheap log spam ahead of the trader's own instruction pushes its log lines past Solana's 10,000-byte cut-off.
+    const memo = new PublicKey('MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr');
+    const spam = Array.from({ length: 50 }, () => new TransactionInstruction({ programId: memo, keys: [], data: Buffer.from('x') }));
+    const r = env.ok([...spam, await env.vault.activateFunded({ trader: trader.publicKey, evaluation })], [trader]);
+    assert.ok(r.logs.includes('Log truncated'), 'the logs were cut off');
+    assert.deepEqual(r.events.map((e) => e.name), ['fundedActivated'], 'the event is still in the transaction');
+
+    // Event data sent to the program directly: only a CPI signed by the program's event authority is accepted.
+    const tag = Buffer.from([0xe4, 0x45, 0xa5, 0x2e, 0x51, 0xcb, 0x9a, 0x1d]);
+    const discriminator = Buffer.from(PROPS_VAULT_IDL.events.find((e) => e.name === 'FundedActivated')!.discriminator);
+    const forged = new TransactionInstruction({
+      programId: PROPS_VAULT_PROGRAM_ID,
+      keys: [{ pubkey: eventAuthorityPda(), isSigner: false, isWritable: false }],
+      data: Buffer.concat([tag, discriminator, Buffer.alloc(200)]),
+    });
+    env.fails(forged, [trader], 'ConstraintSigner');
   });
 });
