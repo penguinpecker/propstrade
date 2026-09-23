@@ -6,6 +6,7 @@ import { useApp, useSaved } from './App.jsx';
 import { bpsPercent, explorerTx, isCurrent, number, shortAddress, signedUsd, sol, tierRules, usd } from './data.js';
 import { accountHref } from './Workspace.jsx';
 import { Badge, Button, UsdcIcon, DataRow, Empty, InlineLink, Notice, PageHeading, Pending, RuleList, SectionHeading, SessionNotice, Steps, Unavailable, WalletOptions } from './ui.jsx';
+import { isNotLive } from './lib/api';
 import { GOOGLE_ONLY } from './lib/privy';
 import { useMe, useStartKyc, useVault } from './lib/queries';
 import { isFinalTxError, loadChain, useTxCost, useWalletTransaction } from './lib/transactions';
@@ -40,8 +41,9 @@ function FeeSummary({ total = true, cost }) {
 }
 const useEvaluationCost = () => { const { tier, signedIn } = useApp(); return useTxCost(['evaluation', tier?.id, tier?.version, tier?.feeUsdc], (chain, connection, trader) => chain.prepareEvaluation(connection, trader, tier), signedIn && !!tier); };
 function ConfigGate({ children }) {
-  const { config, tier, tiers } = useApp();
+  const { config, tier, tiers, navigate } = useApp();
   if (config.isPending) return <Pending>Loading the evaluation programs…</Pending>;
+  if (isNotLive(config.error)) return <Empty icon={Info} title="Evaluations open soon" action={<Button variant="secondary" onClick={() => navigate('/trade/practice')}>Practice with live prices</Button>}>The Props.trade vault program is not live on Solana yet. Evaluations open as soon as it is.</Empty>;
   if (config.isError) return <Unavailable title="Programs are unavailable" error={config.error} retry={config.refetch} />;
   if (!tier) return <Empty icon={Info} title="No evaluation is available right now">{tiers.length ? 'Every account size is currently unavailable. Check back soon.' : 'No evaluation programs are configured yet.'}</Empty>;
   return children;

@@ -79,3 +79,14 @@ describe('applyStreamEvent', () => {
     expect(client.getQueryData(keys.notifications)).toBeUndefined();
   });
 });
+
+describe('retries', () => {
+  it('retries an outage but not a program that is not live yet, nor a client error', async () => {
+    const { ApiRequestError } = await import('./api');
+    const retry = createQueryClient().getDefaultOptions().queries!.retry as (failures: number, error: unknown) => boolean;
+    expect(retry(0, new ApiRequestError(503, 'unavailable', 'market data is starting'))).toBe(true);
+    expect(retry(0, new ApiRequestError(503, 'not_initialized', 'The Props.trade program is not live on Solana yet'))).toBe(false);
+    expect(retry(0, new ApiRequestError(404, 'not_found', 'no such account'))).toBe(false);
+    expect(retry(3, new ApiRequestError(503, 'unavailable', 'still down'))).toBe(false);
+  });
+});
