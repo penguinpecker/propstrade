@@ -836,3 +836,15 @@ Market picker categories (2026-09-23, branch r4-picker):
 - Shared changes: every Tabs row now uses one Tab stop with arrow keys/Home/End; dialogs return focus to what opened them.
 - GMTrade's market-info API answered in ~20 s on 2026-09-23 while fetchPairs gives up at 15 s: live tests failed there,
   not on the new checks (they pass with a longer timeout).
+
+2026-09-23 DEPLOYED 77fa78e (Google wallet + market picker), server first, then app, from a git-archive export:
+           - Railway `railway up` (server): live, /v1/health all 4 modules running + keeper leader; /v1/markets 68/68 rows
+             carry subcategory, groups exactly as recorded above.
+           - Vercel prod <deployment id in records.txt> (previous <deployment id in records.txt>, for rollback). The
+             first `vercel deploy` died with "fetch failed" after the upload (no deployment created); a plain retry built.
+             Served bundle index-CR7bc3ve.js contains the Privy app id; CSP connect-src/frame-src include auth.privy.io.
+           - Checked in Chrome on propstrade.vercel.app: picker tabs/chips with live counts; the wallet window lists Google;
+             clicking it lands on Google's account chooser (redirect via auth.privy.io callback). Not signed in: a real
+             Google sign-in -> wallet -> automatic sign-in -> silent payment is still unverified.
+           - Google's consent screen names auth.privy.io (Privy's shared Google client). Own branding needs the owner's
+             Google OAuth client entered in the Privy dashboard.
