@@ -265,3 +265,47 @@ browser with `packages/sdk`**; the server never holds user keys.
 Keeper fills, liquidations and TP/SL triggers are GMTrade's (2–8 s, not guaranteed). Stock/FX positions cannot be
 closed while their market is closed. GMTrade's price/indexer APIs are undocumented (no SLA). GMTrade code is BSL 1.1
 (non-production) — written permission needed before charging fees. Legal review needed before a company launch.
+
+## 8. Implementation notes (authoritative where they differ from §1–7)
+
+Program (round 1, reviewed by two adversarial auditors, all findings fixed):
+- `FundedAccount` slots also carry `pending_usd`; tracked orders are records {order, slot, order_type, size_usd,
+  collateral, placed_by_risk}; `order_seq: u64` — GMTrade order nonces are derived by the program from this counter
+  (never trader-chosen; reuse attacks closed). Traders cannot cancel/update risk-placed orders.
+- `cancel_order` only accepts still-pending orders and never frees a slot; only `sync` (reading the GMTrade Position)
+  frees slots. `sync` drops an order only once its account is gone; finished-but-open orders stay tracked (account not
+  flat) until `close_completed_order` recovers their escrow.
+- `approve_payout` / `close_funded` require the owner's GMTrade Position accounts to EXIST and be size 0 (absent
+  addresses are rejected): the keeper passes SDK `fetchOwnerPositions()`.
+- Decrease orders need size ≥ $1 (GMTrade min) or CLOSE_ALL. Every non-protective order needs acceptable_price ≠ 0;
+  TP/SL have none so they can always execute.
+- `initialize` starts with all pauses on; the trading pause also blocks `activate_funded`; pauses never block closes,
+  cancels or protective orders. Capital vault ATA is `init_if_needed` (front-running initialize is harmless).
+- Build: `opt-level = "s"` → 899 KB (rent ≈ 4.57 SOL; have ~10 SOL during deploy for the buffer). CU: open ≈ 166k,
+  open + stop-loss in one v0 tx ≈ 283k (SDK default limit 400k). Owner PDA float target 0.25 SOL / min 0.05 SOL.
+- Rent payers: trader pays Evaluation/TraderProfile/FundedAccount/PayoutRequest; sol_treasury pays owner float and
+  payout ATAs; kyc authority pays IdentityLock.
+- Known, accepted: third-party USDC sent to an owner ATA counts as balance → the payout review must reconcile requested
+  profit against indexed GMTrade realized PnL before `approve_payout`. Execution-fee churn is bounded by the $1 minimum;
+  the keeper alerts on high order churn.
+
+Data (round 1): 15m/4h candles come natively from GMTrade's candle service (verified equal to aggregates).
+`MarketState.raw` = raw base64 account images for the WASM model. The WASM model now runs GMTrade's
+`update_fees_state` before every simulated action (reproduced 28/28 real fills: opens, full closes, liquidations, SOL VI).
+Candle prices are USD × 1e18 for every token. Subsquid ids are chain-ordered (`id_DESC` is fast).
+
+Server (round 1): Node 22 + tsx (no build step). Session cookie `__Host-props_session`. Global Origin check on unsafe
+methods. Leader lock connection uses `max_lifetime: null`. `ModuleContext` carries config, db, sql, rpc, notify.
+Money in DB = numeric(38,6).
+
+App (round 1): `VITE_RPC_URL` and `VITE_API_URL` are required at build time (the public mainnet RPC rejects browser
+requests). **The API must be same-site with the app** (e.g. app `props.trade`, API `api.props.trade`) or the
+SameSite=Lax session cookie will not flow.
+
+Round 2 module ownership:
+- `server/src/modules/sim` — practice + evaluation engine; routes `/v1/sim/*`, `/v1/practice/*`; implements `SimService`.
+- `server/src/modules/chain` — indexer, funded accounts, payouts, verify, vault, config, chain-job executor
+  (set_identity, record_evaluation_result); routes `/v1/config`, `/v1/accounts*` (merges sim + funded),
+  `/v1/payouts*`, `/v1/verify`, `/v1/vault`, admin payout review; implements `ChainService`.
+- `server/src/modules/keeper` — leader-only risk loops (§4.5).
+- `app/` — every page wired to real data and real transactions.

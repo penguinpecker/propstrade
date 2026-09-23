@@ -91,7 +91,7 @@ async function start(env: Record<string, string>) {
   const ctx: ModuleContext = {
     app, log: app.log, env, services: {}, signal: abort.signal,
     publish: (event) => events.push({ at: Date.now(), event }),
-    config: {} as never, db: {} as never, sql: {} as never, rpc: {} as never, // marketdata reads only env
+    config: {} as never, db: {} as never, sql: {} as never, rpc: {} as never, notify: async () => {}, // marketdata reads only env
   };
   const service = await register(ctx);
   await app.ready();
