@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, loadEnv } from 'vite';
 
@@ -14,6 +14,9 @@ export function checkBuildEnv(vars) {
   if (!vars.VITE_API_URL) throw new Error('VITE_API_URL is required for builds: the API is deployed separately (see app/.env.example).');
 }
 
+/** The directory's package name, or null when it has no package.json naming one. */
+const packageName = dir => { try { return JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).name ?? null; } catch { return null; } };
+
 /** Emits third-party-licenses.txt: name, version, license and license/notice files of every package in the bundle. */
 export function bundledLicenses() {
   return {
@@ -23,7 +26,9 @@ export function bundledLicenses() {
       const roots = new Set();
       for (const file of Object.values(bundle))
         for (const id of file.type === 'chunk' ? Object.keys(file.modules) : []) {
-          const root = /^(.*[\\/]node_modules[\\/](?:@[^\\/]+[\\/])?[^\\/]+)[\\/]/.exec(id)?.[1];
+          let root = /^(.*[\\/]node_modules[\\/](?:@[^\\/]+[\\/])?[^\\/]+)[\\/]/.exec(id)?.[1];
+          // Copies of other packages bundled inside a package's own files have no package.json: credit the package that ships them.
+          while (root && !packageName(root) && dirname(root) !== root) root = dirname(root);
           if (root) roots.add(root);
         }
       const entries = new Map(); // one entry per name@version, however many copies are installed

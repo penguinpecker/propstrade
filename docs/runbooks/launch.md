@@ -441,6 +441,7 @@ and adds the Content-Security-Policy (below). Node is pinned by `"engines": { "n
    | `VITE_RPC_URL` | `https://mainnet.helius-rpc.com/?api-key=<BROWSER_HELIUS_KEY>` (the domain-restricted key) |
    | `VITE_CLUSTER` | `mainnet-beta` |
    | `VITE_PROGRAM_ID` | `7qYRWwpmj3j3exVoBUJHzigcWmMN8ruPEdZdZrGzTJ7` (the app refuses an API that reports another program) |
+   | `VITE_PRIVY_APP_ID` | the Privy app id, for the email wallet (optional; see below) |
 
    ```sh
    printf '%s' 'https://api.<DOMAIN>' | vercel env add VITE_API_URL production
@@ -448,6 +449,11 @@ and adds the Content-Security-Policy (below). Node is pinned by `"engines": { "n
 
    A build without `VITE_API_URL`, or a mainnet build without `VITE_RPC_URL`, fails on purpose. Preview deployments
    (`*.vercel.app`) are not same-site with `api.<DOMAIN>` and are not the API's `APP_ORIGIN`, so they cannot sign in.
+
+   Email wallet (`VITE_PRIVY_APP_ID`): in the Privy dashboard, keep Email login enabled and set Allowed domains to the
+   app's origin (`https://<DOMAIN>`, and `http://127.0.0.1:4187` for local work). The app creates each trader's
+   embedded Solana wallet itself after the email code, and signs in with Sign-In With Solana like any other wallet, so
+   no Privy secret or server-side Privy call exists. Every signature shows Privy's confirmation window.
 
 3. Domain: `vercel domains add <DOMAIN>` (and `www.<DOMAIN>` redirecting to it), add the DNS records Vercel prints.
 
@@ -806,3 +812,4 @@ App (`app/.env.example`; `app/tests/env-docs.test.js` checks the same for the ap
 | `VITE_RPC_URL` | yes on mainnet | browser RPC endpoint (domain-restricted key); also the CSP's RPC origins |
 | `VITE_CLUSTER` | no | `mainnet-beta` (default) or `localnet` |
 | `VITE_PROGRAM_ID` | no (set it) | the app refuses to sign in against an API reporting another program |
+| `VITE_PRIVY_APP_ID` | no | Privy app id: offers the email wallet (Privy's embedded Solana wallet) and allows auth.privy.io in the CSP |

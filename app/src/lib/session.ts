@@ -1,12 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useConnection, useWallet } from '@solana/wallet-adapter-react';
 import { WalletError, WalletNotReadyError, WalletReadyState, type WalletName } from '@solana/wallet-adapter-base';
+import { PublicKey } from '@solana/web3.js';
 import bs58 from 'bs58';
 import type { AppConfig, Me } from '@props/shared';
 import { SIWS_STATEMENT, buildSiwsMessage } from '@props/shared/siws';
 import { api, ApiRequestError } from './api';
 import { env, type Cluster } from './env';
+import { PRIVY_WALLET, usePrivyWallet } from './privy';
 import { clearUserData, keys, meOptions, useConfig, useMe } from './queries';
 
 export type SessionStatus = 'no-wallet' | 'disconnected' | 'connecting' | 'needs-sign-in' | 'signing' | 'signed-in';
@@ -33,11 +35,12 @@ export function signInMessageProblem(message: string, expected: { address: strin
 }
 /** `wrong` blocks sign-in; `unreachable` only warns (sign-in does not need the RPC). */
 export interface NetworkCheck { state: 'checking' | 'ok' | 'wrong' | 'unreachable'; reason?: string }
-export interface WalletOption { name: WalletName; icon: string }
+/** `email`: the Privy wallet, which needs no browser extension. */
+export interface WalletOption { name: WalletName; icon: string; email?: boolean }
 
 export interface Session {
   status: SessionStatus;
-  /** Detected wallets (Wallet Standard auto-detection plus the mobile adapter on phones). */
+  /** Detected wallets (Wallet Standard auto-detection plus the mobile adapter on phones), then the Privy email wallet. */
   wallets: WalletOption[];
   walletName: WalletName | null;
   /** Address of the connected wallet account (may differ from `me.wallet` until signed in). */
@@ -76,7 +79,7 @@ export function describeError(error: unknown): string {
   if (error instanceof WalletNotReadyError) return 'This wallet is not available in this browser.';
   if (error instanceof WalletError) {
     const cause = error.error as { code?: number; message?: string } | undefined;
-    if (cause?.code === 4001 || /reject|declin|denied|cancel/i.test(`${error.message} ${cause?.message ?? ''}`))
+    if (cause?.code === 4001 || /reject|declin|denied|cancel|exited/i.test(`${error.message} ${cause?.message ?? ''}`))
       return 'The request was declined in your wallet.';
     return error.message || cause?.message || 'Your wallet reported an error. Try again.';
   }
@@ -86,6 +89,7 @@ export function describeError(error: unknown): string {
 
 export function useSession(): Session {
   const { wallets, wallet, publicKey, connecting, select, signMessage, disconnect: disconnectWallet } = useWallet();
+  const privy = usePrivyWallet();
   const { connection } = useConnection();
   const client = useQueryClient();
   const meQuery = useMe();
@@ -103,7 +107,8 @@ export function useSession(): Session {
   const [signing, setSigning] = useState(false);
   const wantsSignIn = useRef(false);
   const ending = useRef(false);
-  const address = publicKey?.toBase58() ?? null;
+  // One wallet at a time: connecting either kind disconnects the other (connect below).
+  const address = privy?.address ?? publicKey?.toBase58() ?? null;
   const adapter = wallet?.adapter ?? null;
 
   // Connection and signing errors arrive as adapter events (the provider's autoConnect has no caller to throw to).
@@ -133,14 +138,15 @@ export function useSession(): Session {
   const signIn = useCallback(async () => {
     if (!address) return;
     if (network.state === 'wrong') { setNotice(network.reason ?? null); return; }
-    if (!signMessage) { setNotice('This wallet cannot sign messages, so it cannot sign in. Choose another wallet.'); return; }
+    const sign = privy?.address ? privy.signMessage : signMessage;
+    if (!sign) { setNotice('This wallet cannot sign messages, so it cannot sign in. Choose another wallet.'); return; }
     setSigning(true);
     setNotice(null);
     try {
       const { message } = await api.nonce(address);
       const problem = signInMessageProblem(message, { address, host: location.host, origin: location.origin, cluster: env.cluster });
       if (problem) throw new Error(problem);
-      const signature = await signMessage(new TextEncoder().encode(message));
+      const signature = await sign(new TextEncoder().encode(message));
       await api.verify({ wallet: address, message, signature: bs58.encode(signature) });
       // The profile comes from /v1/me. Drop any read that started before the cookie existed, then read it fresh.
       await client.cancelQueries({ queryKey: keys.me });
@@ -152,23 +158,32 @@ export function useSession(): Session {
     } finally {
       setSigning(false);
     }
-  }, [address, client, network.state, network.reason, signMessage]);
+  }, [address, client, network.state, network.reason, privy, signMessage]);
 
   const connect = useCallback((name: WalletName) => {
     setNotice(null);
-    if (adapter?.name === name && address) {
+    const email = name === PRIVY_WALLET;
+    if (address && (email ? privy?.address : !privy?.address && adapter?.name === name)) {
       if (me?.wallet !== address) void signIn();
       return;
     }
     wantsSignIn.current = true;
-    select(name);
-  }, [adapter, address, me, select, signIn]);
+    if (!email) {
+      if (privy?.address) void privy.disconnect();
+      select(name);
+      return;
+    }
+    if (!privy) return;
+    if (adapter) void disconnectWallet().catch(() => undefined);
+    privy.open().catch(error => { wantsSignIn.current = false; setNotice(describeError(error)); });
+  }, [adapter, address, disconnectWallet, me, privy, select, signIn]);
 
   const disconnect = useCallback(async () => {
     wantsSignIn.current = false;
     await endSession(null);
     await disconnectWallet().catch(() => undefined); // the wallet reports its own failure through the error event
-  }, [disconnectWallet, endSession]);
+    if (privy?.address) await privy.disconnect().catch(() => undefined);
+  }, [disconnectWallet, endSession, privy]);
 
   // A connection the user asked for continues straight into sign-in once /v1/me has answered.
   useEffect(() => {
@@ -197,13 +212,23 @@ export function useSession(): Session {
 
   const options = wallets
     .filter(w => w.readyState === WalletReadyState.Installed || w.readyState === WalletReadyState.Loadable)
-    .map(w => ({ name: w.adapter.name, icon: w.adapter.icon }));
+    .map((w): WalletOption => ({ name: w.adapter.name, icon: w.adapter.icon }))
+    .concat(privy ? [{ name: PRIVY_WALLET as WalletName, icon: '', email: true }] : []);
 
   const status: SessionStatus = signing ? 'signing'
-    : connecting ? 'connecting'
+    : connecting || privy?.pending ? 'connecting'
     : address && me?.wallet === address ? 'signed-in'
     : address ? 'needs-sign-in'
     : options.length ? 'disconnected' : 'no-wallet';
 
-  return { status, wallets: options, walletName: adapter?.name ?? null, address, me: me ?? null, network, notice, connect, signIn, disconnect };
+  const walletName = privy?.address || privy?.pending ? PRIVY_WALLET as WalletName : adapter?.name ?? null;
+  return { status, wallets: options, walletName, address, me: me ?? null, network, notice, connect, signIn, disconnect };
+}
+
+/** The connected account and its transaction signer: the Privy wallet when that is connected, else the browser wallet. */
+export function useSigner() {
+  const { publicKey, signTransaction } = useWallet();
+  const privy = usePrivyWallet();
+  const privyKey = useMemo(() => privy?.address ? new PublicKey(privy.address) : null, [privy?.address]);
+  return privy && privyKey ? { publicKey: privyKey, signTransaction: privy.signTransaction } : { publicKey, signTransaction };
 }

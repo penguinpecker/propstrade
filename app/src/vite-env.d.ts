@@ -5,4 +5,5 @@ interface ImportMetaEnv {
   readonly VITE_RPC_URL?: string;
   readonly VITE_PROGRAM_ID?: string;
   readonly VITE_CLUSTER?: string;
+  readonly VITE_PRIVY_APP_ID?: string;
 }
