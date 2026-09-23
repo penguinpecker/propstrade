@@ -378,7 +378,8 @@ the Node provider (without it Railpack sees the root `Cargo.toml` and builds the
    | `SENTRY_DSN` | optional |
    | `RAILPACK_NODE_NPM_INSTALL` | `npm ci` (build-time only: makes Railpack install exactly the lockfile instead of `npm install`) |
 
-   Leave `PORT` (Railway sets it), `HOST`, `LOG_LEVEL`, `TRUST_PROXY_HOPS` (1 = Railway's edge) and
+   Leave `PORT` (Railway sets it), `HOST`, `LOG_LEVEL`, `TRUST_PROXY_HOPS` (1 = Railway's edge; set 2 when the API is
+   reached through the app's Vercel rewrite, section 7) and
    `SIM_FILL_DELAY_MS` unset unless you mean to change their defaults. From the CLI, single-quote reference values and
    pipe secrets in, so no secret appears in a command line or shell history:
 
@@ -471,6 +472,29 @@ extensions and need nothing. If `index.html`'s inline theme script ever changes,
 
 Rehearsal note: `vercel build --prod` was run on a clean copy of the repo with the project settings above: it ran the
 install command, built the app, and bundled `app/middleware.js` as an edge function in front of every path.
+
+### 7.1 Without a custom domain (current deployment)
+
+Until the domain is bought, the app runs at `https://propstrade.vercel.app` and the API at a `*.up.railway.app`
+domain. Those are different sites, so the session cookie would not flow. `app/vercel.json` therefore proxies
+`/v1/*` to the Railway service (uncached: `x-vercel-enable-rewrite-caching: 0` and the project's external rewrite
+caching off), which makes the API same-origin with the app:
+
+| Where | Variable | Value |
+|---|---|---|
+| Railway `server` | `APP_ORIGIN` | `https://propstrade.vercel.app` |
+| Railway `server` | `TRUST_PROXY_HOPS` | `2` (Vercel's proxy + Railway's edge, so rate limits see the trader's IP) |
+| Vercel production | `VITE_API_URL` | `https://propstrade.vercel.app` |
+| Vercel production | `VITE_RPC_URL` | `https://propstrade.vercel.app/v1/rpc` (the server's RPC relay: the provider key stays in `RPC_URL`) |
+
+The live-update stream (`/v1/stream`) also goes through the rewrite; the app reconnects on its own if the proxy
+closes a long-lived connection. When the domain is bought, move the API to `api.<DOMAIN>` (section 6.5), point the
+rewrite (or `VITE_API_URL`) at it and set `APP_ORIGIN` to `https://<DOMAIN>`.
+
+Deployed 2026-09-23: Railway project `propstrade` (services `server` and `Postgres`, Postgres 18), Vercel project
+`propstrade` (team `penguinpeckers-projects`). New Railway services cannot use `server/railway.json` (config as code
+is deprecated for them), so its settings were applied to the service instance through the Railway API; keep them in
+sync with that file. Every Railway `server` variable is sealed and every Vercel variable is `sensitive`.
 
 ## 8. Post-deploy verification
 
@@ -763,7 +787,7 @@ variable that is not documented there and here):
 | `PROGRAM_ID` | no (yes on mainnet) | props_vault program id; must equal the SDK's |
 | `PORT`, `HOST` | no | listen address (8080, 0.0.0.0); Railway sets `PORT` |
 | `LOG_LEVEL` | no | pino level (info) |
-| `TRUST_PROXY_HOPS` | no | trusted reverse proxies (1 = Railway's edge) |
+| `TRUST_PROXY_HOPS` | no | trusted reverse proxies (1 = Railway's edge; 2 when the app's Vercel rewrite fronts the API, see section 7) |
 | `SIM_FILL_DELAY_MS` | no | sim keeper delay (2000, minimum 1000) |
 | `RISK_AUTHORITY_KEYPAIR` | yes on mainnet | risk authority secret key (JSON byte array or base58) |
 | `KYC_AUTHORITY_KEYPAIR` | yes on mainnet | KYC authority secret key |
