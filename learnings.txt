@@ -930,3 +930,11 @@ Pinocchio evaluated (2026-09-23; measured in a scratch copy, 59/59 LiteSVM tests
            misplacing overlays, far go-to-date landing wrong); 24 fixed, 2 rejected with reasons. Verified live in Chrome.
 - The Vercel REST deployments list answered without `deployments` for ~10 minutes right after a CLI deploy (transient);
   the CLI deploy itself succeeded. Re-query before concluding anything.
+
+2026-09-24 DEPLOYED 2fc4d3f (app only): Google sign-in hung at "Signing in..." because Privy's Solana signMessage reads
+           the Node `Buffer` global, which the app only installed when the transaction module (chain.ts) loaded. The error
+           ("Buffer is not defined") was thrown inside Privy's own callback, so its promise never settled. privy-bridge.ts
+           now imports lib/buffer.ts, and Google-wallet sign requests reject after 60 s with a message instead of hanging.
+           Verified live in the owner's browser (existing Privy session): auto sign-in completed, practice account loaded,
+           no Buffer error. Only a real Google session can test this: Privy allows Google sign-in on the live domain only.
+- The owner asked for pushes and deploys on this project without confirmation from now on (scan, export, verify, log).
