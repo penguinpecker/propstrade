@@ -86,6 +86,8 @@ export interface TradeFilter {
   opensOnly?: boolean;
   /** Only events with a smaller id (pagination). */
   beforeId?: string;
+  /** Only events with a larger id (incremental sync). */
+  afterId?: string;
 }
 
 /** Newest fills first. */
@@ -95,7 +97,31 @@ export async function fetchTradeEvents(filter: TradeFilter, limit = 50, url = SU
   if (filter.user) where.push(`user_eq: ${JSON.stringify(filter.user)}`);
   if (filter.opensOnly) where.push('beforeSizeInUsd_eq: "0"');
   if (filter.beforeId) where.push(`id_lt: ${JSON.stringify(filter.beforeId)}`);
+  if (filter.afterId) where.push(`id_gt: ${JSON.stringify(filter.afterId)}`);
   const d = await graphql<{ tradeEvents: Row[] }>(url,
     `{ tradeEvents(where: {${where.join(', ')}}, orderBy: id_DESC, limit: ${limit}) { ${FIELDS} } }`);
   return d.tradeEvents.map(toTradeEvent);
+}
+
+/** Transaction signature of each event id (the indexer links every event to its instruction's transaction). */
+export async function fetchTxSignatures(eventIds: string[], url = SUBSQUID): Promise<Map<string, string>> {
+  if (!eventIds.length) return new Map();
+  const d = await graphql<{ instructionRelations: { innerId: string; txHash: string }[] }>(url,
+    `{ instructionRelations(where: {innerId_in: ${JSON.stringify(eventIds)}}, limit: ${eventIds.length * 2}) { innerId txHash } }`);
+  return new Map(d.instructionRelations.map((r) => [r.innerId, r.txHash]));
+}
+
+/**
+ * Why GMTrade closed an order account. `state` Completed + reason "executed" = filled; Cancelled = GMTrade could
+ * not execute it (reason says where it failed); Pending + reason "cancel" = the owner cancelled it.
+ */
+export interface OrderRemoval { id: string; order: string; kind: string; state: string; reason: string; ts: number; slot: number }
+
+export async function fetchOrderRemovals(orders: string[], url = SUBSQUID): Promise<OrderRemoval[]> {
+  if (!orders.length) return [];
+  const d = await graphql<{ orderRemoveds: Row[] }>(url,
+    `{ orderRemoveds(where: {order_in: ${JSON.stringify(orders)}}, limit: ${orders.length * 2}) { id order kind state reason timestamp slot } }`);
+  return d.orderRemoveds.map((r) => ({
+    id: r.id!, order: r.order!, kind: r.kind ?? '', state: r.state ?? '', reason: r.reason ?? '', ts: Date.parse(r.timestamp!), slot: Number(r.slot),
+  }));
 }

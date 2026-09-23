@@ -76,6 +76,7 @@ fn check_increase(
     Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct OpenPosition<'info> {
     pub trader: Signer<'info>,
@@ -194,7 +195,7 @@ pub(crate) fn open_position(ctx: Context<OpenPosition>, args: OpenPositionArgs) 
         placed_by_risk: false,
     })?;
     ctx.accounts.market_config.apply_oi_change(args.is_long, 0, args.size_delta_usd)?;
-    emit!(OrderRequested {
+    emit_cpi!(OrderRequested {
         funded: funded_key,
         order,
         market_token,
@@ -210,6 +211,7 @@ pub(crate) fn open_position(ctx: Context<OpenPosition>, args: OpenPositionArgs) 
     Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct DecreaseOrder<'info> {
     /// The trader, or a risk authority for forced closes.
@@ -278,14 +280,14 @@ impl<'info> DecreaseOrder<'info> {
 /// Market-decreases a position. Signed by the trader, or by a risk authority (forced close).
 /// Never blocked by pauses.
 pub(crate) fn close_position(ctx: Context<DecreaseOrder>, args: ClosePositionArgs) -> Result<()> {
-    let a = ctx.accounts;
+    let a = &mut *ctx.accounts;
     let by = a.authority.key();
     let is_trader = by == a.funded.trader;
     let is_risk = a.config.is_risk_authority(&by);
     require!(is_trader || is_risk, VaultError::Unauthorized);
     require!(args.acceptable_price != 0, VaultError::ZeroAcceptablePrice);
     a.place(args.is_long, OrderType::Close, args.size_delta_usd, None, Some(args.acceptable_price), !is_trader)?;
-    emit!(OrderRequested {
+    let event = OrderRequested {
         funded: a.funded.key(),
         order: a.gm_order.key(),
         market_token: a.market_config.market_token,
@@ -297,19 +299,20 @@ pub(crate) fn close_position(ctx: Context<DecreaseOrder>, args: ClosePositionArg
         acceptable_price: args.acceptable_price,
         by,
         ts: now()?,
-    });
+    };
+    emit_cpi!(event);
     Ok(())
 }
 
 /// Places a take-profit (LimitDecrease) or stop-loss (StopLossDecrease) order. Trader only.
 pub(crate) fn set_protection(ctx: Context<DecreaseOrder>, args: SetProtectionArgs) -> Result<()> {
-    let a = ctx.accounts;
+    let a = &mut *ctx.accounts;
     require_keys_eq!(a.authority.key(), a.funded.trader, VaultError::Unauthorized);
     require!(a.funded.status != FundedStatus::PayoutPending, VaultError::InvalidAccountStatus);
     require!(matches!(args.order_type, OrderType::TakeProfit | OrderType::StopLoss), VaultError::InvalidOrderType);
     require!(args.trigger_price != 0, VaultError::InvalidTriggerPrice);
     a.place(args.is_long, args.order_type, args.size_delta_usd, Some(args.trigger_price), None, false)?;
-    emit!(ProtectionSet {
+    let event = ProtectionSet {
         funded: a.funded.key(),
         order: a.gm_order.key(),
         market_token: a.market_config.market_token,
@@ -318,10 +321,12 @@ pub(crate) fn set_protection(ctx: Context<DecreaseOrder>, args: SetProtectionArg
         size_delta_usd: args.size_delta_usd,
         trigger_price: args.trigger_price,
         ts: now()?,
-    });
+    };
+    emit_cpi!(event);
     Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct UpdateOrder<'info> {
     pub trader: Signer<'info>,
@@ -416,7 +421,7 @@ pub(crate) fn update_order(ctx: Context<UpdateOrder>, args: UpdateOrderArgs) -> 
         }
         ctx.accounts.funded.orders[idx].size_usd = size;
     }
-    emit!(OrderUpdated {
+    emit_cpi!(OrderUpdated {
         funded: funded_key,
         order,
         size_delta_usd: args.size_delta_usd,
@@ -427,6 +432,7 @@ pub(crate) fn update_order(ctx: Context<UpdateOrder>, args: UpdateOrderArgs) -> 
     Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct CancelOrder<'info> {
     /// The trader, or a risk authority.
@@ -494,6 +500,6 @@ pub(crate) fn cancel_order(ctx: Context<CancelOrder>) -> Result<()> {
         s.pending_usd = s.pending_usd.checked_sub(tracked.size_usd).ok_or(VaultError::MathOverflow)?;
         ctx.accounts.market_config.apply_oi_change(slot.is_long, tracked.size_usd, 0)?;
     }
-    emit!(OrderCancelled { funded: funded_key, order, by, ts: now()? });
+    emit_cpi!(OrderCancelled { funded: funded_key, order, by, ts: now()? });
     Ok(())
 }

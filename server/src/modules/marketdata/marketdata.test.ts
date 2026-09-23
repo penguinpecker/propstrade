@@ -197,6 +197,10 @@ test('live: routes, stream events and service API without a deployed program', {
     assert.equal(decodeMarket(raw.market).meta.market_token_mint, sol.marketToken);
     assert.ok(raw.virtualInventories.EEcQz9yC68rztSEq8XggVtp8Sa8Dj3gWJ8ckJuQvv5xw && raw.slot > 0);
     assert.deepEqual([state.symbol, state.pure, state.isClosed], ['SOL', true, false]);
+    // Unit prices: SOL (9 decimals) at 10^11 per USD, USDC (6 decimals) at ~10^14.
+    const solUsd = Number(state.prices.index.min) / 1e11;
+    assert.ok(Math.abs(solUsd / Number(sol.price) - 1) < 0.01, `SOL unit price ${state.prices.index.min} vs ${sol.price}`);
+    assert.ok(state.prices.index.min <= state.prices.index.max && Math.abs(Number(state.prices.short.min) / 1e14 - 1) < 0.01);
 
     const heard: string[] = [];
     const off = service.onTick((t) => heard.push(t.symbol));

@@ -168,7 +168,9 @@ Permissionless cranks:
 Events for every state change (`EvaluationPurchased`, `EvaluationResolved`, `FundedActivated`, `OrderRequested`,
 `OrderCancelled`, `ProtectionSet`, `Synced`, `PayoutRequested`, `PayoutPaid`, `PayoutRejected`, `AccountRestricted`,
 `AccountBreached`, `AccountClosed`, `CapitalDeposited`, `CapitalWithdrawn`, `FeesSwept`, `ConfigChanged`) so the
-indexer and the Verify page can reconstruct everything from chain data alone.
+indexer and the Verify page can reconstruct everything from chain data alone. Events are emitted with Anchor
+`emit_cpi!` (a self-CPI signed by the `["__event_authority"]` PDA), never as log lines: Solana keeps only the first
+10,000 bytes of a transaction's logs, and anyone can fill them.
 
 Invariants (tests must assert each; security review must try to break each):
 - No instruction moves USDC out of an owner ATA except GMTrade order creation (to a GMTrade escrow), approve_payout
@@ -283,6 +285,13 @@ Program (round 1, reviewed by two adversarial auditors, all findings fixed):
   cancels or protective orders. Capital vault ATA is `init_if_needed` (front-running initialize is harmless).
 - Build: `opt-level = "s"` → 899 KB (rent ≈ 4.57 SOL; have ~10 SOL during deploy for the buffer). CU: open ≈ 166k,
   open + stop-loss in one v0 tx ≈ 283k (SDK default limit 400k). Owner PDA float target 0.25 SOL / min 0.05 SOL.
+- Round 2: events moved to `emit_cpi!` (every event-emitting instruction takes `event_authority` + `program`; the SDK
+  passes them and `sharedLookupAddresses()` includes the event authority). The indexer reads events from the
+  transaction's inner instructions (`innerInstructionsOf` + `parseEvents`), which a trader cannot cut off with log spam
+  (50 memos ahead of an instruction truncated its logs; the event survives). Cost: 978 KB (+79 KB); open ≈ 182k CU,
+  open + stop-loss ≈ 308k (validator); open + stop-loss + take-profit without a lookup table 1,129 bytes, 40 of the 64
+  instruction-trace entries, ≈ 455k CU; a risk `restrict` + 2 CLOSE_ALL closes fit one transaction without a lookup
+  table (3 do not).
 - Rent payers: trader pays Evaluation/TraderProfile/FundedAccount/PayoutRequest; sol_treasury pays owner float and
   payout ATAs; kyc authority pays IdentityLock.
 - Known, accepted: third-party USDC sent to an owner ATA counts as balance → the payout review must reconcile requested
@@ -309,3 +318,74 @@ Round 2 module ownership:
   `/v1/payouts*`, `/v1/verify`, `/v1/vault`, admin payout review; implements `ChainService`.
 - `server/src/modules/keeper` — leader-only risk loops (§4.5).
 - `app/` — every page wired to real data and real transactions.
+
+Chain module (round 2):
+- Indexer: the logs subscription only wakes a catch-up; the catch-up pages `getSignaturesForAddress` (confirmed) back to
+  `indexer_cursors.signature` and applies transactions oldest-first. Each transaction's `program_events` rows, projections
+  and cursor commit in one database transaction, so a replay or duplicate delivery applies nothing twice. A projection
+  error leaves the cursor before the transaction (retried with backoff), never skips it; the keeper alerts when a
+  props_vault transaction has waited more than 5 min to be indexed (checked once a minute against the chain).
+- Funded valuation: V = owner USDC + collateral escrowed in pending increase orders + Σ model net value (no debt);
+  equity = S − L + V (allowance = V); realized = V − L − unrealized. A position the model cannot value counts at its
+  collateral and the account's freshness is `unavailable`.
+- GMTrade fills come from subsquid `tradeEvents` (by owner PDA); their transaction via `instructionRelations.txHash`,
+  order outcomes via `orderRemoveds` (Completed = filled, Cancelled = GMTrade could not execute it, Pending + "cancel" =
+  owner cancel). A decrease's realized PnL = `pnl + priceImpactValue − fees` (decrease price impact is charged to
+  collateral outside `pnl`); a round trip then nets the owner's USDC flow to the cent.
+- Chain jobs are unique per `subject` (evaluation or payout PDA, `lift:<funded>`): one result per evaluation, one
+  decision per payout (keeper or admin, whoever first; a failed decision can be replaced; a failed job is queued again
+  when its subject is enqueued again). The executor re-reads the chain before each attempt, simulates, stores the
+  signature before sending, and confirms; a transaction seen `processed` is waited for, never re-planned. Work the chain
+  shows done is confirmed with the signature of the indexed event that did it, never with a failed transaction of the
+  job's. RPC and indexer trouble is retried for as long as it lasts (backoff capped at 5 min); a job fails for good only
+  after 10 refusals by the chain itself (simulation or onchain failure, missing account). Operators:
+  `POST /v1/admin/jobs/:id/retry` (a failed job), `POST /v1/admin/funded/:id/lift-restriction` (`restrict(false)`).
+- `/v1/vault` reads Config with the three vault accounts in one call (one slot). `/v1/config` caches Config and the
+  tiers for 30 s; an indexed `configChanged` drops the Config (and the tiers when it names a tier).
+- `syncOrders` also resolves orders the indexed `sync` marked finished before the venue tick saw them; an order GMTrade
+  cancelled gets a `cancel` activity row and a notification.
+- `MarketState.prices` (unit prices) was added to the marketdata contract for model inputs. Index-token decimals are
+  read from the index token's SPL mint (GMTrade index tokens are mints with no supply).
+
+Keeper module (round 2):
+- Each tick (≤ 5 s) the leader reads every open funded account fresh (FundedAccount, owner USDC + lamports, its GMTrade
+  Position and Order accounts in ONE `getMultipleAccounts` call, i.e. one slot, re-read if the FundedAccount changed
+  since it listed them; model valuation), plans ONE transaction (most urgent first: owner top-up, equity breach,
+  session guard, upgrade restrict, cleanup, sync), sends it, reads again and re-plans until nothing is left. Every send
+  first asks Postgres whether this session still holds `LOCK_KEYS.keeper`; if not, nothing is sent and the term ends.
+- Breach = equity ≤ floor, i.e. V ≤ 0 (V as in the chain notes), decided only on `live`/`delayed` valuations and only
+  when a second fresh read agrees: `restrict` (if active) + a CLOSE_ALL `close_position` per open slot in an open
+  market, in one transaction when it fits. With all 8 tracked-order slots used it first recovers finished orders
+  (`close_completed_order`), then cancels the trader's own pending orders: those on the slots being closed (TP/SL
+  first), then increases elsewhere, another position's TP/SL last; the trader is told which. A slot with a pending risk
+  close gets no second one.
+  Forced closes carry "any price" bounds (long ≥ 1, short ≤ u128::MAX).
+- Session guard: session-restricted markets map to a calendar by marketdata category (Stocks → NYSE 16:00 New York,
+  13:00 on early closes, 2026–2027 holidays; Forex → Friday 17:00 New York). From 15 min before the close, positions with
+  size / model net value above `closed_max_leverage_bps` are closed, only while marketdata says the session is open. The
+  keeper alerts 30 days before the NYSE calendar runs out.
+- Cleanup: finished-but-open orders → `close_completed_order` + `sync`; TP/SL whose position is gone → cancel, unless a
+  pending increase on the slot is at least as old (placed together with an open). `sync` is sent exactly when it would
+  change something (slot size/collateral/pending sum, a vanished order, an idle slot). `top_up_owner` below
+  `owner_sol_min`.
+- Payout review (requested, no decision job yet, payouts not paused): flat (no slot/order, every
+  `fetchOwnerPositions` account size 0), identity verified onchain, requested profit ≤ realized P&L of indexed fills since
+  the last paid payout + $0.01 per fill, and no other funded account added exposure (any increase fill, not only an
+  open from flat) in the same market within 5 min of an increase of this account's with both positions still open
+  after both (opposite = hedge, same side = mirror). Pass → `approve_payout`
+  job; fail → `payouts.status = 'reviewing'` with `review_note` (operators only) + alert. A reconciliation shortfall
+  younger than 5 min waits for GMTrade's indexer instead.
+- GMTrade upgrade watch: the program data's last-deploy slot vs the newest `gmtrade_deploys` row (a lower slot, from a
+  lagging RPC node, is ignored). First sight is accepted as reviewed when it equals `GMTRADE_DEPLOY_SLOT`, or when that
+  is unset (with a warning alert); otherwise, and for every newer slot, it is an upgrade: alert, restrict every account
+  that is active on every tick (payout-pending ones once they are active again, new ones once activated) and hold the
+  payout review, until an operator acknowledges the deploy (`POST /v1/admin/gmtrade-deploys/:slot/acknowledge`). The
+  keeper holds no admin key, so it cannot set the trading pause. `/v1/health` carries `keeper` (leader, last tick, last
+  upgrade with `restrictedAt` / `acknowledgedAt`). Lifting each restriction after review is an operator action.
+- Alerts (all optional, always logged): Telegram, Sentry (envelope API over HTTP), HEARTBEAT_URL after each tick; repeats
+  of one alert key throttled to 30 min. Telegram gets one message per batch, at most every 4 s (its group limit is 20
+  a minute), and a 429 is sent again after `retry_after`. Raised for breaches, failed keeper transactions, held payouts,
+  GMTrade upgrades, stale prices (> 20 s) on markets with open funded positions, ≥ 50 orders/hour on one account, chain
+  jobs failed for good, an account the keeper cannot read or value, and an indexer more than 5 min behind.
+- The venue loop keeps reading an account's GMTrade fills for 3 min after it goes flat (subsquid lags ~35 s), so the
+  closing fills a payout review reconciles against are indexed.

@@ -8,11 +8,12 @@ use gmsol_programs::gmsol_store::program::GmsolStore;
 use super::now;
 use crate::{errors::VaultError, events::*, gmtrade, program::PropsVault, state::*};
 
-fn config_changed(config: &Config, change: ConfigChange, subject: Pubkey) -> Result<()> {
-    emit!(ConfigChanged { change, subject, paused: config.paused, ts: now()? });
-    Ok(())
+fn config_changed(config: &Config, change: ConfigChange, subject: Pubkey) -> Result<ConfigChanged> {
+    Ok(ConfigChanged { change, subject, paused: config.paused, ts: now()? })
 }
 
+/// Declares the event CPI accounts itself (not `#[event_cpi]`), because `program` is already here for the upgrade
+/// authority check and is the same account the event self-CPI needs.
 #[derive(Accounts)]
 pub struct Initialize<'info> {
     #[account(mut)]
@@ -53,6 +54,9 @@ pub struct Initialize<'info> {
     pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
     pub system_program: Program<'info, System>,
+    /// CHECK: Only the event authority can invoke self-CPI
+    #[account(seeds = [b"__event_authority"], bump)]
+    pub event_authority: AccountInfo<'info>,
 }
 
 /// Creates the config and vault accounts. Everything starts paused.
@@ -73,9 +77,11 @@ pub(crate) fn initialize(ctx: Context<Initialize>, params: ConfigParams) -> Resu
     c.vault_bump = ctx.bumps.vault;
     c.fee_vault_bump = ctx.bumps.fee_vault;
     c.sol_treasury_bump = ctx.bumps.sol_treasury;
-    config_changed(c, ConfigChange::Initialized, c.admin)
+    emit_cpi!(config_changed(c, ConfigChange::Initialized, c.admin)?);
+    Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct AdminOnly<'info> {
     pub admin: Signer<'info>,
@@ -86,9 +92,11 @@ pub struct AdminOnly<'info> {
 pub(crate) fn propose_admin(ctx: Context<AdminOnly>, new_admin: Pubkey) -> Result<()> {
     let c = &mut ctx.accounts.config;
     c.pending_admin = Some(new_admin);
-    config_changed(c, ConfigChange::AdminProposed, new_admin)
+    emit_cpi!(config_changed(c, ConfigChange::AdminProposed, new_admin)?);
+    Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct AcceptAdmin<'info> {
     pub new_admin: Signer<'info>,
@@ -105,7 +113,8 @@ pub(crate) fn accept_admin(ctx: Context<AcceptAdmin>) -> Result<()> {
     let c = &mut ctx.accounts.config;
     c.admin = ctx.accounts.new_admin.key();
     c.pending_admin = None;
-    config_changed(c, ConfigChange::AdminAccepted, c.admin)
+    emit_cpi!(config_changed(c, ConfigChange::AdminAccepted, c.admin)?);
+    Ok(())
 }
 
 pub(crate) fn set_authorities(ctx: Context<AdminOnly>, risk_authorities: Vec<Pubkey>, kyc_authority: Pubkey) -> Result<()> {
@@ -114,22 +123,26 @@ pub(crate) fn set_authorities(ctx: Context<AdminOnly>, risk_authorities: Vec<Pub
     let c = &mut ctx.accounts.config;
     c.risk_authorities = risk_authorities;
     c.kyc_authority = kyc_authority;
-    config_changed(c, ConfigChange::Authorities, c.admin)
+    emit_cpi!(config_changed(c, ConfigChange::Authorities, c.admin)?);
+    Ok(())
 }
 
 pub(crate) fn set_params(ctx: Context<AdminOnly>, params: ConfigParams) -> Result<()> {
     params.validate(Rent::get()?.minimum_balance(0))?;
     let c = &mut ctx.accounts.config;
     c.set_params(&params);
-    config_changed(c, ConfigChange::Params, c.admin)
+    emit_cpi!(config_changed(c, ConfigChange::Params, c.admin)?);
+    Ok(())
 }
 
 pub(crate) fn set_pauses(ctx: Context<AdminOnly>, paused: Pauses) -> Result<()> {
     let c = &mut ctx.accounts.config;
     c.paused = paused;
-    config_changed(c, ConfigChange::Pauses, c.admin)
+    emit_cpi!(config_changed(c, ConfigChange::Pauses, c.admin)?);
+    Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 #[instruction(id: u16)]
 pub struct UpsertTier<'info> {
@@ -161,9 +174,11 @@ pub(crate) fn upsert_tier(ctx: Context<UpsertTier>, id: u16, params: TierParams)
     t.terms_hash = params.terms_hash;
     t.version = t.version.checked_add(1).ok_or(VaultError::MathOverflow)?;
     t.bump = ctx.bumps.tier;
-    config_changed(&ctx.accounts.config, ConfigChange::Tier, t.key())
+    emit_cpi!(config_changed(&ctx.accounts.config, ConfigChange::Tier, t.key())?);
+    Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 #[instruction(market_token: Pubkey)]
 pub struct UpsertMarket<'info> {
@@ -197,9 +212,11 @@ pub(crate) fn upsert_market(ctx: Context<UpsertMarket>, market_token: Pubkey, pa
     }
     require_keys_eq!(m.gm_market, gm_market.key(), VaultError::MarketMismatch);
     m.set_params(&params);
-    config_changed(c, ConfigChange::Market, m.key())
+    emit_cpi!(config_changed(c, ConfigChange::Market, m.key())?);
+    Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct MoveCapital<'info> {
     pub admin: Signer<'info>,
@@ -234,7 +251,7 @@ pub(crate) fn deposit_capital(ctx: Context<MoveCapital>, amount: u64) -> Result<
         a.usdc_mint.decimals,
     )?;
     let capital_vault_balance = a.capital_vault.amount.checked_add(amount).ok_or(VaultError::MathOverflow)?;
-    emit!(CapitalDeposited { amount, capital_vault_balance, ts: now()? });
+    emit_cpi!(CapitalDeposited { amount, capital_vault_balance, ts: now()? });
     Ok(())
 }
 
@@ -257,10 +274,11 @@ pub(crate) fn withdraw_capital(ctx: Context<MoveCapital>, amount: u64) -> Result
         a.usdc_mint.decimals,
     )?;
     let capital_vault_balance = a.capital_vault.amount.checked_sub(amount).ok_or(VaultError::MathOverflow)?;
-    emit!(CapitalWithdrawn { amount, to: a.admin_usdc.key(), capital_vault_balance, ts: now()? });
+    emit_cpi!(CapitalWithdrawn { amount, to: a.admin_usdc.key(), capital_vault_balance, ts: now()? });
     Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct SweepFees<'info> {
     pub admin: Signer<'info>,
@@ -296,10 +314,11 @@ pub(crate) fn sweep_fees(ctx: Context<SweepFees>) -> Result<()> {
         amount,
         a.usdc_mint.decimals,
     )?;
-    emit!(FeesSwept { amount, ts: now()? });
+    emit_cpi!(FeesSwept { amount, ts: now()? });
     Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct WithdrawSolTreasury<'info> {
     #[account(mut)]
@@ -323,6 +342,6 @@ pub(crate) fn withdraw_sol_treasury(ctx: Context<WithdrawSolTreasury>, lamports:
         ),
         lamports,
     )?;
-    emit!(SolTreasuryWithdrawn { lamports, to: a.admin.key(), ts: now()? });
+    emit_cpi!(SolTreasuryWithdrawn { lamports, to: a.admin.key(), ts: now()? });
     Ok(())
 }

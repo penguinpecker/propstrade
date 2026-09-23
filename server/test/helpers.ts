@@ -8,6 +8,7 @@ import { buildApp } from '../src/app.js';
 import { SESSION_COOKIE } from '../src/auth/routes.js';
 import { loadConfig } from '../src/config.js';
 import { createDb } from '../src/db/client.js';
+import type { Services } from '../src/modules/types.js';
 import type { BalanceRpc } from '../src/routes/account.js';
 import { createStreamHub } from '../src/stream.js';
 import { testDatabaseUrl } from './db.js';
@@ -38,12 +39,12 @@ export function fixtureRpc(accounts: Map<string, AccountInfo<Buffer>> = new Map(
   return rpc as BalanceRpc & { calls: number };
 }
 
-export async function makeApp(opts: { rpc?: BalanceRpc; logger?: FastifyServerOptions['logger'] } = {}) {
+export async function makeApp(opts: { rpc?: BalanceRpc; logger?: FastifyServerOptions['logger']; services?: Services } = {}) {
   const config = testConfig();
   const { sql, db } = createDb(config.DATABASE_URL);
   const hub = createStreamHub();
   const app = await buildApp({
-    config, db, sql, hub, modules: new Map([['marketdata', 'absent']]), rpc: opts.rpc ?? fixtureRpc(), logger: opts.logger ?? false,
+    config, db, sql, hub, modules: new Map([['marketdata', 'absent']]), services: opts.services, rpc: opts.rpc ?? fixtureRpc(), logger: opts.logger ?? false,
   });
   return {
     app, db, sql, hub, config,
