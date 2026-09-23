@@ -20,6 +20,10 @@
   --amber-wash: #352d20;
   --graph-fill: #31243f;
   --graph-muted-fill: #2b2730;
+  --chart-up: #0ecb81;
+  --chart-down: #f6465d;
+  --chart-up-text: #0ecb81;
+  --chart-down-text: #f6465d;
 }
 :root[data-theme="dark"] ::selection { background:#50366c; color:#fff; }
 :root[data-theme="dark"] :is(.button.primary,.skip-link,.mobile-trade-action) { color:#21142e; }
@@ -59,6 +63,8 @@
 :root[data-theme="dark"] .strip-stat { border-left-color:#35303d; }
 :root[data-theme="dark"] .chart-option.active { color:#c3a0e8; }
 :root[data-theme="dark"] .chart-skeleton { background:var(--surface); }
+:root[data-theme="dark"] :is(.tv-menu,.tv-popover) { box-shadow:0 14px 40px rgba(0,0,0,.5); }
+:root[data-theme="dark"] :is(.tv-selection,.tv-latest) { box-shadow:0 6px 20px rgba(0,0,0,.4); }
 :root[data-theme="dark"] .feed-bottom { background:#1c1921; }
 :root[data-theme="dark"] .leverage-badge { background:#243229; color:#acc5a9; }
 :root[data-theme="dark"] .position-protection { border-bottom-color:#74548e; }

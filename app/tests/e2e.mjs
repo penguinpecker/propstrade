@@ -382,16 +382,82 @@ try {
     await check('chart: GMTrade candles, OHLC of the last candle, and live ticks move it', async () => {
       await page.goto(`${siteUrl}/#/trade/practice`);
       await page.locator('.price-chart canvas').first().waitFor();
-      const ohlc = page.locator('.ohlc-line');
-      await ohlc.getByText('C 64,482.00').waitFor();
+      await page.mouse.move(0, 0); // no crosshair: the legend shows the latest candle
+      const legend = page.locator('.tv-legend-main');
+      await legend.getByText('C64,482.00').waitFor();
       stub.publish({ type: 'price', ticks: [{ symbol: 'BTC', min: '64600', max: '64600', mid: '64600', ts: Date.now() + 1_000, session: 'open' }] });
-      await ohlc.getByText('C 64,600.00').waitFor();
+      await legend.getByText('C64,600.00').waitFor();
       await page.locator('.market-price').getByText('64,600.00').waitFor();
       for (const interval of ['5m', '4h', '1D']) {
         await page.locator('.timeframes').getByRole('button', { name: interval, exact: true }).click();
-        await ohlc.getByText(`BTC · ${interval}`).waitFor();
+        await legend.getByText(`BTC / USD · ${interval} · GMTrade`).waitFor();
       }
       state.markets.find(m => m.symbol === 'BTC').price = '64600.00';
+    });
+
+    await check('chart: indicators from the dialog, a drawing kept for the market, a range that picks its interval', async () => {
+      await page.goto(`${siteUrl}/#/trade/practice`);
+      await page.locator('.price-chart canvas').first().waitFor();
+      await page.getByRole('button', { name: 'Indicators', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: 'Indicators' });
+      await dialog.getByText(/no trading volume/).waitFor();
+      await dialog.getByLabel('Search indicators').fill('rsi');
+      await dialog.getByRole('button', { name: /^Relative Strength Index/ }).click();
+      await dialog.getByLabel('Search indicators').fill('');
+      await dialog.getByRole('button', { name: /^Moving Average/ }).click();
+      await page.keyboard.press('Escape');
+      await page.locator('.tv-pane-legend').getByText('RSI 14').waitFor();
+      await page.locator('.tv-legend').getByText('MA 20').waitFor();
+      await page.getByRole('button', { name: 'Line tools' }).click();
+      await page.getByRole('menuitemradio', { name: 'Horizontal line' }).click();
+      const plot = await page.locator('.price-chart').boundingBox();
+      await page.mouse.click(plot.x + plot.width / 2, plot.y + plot.height / 5);
+      await page.reload();
+      await page.locator('.price-chart canvas').first().waitFor();
+      await page.getByRole('button', { name: 'Remove all drawings (1)' }).waitFor();
+      await page.locator('.tv-pane-legend').getByText('RSI 14').waitFor();
+      await page.getByRole('button', { name: /^1y:/ }).click();
+      await page.locator('.tv-legend-main').getByText('BTC / USD · 1D · GMTrade').waitFor();
+    });
+
+    await check('chart at 1366x768: it stays in its row, every drawing tool can be reached, the saved-copy note is whole, and Delete only acts with focus in the chart', async () => {
+      await page.setViewportSize({ width: 1366, height: 768 });
+      await page.route('**/v1/candles?**', async route => { const response = await route.fetch(); await route.fulfill({ response, json: { ...await response.json(), freshness: 'delayed' } }); });
+      try {
+        await page.goto(`${siteUrl}/#/trade/practice`);
+        await page.reload(); // the same URL does not reload the app, and the candles must come through the route
+        await page.locator('.chart-section .price-chart canvas').first().waitFor();
+        const [bottom, positions] = await Promise.all([page.locator('.chart-section .tv-bottom').boundingBox(), page.locator('.positions-panel').boundingBox()]);
+        assert.ok(bottom.y + bottom.height <= positions.y + 0.5, `the chart's bottom bar ends ${Math.round(bottom.y + bottom.height - positions.y)}px inside the positions panel`);
+        const source = page.locator('.chart-section .tv-source');
+        await source.getByText("saved copy while GMTrade's charts recover").waitFor();
+        assert.equal(await source.evaluate(el => el.scrollWidth - el.clientWidth), 0, 'the saved-copy note is cut short');
+        const until = async (predicate, message) => { for (const start = Date.now(); Date.now() - start < 5_000; await page.waitForTimeout(50)) if (await predicate()) return; throw new Error(message); };
+        const toolbar = page.locator('.chart-section .tv-drawbar-tools');
+        // A horizontal line placed here is selected: a Backspace after pressing elsewhere on the page keeps it, a Delete after pressing it on the chart removes it.
+        const count = async () => Number(/\((\d+)\)/.exec(await toolbar.getByRole('button', { name: /^Remove all drawings/ }).getAttribute('aria-label'))?.[1] ?? 0);
+        const before = await count();
+        await page.locator('.chart-section').getByRole('button', { name: 'Line tools' }).click();
+        await page.getByRole('menuitemradio', { name: 'Horizontal line' }).click();
+        const plot = await page.locator('.chart-section .price-chart').boundingBox();
+        const at = [plot.x + plot.width / 3, plot.y + plot.height / 3];
+        await page.mouse.click(...at);
+        await until(async () => await count() === before + 1, 'the line was not placed');
+        await page.locator('.market-price').click();
+        await page.keyboard.press('Backspace');
+        assert.equal(await count(), before + 1, 'a Backspace pressed outside the chart removed its drawing');
+        await page.mouse.click(...at);
+        await page.keyboard.press('Delete');
+        await until(async () => await count() === before, 'Delete did not remove the drawing selected on the chart');
+        // The lower tools sit below the fold at this height; the arrow at the toolbar's foot brings them in.
+        const inView = name => Promise.all([toolbar.boundingBox(), toolbar.getByRole('button', { name, exact: true }).boundingBox()]).then(([bar, button]) => button.y >= bar.y - 0.5 && button.y + button.height <= bar.y + bar.height + 0.5);
+        assert.equal(await inView('Hide all drawings'), false, 'expected the lower tools below the fold at this height');
+        await page.locator('.chart-section .tv-drawbar-scroll.down').click();
+        await until(() => inView('Hide all drawings'), 'the scroll arrow did not bring the lower tools into view');
+      } finally {
+        await page.unroute('**/v1/candles?**');
+        await page.setViewportSize({ width: 1920, height: 1080 });
+      }
     });
 
     await check('simulated order: submit, fill at the next price, then close', async () => {
