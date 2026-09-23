@@ -1,0 +1,3 @@
+# Produced by scripts/fixtures.sh (mainnet binary dump and the crate's IDL copy).
+fixtures/gmsol_store.so
+fixtures/gmsol_store.idl.json

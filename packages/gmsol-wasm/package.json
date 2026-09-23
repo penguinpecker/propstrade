@@ -1,0 +1,21 @@
+{
+  "name": "@props/gmsol-wasm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "gmsol-sdk 0.10.0 (GMTrade) compiled to WASM with the HEAD liquidation-price fix, plus a typed wrapper.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./web": "./src/web.ts"
+  },
+  "files": ["src", "pkg-node", "pkg-web", "NOTICE", "LICENSE-GMTRADE"],
+  "scripts": {
+    "build": "./build.sh",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "^5.9.3"
+  }
+}

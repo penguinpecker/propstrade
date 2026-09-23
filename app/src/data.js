@@ -1,5 +1,6 @@
 export const money = (value, digits = 2) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value);
 export const number = (value, digits = 2) => new Intl.NumberFormat('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits }).format(value);
+export const shortAddress = address => `${address.slice(0, 4)}…${address.slice(-4)}`;
 export const programs = [
   { size: 10000, fee: 79, name: '10K' },
   { size: 25000, fee: 149, name: '25K' },
@@ -36,30 +37,6 @@ export const accounts = {
   evaluation: { id: 'PT-003192', stage: 'Evaluation', size: 25000, equity: 26185.25, profit: 1185.25, realized: 992.73, headroom: 2435.25, target: 2000, floor: 23750, label: 'Evaluation 25K' },
   practice: { id: 'PRACTICE', stage: 'Practice', size: 25000, equity: 25000, profit: 0, realized: 0, headroom: 1250, target: null, floor: 23750, label: 'Practice account' },
 };
-export const screens = [
-  { id: '01', name: 'Get funded', path: '/get-funded', group: 'Onboarding' },
-  { id: '02', name: 'Program & rules', path: '/program', group: 'Onboarding' },
-  { id: '03', name: 'Connect wallet', path: '/connect', group: 'Onboarding' },
-  { id: '04', name: 'USDC checkout', path: '/checkout', group: 'Onboarding' },
-  { id: '05', name: 'Account ready', path: '/payment', group: 'Onboarding' },
-  { id: '06', name: 'My accounts', path: '/accounts', group: 'Accounts' },
-  { id: '07', name: 'Evaluation overview', path: '/account/evaluation', group: 'Accounts' },
-  { id: '08', name: 'Evaluation trading', path: '/trade/evaluation', group: 'Trading' },
-  { id: '09', name: 'Evaluation result', path: '/result', group: 'Accounts' },
-  { id: '10', name: 'Funded activation', path: '/activate', group: 'Accounts' },
-  { id: '11', name: 'Funded overview', path: '/account/funded', group: 'Accounts' },
-  { id: '12', name: 'Funded trading', path: '/trade/funded', group: 'Trading' },
-  { id: '13', name: 'Markets', path: '/markets', group: 'Trading' },
-  { id: '14', name: 'Performance', path: '/performance', group: 'Accounts' },
-  { id: '15', name: 'Activity', path: '/activity', group: 'Accounts' },
-  { id: '16', name: 'Payout overview', path: '/payouts', group: 'Payouts' },
-  { id: '17', name: 'Payout review', path: '/payout/review', group: 'Payouts' },
-  { id: '18', name: 'Payout receipt', path: '/payout/receipt', group: 'Payouts' },
-  { id: '19', name: 'Verify records', path: '/verify', group: 'Transparency' },
-  { id: '20', name: 'Vault transparency', path: '/vault', group: 'Transparency' },
-  { id: '21', name: 'Preferences', path: '/settings', group: 'Settings' },
-  { id: '22', name: 'Practice trading', path: '/trade/practice', group: 'Trading' },
-];
 export function seriesValues(count = 60, end = 1742.5) {
   return Array.from({ length: count }, (_, i) => ({ time: i, value: Math.round((i / (count - 1) * end + Math.sin(i * .42) * 95 + Math.sin(i * 1.7) * 30) * 100) / 100 }));
 }

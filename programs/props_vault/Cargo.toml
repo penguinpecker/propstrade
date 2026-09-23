@@ -1,0 +1,28 @@
+[package]
+name = "props_vault"
+version = "0.1.0"
+description = "Props.trade vault: holds funded-account capital and trades on GMTrade through data-less owner PDAs"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "props_vault"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+[dependencies]
+anchor-lang = { version = "=0.31.1", features = ["init-if-needed"] }
+anchor-spl = { version = "=0.31.1", default-features = false, features = ["token", "token_2022", "associated_token"] }
+gmsol-programs = { version = "=0.10.0", default-features = false, features = ["store"] }
+
+[dev-dependencies]
+base64 = "0.22"
+bytemuck = "1"
+serde_json = "1"

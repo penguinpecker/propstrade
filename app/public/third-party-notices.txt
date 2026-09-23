@@ -7,3 +7,6 @@ Notice retrieved from the project's official NOTICE file on 23 September 2026.
 
 Props.trade uses Manrope, licensed under the SIL Open Font License 1.1.
 Lucide icons are distributed under the ISC License.
+
+The license text of every JavaScript package bundled in this app is in /third-party-licenses.txt,
+generated from the packages themselves at build time.

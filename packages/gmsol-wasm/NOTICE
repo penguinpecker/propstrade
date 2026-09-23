@@ -1,0 +1,18 @@
+@props/gmsol-wasm
+
+pkg-node/ and pkg-web/ are compiled from GMTrade's gmx-solana repository, release v0.10.0
+(https://github.com/gmsol-labs/gmx-solana, tag v0.10.0, commit 7ce035b41a266cb5ddb0192e5d29deb0c7e67a72),
+crates gmsol-sdk, gmsol-model, gmsol-programs and gmsol-utils, with one modification:
+patches/liquidation-price.patch, which replaces the liquidation-price calculation in
+crates/sdk/src/position/mod.rs with the version on the repository's main branch (unreleased at the
+time of the build, commit 5841d106): it uses min_collateral_factor_for_liquidation, the factor the
+store program's liquidation check uses, instead of min_collateral_factor.
+
+That code is licensed by gmxresearch.eth under the Business Source License 1.1 (full text in
+LICENSE-GMTRADE). The BSL grants non-production use only; production use needs an Additional Use
+Grant or a commercial license from the Licensor. Change Date: the earlier of December 1 2027 or a
+date specified in the repository's LICENSE; Change License: GPL-2.0-or-later. The compiled
+artifacts are a modified copy of the Licensed Work and remain subject to that license.
+
+crate/ (the wasm-bindgen entry points) and src/ (the TypeScript wrapper) are Props.trade code that
+links the Licensed Work. Rebuild everything with ./build.sh.

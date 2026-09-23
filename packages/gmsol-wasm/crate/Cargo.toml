@@ -1,0 +1,17 @@
+# Built as a member of GMTrade's gmx-solana v0.10.0 workspace (see ../build.sh), so every
+# dependency version comes from that repo's own Cargo.lock.
+[package]
+name = "props-gmsol"
+version = "0.10.0"
+edition = "2021"
+publish = false
+description = "gmsol-sdk 0.10.0 compiled to WASM, plus order simulation with plain JSON output."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+gmsol-sdk = { workspace = true, default-features = false, features = ["js"] }
+wasm-bindgen = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde-wasm-bindgen = { workspace = true }
