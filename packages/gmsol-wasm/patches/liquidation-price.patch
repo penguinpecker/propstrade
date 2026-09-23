@@ -1,0 +1,139 @@
+--- a/crates/sdk/src/position/mod.rs
++++ b/crates/sdk/src/position/mod.rs
+@@ -148,18 +148,72 @@
+         };
+ 
+         // liquidation price
++        //
++        // The threshold must come from `min_collateral_factor_for_liquidation`, which is what
++        // `check_liquidatable(.., for_liquidation = true)` compares against on the liquidation
++        // path (`crates/model/src/position.rs`). It falls back to `min_collateral_factor` when
++        // the market leaves it unset, and `position_params()` already resolves the
++        // market-closed variant, so reading it here covers both.
+         let params = self.market().position_params()?;
+-        let min_collateral_factor = params.min_collateral_factor();
++        let min_collateral_factor_for_liquidation = params.min_collateral_factor_for_liquidation();
+         let min_collateral_value = params.min_collateral_value();
+-        let liquidation_collateral_usd = gmsol_model::utils::apply_factor::<
+-            _,
+-            { constants::MARKET_DECIMALS },
+-        >(position_size_in_usd, min_collateral_factor)
+-        .max(Some(*min_collateral_value))
+-        .ok_or(gmsol_model::Error::Computation(
+-            "calculating liquidation collateral usd",
+-        ))?;
++        let liquidation_collateral_usd =
++            gmsol_model::utils::apply_factor::<_, { constants::MARKET_DECIMALS }>(
++                position_size_in_usd,
++                min_collateral_factor_for_liquidation,
++            )
++            .max(Some(*min_collateral_value))
++            .ok_or(gmsol_model::Error::Computation(
++                "calculating liquidation collateral usd",
++            ))?;
+ 
++        // When the collateral token *is* the index token, two of the terms below are functions of
++        // the very price being solved for, so they cannot be held at spot:
++        //
++        //   collateral_value        = collateral_amount        * collateral_token_price
++        //   pending_funding_fee     = pending_funding_amount   * collateral_token_price
++        //
++        // Everything else is price-independent: the borrowing fee is `apply_factor(size_in_usd, ..)`
++        // and the close order fee is `apply_factor(size_delta_usd, ..)`, both plain USD, and the
++        // price impact is computed off pool balances. So the boundary stays linear in `P` and the
++        // correction is entirely in the denominator:
++        //
++        //   long:  P = (liq + size_in_usd - K) / (size_in_tokens + collateral_amount - funding)
++        //   short: P = (K + size_in_usd - liq) / (size_in_tokens - collateral_amount + funding)
++        //
++        // where K is what remains of `remaining_collateral_usd` once the two price-dependent terms
++        // are taken back out. With a different collateral token the extra terms are zero and this
++        // reduces to the original formula.
++        //
++        // Correlated-but-not-identical tokens are deliberately left uncorrected: that error decays
++        // to zero as the position approaches liquidation and the UI recomputes continuously.
++        let collateral_tracks_index =
++            self.position().collateral_token == self.market_model().meta.index_token_mint;
++        // The two amounts are added before either is subtracted, so an intermediate never
++        // underflows. A short whose collateral exceeds `size_in_tokens + funding` gains more from
++        // a rising price than the position loses, so it has no liquidation price on the way up and
++        // the `checked_sub` returning `None` is the right answer for that direction.
++        //
++        // Not solved here: such a short can still liquidate on the way *down*, but only when
++        // `liquidation_collateral_usd` exceeds `size_in_usd`, which needs the `min_collateral_value`
++        // floor to sit above the whole notional. `None` understates that case rather than
++        // misreporting it, and it is left uncorrected along with the correlated-token case above.
++        let denominator = if collateral_tracks_index {
++            let collateral_amount = *self.collateral_amount();
++            let funding_amount = *pending_funding_fee.amount();
++            if self.is_long() {
++                position_size_in_tokens
++                    .checked_add(collateral_amount)
++                    .and_then(|d| d.checked_sub(funding_amount))
++            } else {
++                position_size_in_tokens
++                    .checked_add(funding_amount)
++                    .and_then(|d| d.checked_sub(collateral_amount))
++            }
++        } else {
++            Some(*position_size_in_tokens)
++        };
++
+         let liquidation_price = if position_size_in_tokens.is_zero() {
+             None
+         } else {
+@@ -169,16 +223,49 @@
+                 .and_then(|a| a.checked_sub(pending_funding_fee_value))
+                 .and_then(|a| a.checked_sub(close_order_fee_value))
+                 .and_then(|remaining_collateral_usd| {
++                    let denominator = denominator?;
++                    if denominator.is_zero() {
++                        return None;
++                    }
++                    if !collateral_tracks_index {
++                        return if self.is_long() {
++                            liquidation_collateral_usd
++                                .checked_add(*position_size_in_usd)?
++                                .checked_sub(remaining_collateral_usd)?
++                                .checked_div(denominator)
++                        } else {
++                            remaining_collateral_usd
++                                .checked_add(*position_size_in_usd)?
++                                .checked_sub(liquidation_collateral_usd)?
++                                .checked_div(denominator)
++                        };
++                    }
++
++                    // The price-independent residual is `impact - borrowing - order_fee`, which is
++                    // never positive: the impact is clamped to <= 0 just above and both fees are
++                    // >= 0. These are unsigned, so it cannot be represented; carry its magnitude
++                    // instead, `surcharge = borrowing + order_fee - impact >= 0`.
++                    //
++                    // Subtracting `remaining` before the funding fee keeps both steps non-negative
++                    // without assuming the collateral exceeds the funding owed:
++                    //   collateral - remaining          = borrowing + funding + order_fee - impact
++                    //   ... - funding                   = borrowing + order_fee - impact
++                    let surcharge = collateral_value
++                        .checked_sub(remaining_collateral_usd)?
++                        .checked_sub(pending_funding_fee_value)?;
++
+                     if self.is_long() {
+                         liquidation_collateral_usd
+                             .checked_add(*position_size_in_usd)?
+-                            .checked_sub(remaining_collateral_usd)?
+-                            .checked_div(*position_size_in_tokens)
++                            .checked_add(surcharge)?
++                            .checked_div(denominator)
+                     } else {
+-                        remaining_collateral_usd
+-                            .checked_add(*position_size_in_usd)?
++                        // `S - L - surcharge`. Underflow here means the position is already past
++                        // the boundary, and no liquidation price is the honest answer.
++                        position_size_in_usd
+                             .checked_sub(liquidation_collateral_usd)?
+-                            .checked_div(*position_size_in_tokens)
++                            .checked_sub(surcharge)?
++                            .checked_div(denominator)
+                     }
+                 })
+         };

@@ -1,0 +1,22 @@
+{
+  "name": "@props/gmtrade",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "GMTrade data client: keeper API (HTTP + WebSocket), market-info, candles, subsquid, onchain account decoding and the market catalog.",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@props/gmsol-wasm": "*",
+    "@props/shared": "*",
+    "graphql": "^16.11.0",
+    "graphql-ws": "^6.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "^5.9.3"
+  }
+}

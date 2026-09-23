@@ -1,4 +1,26 @@
 // Props.trade HTTP + stream contract. Single source of truth for server/ and app/.
+//
+// Endpoints (all under /v1; lists return bare JSON arrays; errors return ApiError with a 4xx/5xx status):
+//   GET  /health -> Health                                   GET  /config -> AppConfig
+//   GET  /markets -> Market[]                                GET  /markets/:symbol -> Market
+//   GET  /candles?symbol&interval&from&to -> CandlesResponse  GET  /markets/:symbol/trades?limit -> MarketTrade[]
+//   GET  /quote?symbol&side&sizeUsd -> PriceImpactQuote       GET  /stream -> SSE, `data: <StreamEvent JSON>`
+//   POST /auth/nonce NonceRequest -> NonceResponse           POST /auth/verify VerifyRequest -> VerifyResponse (+cookie)
+//   POST /auth/logout -> 204                                  GET  /me -> Me (401 without a session)
+//   POST /kyc/start KycStartRequest -> KycStartResponse
+//   GET  /notifications -> Notification[]                     POST /notifications/read NotificationsReadRequest -> { updated: number }
+//   GET  /accounts -> AccountSummary[]                        GET  /accounts/:id -> AccountDetail
+//   GET  /accounts/:id/positions -> Position[]                GET  /accounts/:id/orders -> Order[]
+//   GET  /accounts/:id/history -> ClosedTrade[]               GET  /accounts/:id/activity -> ActivityItem[]
+//   GET  /accounts/:id/performance?period -> Performance      GET  /accounts/:id/payout-eligibility -> PayoutEligibility
+//   POST /sim/:id/orders SimOrderRequest -> SimOrderResponse  DELETE /sim/:id/orders/:orderId -> SimOrderResponse
+//   POST /sim/:id/positions/:positionId/close SimCloseRequest -> SimOrderResponse
+//   PUT  /sim/:id/positions/:positionId/protection SimProtectionRequest -> Position
+//   POST /practice/reset -> AccountSummary
+//   GET  /payouts -> Payout[]                                 GET  /payouts/:id -> Payout
+//   GET  /verify?q -> VerifyResult                            GET  /vault -> VaultStats
+// Wallet-signed transactions (evaluation purchase, funded activation/trading, payout requests) are built in the
+// browser with @props/sdk and sent by the wallet; the server only indexes their results.
 // Amounts: USD/USDC values are decimal strings with up to 6 dp (never JS floats on the wire for money).
 // Prices are decimal strings. Timestamps are unix milliseconds (number).
 // Pubkeys and signatures are base58 strings.
@@ -22,10 +44,10 @@ export interface Market {
   tradable: boolean;           // on the Props allowlist (MarketConfig.enabled) AND pure USDC-USDC
   unavailableReason?: string;  // plain-English reason when !tradable
   price: Decimal | null;       // mid of GMTrade min/max, null when unavailable
-  priceDecimals: number;       // display precision
+  priceDecimals: number;       // display decimals; prices may carry more
   change24h: number | null;    // percent
-  volume24h: Decimal | null;   // USD
-  openInterestLong: Decimal | null;
+  volume24h: Decimal | null;   // USD, summed over all pools of the asset
+  openInterestLong: Decimal | null;       // preferred pool (as are funding, borrow and capacity below)
   openInterestShort: Decimal | null;
   fundingRateHourlyLong: number | null;   // percent per hour, sign = paid(+)/received(−) by longs
   borrowRateHourlyLong: number | null;
@@ -68,6 +90,12 @@ export interface AppConfig {
 }
 
 // ---------- auth / me ----------
+export interface Health { status: 'ok' | 'degraded'; db: 'ok' | 'down'; modules: Record<string, 'running' | 'absent'>; time: Millis }
+export interface NonceRequest { wallet: Pubkey }
+export interface VerifyResponse { wallet: Pubkey; expiresAt: Millis }
+export interface KycStartRequest { country: string /* ISO 3166-1 alpha-2 */ }
+export interface KycStartResponse { kyc: 'pending' }
+export interface NotificationsReadRequest { ids?: string[] /* omit = all */ }
 export interface NonceResponse { message: string; nonce: string; expiresAt: Millis }
 export interface VerifyRequest { wallet: Pubkey; message: string; signature: string /* base58 */ }
 export interface Me {

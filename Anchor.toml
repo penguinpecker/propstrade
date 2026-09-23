@@ -1,0 +1,19 @@
+[toolchain]
+anchor_version = "0.31.1"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+props_vault = "7qYRWwpmj3j3exVoBUJHzigcWmMN8ruPEdZdZrGzTJ7"
+
+[programs.mainnet]
+props_vault = "7qYRWwpmj3j3exVoBUJHzigcWmMN8ruPEdZdZrGzTJ7"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "npm test --workspace tests/program"

@@ -36,6 +36,7 @@
 :root[data-theme="dark"] .notice { background:#25212b; color:#c0b8c9; }
 :root[data-theme="dark"] .notice>svg { color:#b69bcf; }
 :root[data-theme="dark"] .notice.purple { background:#2a2137; color:#c6a7e8; }
+:root[data-theme="dark"] .notice.amber { background:var(--amber-wash); color:var(--amber); }
 :root[data-theme="dark"] .field>span { color:#c1b8ca; }
 :root[data-theme="dark"] :is(.field input:not([type=range]),.field select,.input-unit) { border-color:#4c415b; }
 :root[data-theme="dark"] .tab-count { background:#31293b; color:#c7b6d7; }

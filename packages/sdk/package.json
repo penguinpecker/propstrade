@@ -1,0 +1,28 @@
+{
+  "name": "@props/sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript client for the props_vault program: PDAs, account decoding, instruction and transaction builders.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "sideEffects": false,
+  "scripts": {
+    "typecheck": "tsc --noEmit -p .",
+    "test": "node --test test/*.test.ts"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "0.31.1",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "bn.js": "^5.2.5"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.2.0",
+    "@types/node": "^22.19.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "@props/program-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "props_vault tests: LiteSVM suite with the mainnet GMTrade binary, and a solana-test-validator smoke suite.",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 src/*.test.ts",
+    "test:validator": "node --test src/validator.smoke.ts",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "0.31.1",
+    "@props/sdk": "*",
+    "@solana/spl-token": "^0.4.14",
+    "@solana/web3.js": "^1.98.4",
+    "bn.js": "^5.2.5",
+    "litesvm": "0.8.0"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.2.0",
+    "@types/node": "^22.19.0",
+    "typescript": "^5.9.3"
+  }
+}

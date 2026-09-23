@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { ArrowUpRight, ArrowRight, ArrowLeft, Bitcoin, CircleDollarSign, Cpu, Euro, PoundSterling, Smartphone, Check, X, ChevronDown, Info, ExternalLink } from 'lucide-react';
+import { ArrowUpRight, ArrowRight, ArrowLeft, Bitcoin, CircleDollarSign, Cpu, Euro, PoundSterling, Smartphone, Check, X, ChevronDown, Info, ExternalLink, Wallet } from 'lucide-react';
 import { number, seriesValues } from './data.js';
 
 export function Brand({ compact = false }) {
@@ -31,7 +31,7 @@ export function Stat({ label, value, detail, positive, children }) { return <div
 export function Field({ label, children, hint }) { return <label className="field"><span>{label}</span>{children}{hint && <small>{hint}</small>}</label>; }
 export function DataRow({ label, value, className = '', children }) { return <div className={`data-row ${className}`}><span>{label}</span><strong>{value ?? children}</strong></div>; }
 export function Progress({ value, tone = 'purple', label }) { return <div className={`progress ${tone}`} role="progressbar" aria-label={label} aria-valuenow={Math.round(value)} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${Math.max(0, Math.min(100, value))}%` }} /></div>; }
-export function Notice({ children, tone = 'neutral', icon: Icon = Info }) { return <div className={`notice ${tone}`}><Icon size={17} /><div>{children}</div></div>; }
+export function Notice({ children, tone = 'neutral', icon: Icon = Info, role }) { return <div className={`notice ${tone}`} role={role}><Icon size={17} /><div>{children}</div></div>; }
 export function Empty({ icon: Icon, title, children, action }) { return <div className="empty">{Icon && <Icon size={26} strokeWidth={1.3} />}<h3>{title}</h3><p>{children}</p>{action}</div>; }
 export function Tabs({ items, value, onChange, className = '' }) { return <div className={`tabs ${className}`} role="tablist">{items.map(item => { const v = typeof item === 'string' ? item : item.value; return <button role="tab" aria-selected={value === v} key={v} className={value === v ? 'active' : ''} onClick={() => onChange(v)}>{typeof item === 'string' ? item : item.label}</button>; })}</div>; }
 export function Toggle({ checked, onChange, label }) { return <button type="button" role="switch" aria-checked={checked} aria-label={label} className={`toggle ${checked ? 'checked' : ''}`} onClick={() => onChange(!checked)}><span /></button>; }
@@ -52,3 +52,14 @@ export function LineGraph({ height = 220, end = 1742.5, muted = false, showLabel
 export function Steps({ active = 1, labels = ['Choose account', 'Connect wallet', 'Start evaluation'] }) { return <div className="steps">{labels.map((label, i) => <div key={label} className={`${i + 1 === active ? 'current' : ''} ${i + 1 < active ? 'done' : ''}`}><span>{i + 1 < active ? <Check size={13} /> : i + 1}</span>{label}{i < labels.length - 1 && <div className="step-rule" />}</div>)}</div>; }
 export function InlineLink({ href, children, external = false }) { return <a href={href} className="inline-link" {...external ? { target: '_blank', rel: 'noreferrer' } : {}}>{children}{external ? <ExternalLink size={13} /> : <ArrowUpRight size={14} />}</a>; }
 export function RuleList({ size = 25000 }) { return <div className="rule-list"><DataRow label="Profit target" value={`8% · $${number(size * .08, 0)}`} /><DataRow label="Maximum drawdown" value={`5% · $${number(size * .05, 0)}`} /><DataRow label="Drawdown type" value="Static · includes open P&L" /><DataRow label="Daily loss limit" value="None" /><DataRow label="Time limit" value="None" /><DataRow label="Your profit share" value="80%" /></div>; }
+/** One live region (role=status) so screen readers announce each sign-in problem as it replaces the guidance. */
+export function SessionNotice({ session, children }) {
+  // A wrong network blocks sign-in, so it wins; otherwise the latest failure beats a slow-RPC warning.
+  const problem = session.network.state === 'wrong' ? session.network.reason : session.notice ?? session.network.reason;
+  return <Notice tone={problem ? 'amber' : 'neutral'} role="status">{problem ?? children}</Notice>;
+}
+export function WalletOptions({ session, onChoose }) {
+  if (!session.wallets.length) return <Notice tone="amber">No Solana wallet was found in this browser. Install <InlineLink href="https://phantom.com/download" external>Phantom</InlineLink>, <InlineLink href="https://solflare.com/download" external>Solflare</InlineLink> or <InlineLink href="https://backpack.app/download" external>Backpack</InlineLink>, then reload this page.</Notice>;
+  const waiting = session.status === 'connecting' || session.status === 'signing';
+  return session.wallets.map(w => { const busy = waiting && session.walletName === w.name; return <button key={w.name} className="wallet-option" onClick={() => onChoose(w.name)} disabled={waiting}><span className="wallet-option-icon">{w.icon ? <img src={w.icon} alt="" width="23" height="23" /> : <Wallet size={23} />}</span><span><strong>{w.name}</strong><small>{busy ? (session.status === 'signing' ? 'Approve the sign-in message in your wallet' : 'Approve the connection in your wallet') : 'Detected in this browser'}</small></span>{busy ? <span className="spinner" /> : <ArrowRight size={17} />}</button>; });
+}

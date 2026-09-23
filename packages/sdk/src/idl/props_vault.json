@@ -1,0 +1,6248 @@
+{
+  "address": "7qYRWwpmj3j3exVoBUJHzigcWmMN8ruPEdZdZrGzTJ7",
+  "metadata": {
+    "name": "props_vault",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Props.trade vault: holds funded-account capital and trades on GMTrade through data-less owner PDAs"
+  },
+  "instructions": [
+    {
+      "name": "accept_admin",
+      "discriminator": [
+        112,
+        42,
+        45,
+        90,
+        116,
+        181,
+        13,
+        170
+      ],
+      "accounts": [
+        {
+          "name": "new_admin",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "activate_funded",
+      "discriminator": [
+        55,
+        74,
+        71,
+        62,
+        69,
+        163,
+        174,
+        205
+      ],
+      "accounts": [
+        {
+          "name": "trader",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "evaluation"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "profile",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  97,
+                  100,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "trader"
+              }
+            ]
+          }
+        },
+        {
+          "name": "evaluation",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  118,
+                  97,
+                  108,
+                  117,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "trader"
+              },
+              {
+                "kind": "account",
+                "path": "evaluation.index",
+                "account": "Evaluation"
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "evaluation"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  119,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner_usdc",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "capital_vault",
+          "writable": true
+        },
+        {
+          "name": "sol_treasury",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  111,
+                  108,
+                  95,
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "approve_payout",
+      "discriminator": [
+        188,
+        233,
+        111,
+        145,
+        229,
+        102,
+        28,
+        145
+      ],
+      "accounts": [
+        {
+          "name": "risk_authority",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "FundedAccount"
+              }
+            ]
+          },
+          "relations": [
+            "payout"
+          ]
+        },
+        {
+          "name": "payout",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  97,
+                  121,
+                  111,
+                  117,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              },
+              {
+                "kind": "account",
+                "path": "payout.seq",
+                "account": "PayoutRequest"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  119,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner_usdc",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "owner"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "usdc_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "trader"
+        },
+        {
+          "name": "trader_usdc",
+          "docs": [
+            "paid by the SOL treasury, if missing."
+          ],
+          "writable": true
+        },
+        {
+          "name": "capital_vault",
+          "writable": true
+        },
+        {
+          "name": "sol_treasury",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  111,
+                  108,
+                  95,
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "buy_evaluation",
+      "discriminator": [
+        53,
+        49,
+        218,
+        47,
+        130,
+        44,
+        53,
+        202
+      ],
+      "accounts": [
+        {
+          "name": "trader",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "tier",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  105,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "tier_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "profile",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  97,
+                  100,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "trader"
+              }
+            ]
+          }
+        },
+        {
+          "name": "evaluation",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  118,
+                  97,
+                  108,
+                  117,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "trader"
+              },
+              {
+                "kind": "arg",
+                "path": "index"
+              }
+            ]
+          }
+        },
+        {
+          "name": "trader_usdc",
+          "writable": true
+        },
+        {
+          "name": "fee_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  101,
+                  101,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "tier_id",
+          "type": "u16"
+        },
+        {
+          "name": "index",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "cancel_order",
+      "discriminator": [
+        95,
+        129,
+        237,
+        240,
+        8,
+        49,
+        223,
+        132
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "docs": [
+            "The trader, or a risk authority."
+          ],
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "FundedAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  119,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner_usdc",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "owner"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "usdc_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "market_config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  97,
+                  114,
+                  107,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "market_config.market_token",
+                "account": "MarketConfig"
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "gm_store",
+          "writable": true
+        },
+        {
+          "name": "gm_store_wallet",
+          "writable": true
+        },
+        {
+          "name": "gm_user",
+          "writable": true
+        },
+        {
+          "name": "gm_order",
+          "writable": true
+        },
+        {
+          "name": "order_escrow",
+          "writable": true
+        },
+        {
+          "name": "gm_event_authority"
+        },
+        {
+          "name": "gmtrade_program",
+          "address": "Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "cancel_payout",
+      "discriminator": [
+        119,
+        152,
+        126,
+        113,
+        177,
+        218,
+        236,
+        61
+      ],
+      "accounts": [
+        {
+          "name": "trader",
+          "signer": true,
+          "relations": [
+            "funded"
+          ]
+        },
+        {
+          "name": "funded",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "FundedAccount"
+              }
+            ]
+          },
+          "relations": [
+            "payout"
+          ]
+        },
+        {
+          "name": "payout",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  97,
+                  121,
+                  111,
+                  117,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              },
+              {
+                "kind": "account",
+                "path": "payout.seq",
+                "account": "PayoutRequest"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "close_completed_order",
+      "discriminator": [
+        179,
+        21,
+        187,
+        3,
+        237,
+        0,
+        39,
+        159
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "FundedAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  119,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner_usdc",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "owner"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "usdc_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "gm_store",
+          "writable": true
+        },
+        {
+          "name": "gm_store_wallet",
+          "writable": true
+        },
+        {
+          "name": "gm_user",
+          "writable": true
+        },
+        {
+          "name": "gm_order",
+          "writable": true
+        },
+        {
+          "name": "order_escrow",
+          "writable": true
+        },
+        {
+          "name": "gm_event_authority"
+        },
+        {
+          "name": "gmtrade_program",
+          "address": "Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "close_funded",
+      "discriminator": [
+        12,
+        92,
+        55,
+        21,
+        100,
+        65,
+        63,
+        99
+      ],
+      "accounts": [
+        {
+          "name": "risk_authority",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "FundedAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "profile",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  97,
+                  100,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.trader",
+                "account": "FundedAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  119,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner_usdc",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "owner"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "usdc_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "capital_vault",
+          "writable": true
+        },
+        {
+          "name": "sol_treasury",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  111,
+                  108,
+                  95,
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "close_position",
+      "discriminator": [
+        123,
+        134,
+        81,
+        0,
+        49,
+        68,
+        98,
+        98
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "docs": [
+            "The trader, or a risk authority for forced closes."
+          ],
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "FundedAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  119,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              }
+            ]
+          }
+        },
+        {
+          "name": "market_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  97,
+                  114,
+                  107,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "market_config.market_token",
+                "account": "MarketConfig"
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "gm_store"
+        },
+        {
+          "name": "gm_market",
+          "writable": true
+        },
+        {
+          "name": "gm_user",
+          "writable": true
+        },
+        {
+          "name": "gm_position",
+          "writable": true
+        },
+        {
+          "name": "gm_order",
+          "writable": true
+        },
+        {
+          "name": "order_escrow",
+          "writable": true
+        },
+        {
+          "name": "gm_event_authority"
+        },
+        {
+          "name": "gmtrade_program",
+          "address": "Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "ClosePositionArgs"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "deposit_capital",
+      "discriminator": [
+        157,
+        98,
+        40,
+        41,
+        205,
+        210,
+        121,
+        253
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin_usdc",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "capital_vault",
+          "writable": true
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "initialize",
+      "discriminator": [
+        175,
+        175,
+        109,
+        31,
+        13,
+        152,
+        155,
+        237
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "fee_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  101,
+                  101,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "capital_vault",
+          "docs": [
+            "`init_if_needed`: anyone can create ATA(vault, USDC) first, which must not block initialize."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "vault"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "usdc_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "sol_treasury",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  111,
+                  108,
+                  95,
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "gmtrade_program",
+          "address": "Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo"
+        },
+        {
+          "name": "gmtrade_store"
+        },
+        {
+          "name": "program",
+          "address": "7qYRWwpmj3j3exVoBUJHzigcWmMN8ruPEdZdZrGzTJ7"
+        },
+        {
+          "name": "program_data"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "ConfigParams"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "mark_breached",
+      "discriminator": [
+        172,
+        209,
+        209,
+        147,
+        90,
+        189,
+        145,
+        13
+      ],
+      "accounts": [
+        {
+          "name": "risk_authority",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "FundedAccount"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "open_position",
+      "discriminator": [
+        135,
+        128,
+        47,
+        77,
+        15,
+        152,
+        240,
+        49
+      ],
+      "accounts": [
+        {
+          "name": "trader",
+          "signer": true,
+          "relations": [
+            "funded"
+          ]
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "FundedAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  119,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner_usdc",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "owner"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "usdc_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "market_config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  97,
+                  114,
+                  107,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "market_config.market_token",
+                "account": "MarketConfig"
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "gm_store"
+        },
+        {
+          "name": "gm_market",
+          "writable": true
+        },
+        {
+          "name": "gm_user",
+          "writable": true
+        },
+        {
+          "name": "gm_position",
+          "writable": true
+        },
+        {
+          "name": "gm_order",
+          "writable": true
+        },
+        {
+          "name": "order_escrow",
+          "writable": true
+        },
+        {
+          "name": "gm_event_authority"
+        },
+        {
+          "name": "gmtrade_program",
+          "address": "Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "OpenPositionArgs"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "propose_admin",
+      "discriminator": [
+        121,
+        214,
+        199,
+        212,
+        87,
+        39,
+        117,
+        234
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "new_admin",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "record_evaluation_result",
+      "discriminator": [
+        224,
+        83,
+        75,
+        1,
+        128,
+        151,
+        204,
+        233
+      ],
+      "accounts": [
+        {
+          "name": "risk_authority",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "evaluation",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  118,
+                  97,
+                  108,
+                  117,
+                  97,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "evaluation.trader",
+                "account": "Evaluation"
+              },
+              {
+                "kind": "account",
+                "path": "evaluation.index",
+                "account": "Evaluation"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "passed",
+          "type": "bool"
+        },
+        {
+          "name": "final_equity",
+          "type": "i64"
+        },
+        {
+          "name": "trades_root",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "reject_payout",
+      "discriminator": [
+        132,
+        253,
+        62,
+        185,
+        233,
+        224,
+        155,
+        223
+      ],
+      "accounts": [
+        {
+          "name": "risk_authority",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "FundedAccount"
+              }
+            ]
+          },
+          "relations": [
+            "payout"
+          ]
+        },
+        {
+          "name": "payout",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  97,
+                  121,
+                  111,
+                  117,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              },
+              {
+                "kind": "account",
+                "path": "payout.seq",
+                "account": "PayoutRequest"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "reason_code",
+          "type": "u16"
+        }
+      ]
+    },
+    {
+      "name": "request_payout",
+      "discriminator": [
+        5,
+        176,
+        110,
+        197,
+        172,
+        177,
+        64,
+        200
+      ],
+      "accounts": [
+        {
+          "name": "trader",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "funded"
+          ]
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "FundedAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  119,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner_usdc",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "owner"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "usdc_mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "payout",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  97,
+                  121,
+                  111,
+                  117,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              },
+              {
+                "kind": "account",
+                "path": "funded.payout_seq",
+                "account": "FundedAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "restrict",
+      "discriminator": [
+        209,
+        81,
+        186,
+        237,
+        127,
+        16,
+        13,
+        235
+      ],
+      "accounts": [
+        {
+          "name": "risk_authority",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "FundedAccount"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "restricted",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "set_authorities",
+      "discriminator": [
+        124,
+        254,
+        44,
+        240,
+        197,
+        70,
+        190,
+        107
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "risk_authorities",
+          "type": {
+            "vec": "pubkey"
+          }
+        },
+        {
+          "name": "kyc_authority",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "set_identity",
+      "discriminator": [
+        31,
+        31,
+        141,
+        65,
+        178,
+        99,
+        106,
+        176
+      ],
+      "accounts": [
+        {
+          "name": "kyc_authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "profile",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  97,
+                  100,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "wallet"
+              }
+            ]
+          }
+        },
+        {
+          "name": "identity_lock",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  100,
+                  101,
+                  110,
+                  116,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "identity_hash"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "wallet",
+          "type": "pubkey"
+        },
+        {
+          "name": "identity_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "set_params",
+      "discriminator": [
+        27,
+        234,
+        178,
+        52,
+        147,
+        2,
+        187,
+        141
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "ConfigParams"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "set_pauses",
+      "discriminator": [
+        48,
+        80,
+        200,
+        227,
+        66,
+        244,
+        226,
+        122
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "paused",
+          "type": {
+            "defined": {
+              "name": "Pauses"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "set_protection",
+      "discriminator": [
+        170,
+        199,
+        130,
+        200,
+        40,
+        198,
+        55,
+        172
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "docs": [
+            "The trader, or a risk authority for forced closes."
+          ],
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "FundedAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  119,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              }
+            ]
+          }
+        },
+        {
+          "name": "market_config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  97,
+                  114,
+                  107,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "market_config.market_token",
+                "account": "MarketConfig"
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "gm_store"
+        },
+        {
+          "name": "gm_market",
+          "writable": true
+        },
+        {
+          "name": "gm_user",
+          "writable": true
+        },
+        {
+          "name": "gm_position",
+          "writable": true
+        },
+        {
+          "name": "gm_order",
+          "writable": true
+        },
+        {
+          "name": "order_escrow",
+          "writable": true
+        },
+        {
+          "name": "gm_event_authority"
+        },
+        {
+          "name": "gmtrade_program",
+          "address": "Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "SetProtectionArgs"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "sweep_fees",
+      "discriminator": [
+        175,
+        225,
+        98,
+        71,
+        118,
+        66,
+        34,
+        148
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "fee_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  101,
+                  101,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "capital_vault",
+          "writable": true
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "sync",
+      "discriminator": [
+        4,
+        219,
+        40,
+        164,
+        21,
+        157,
+        189,
+        88
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "FundedAccount"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "top_up_owner",
+      "discriminator": [
+        46,
+        209,
+        13,
+        85,
+        19,
+        52,
+        125,
+        211
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "FundedAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  119,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              }
+            ]
+          }
+        },
+        {
+          "name": "sol_treasury",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  111,
+                  108,
+                  95,
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "update_order",
+      "discriminator": [
+        54,
+        8,
+        208,
+        207,
+        34,
+        134,
+        239,
+        168
+      ],
+      "accounts": [
+        {
+          "name": "trader",
+          "signer": true,
+          "relations": [
+            "funded"
+          ]
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "FundedAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  119,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              }
+            ]
+          }
+        },
+        {
+          "name": "market_config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  97,
+                  114,
+                  107,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "market_config.market_token",
+                "account": "MarketConfig"
+              }
+            ]
+          }
+        },
+        {
+          "name": "gm_store"
+        },
+        {
+          "name": "gm_market",
+          "writable": true
+        },
+        {
+          "name": "gm_order",
+          "writable": true
+        },
+        {
+          "name": "gm_event_authority"
+        },
+        {
+          "name": "gmtrade_program",
+          "address": "Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "UpdateOrderArgs"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "upsert_market",
+      "discriminator": [
+        73,
+        122,
+        217,
+        17,
+        70,
+        77,
+        57,
+        39
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "market_config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  109,
+                  97,
+                  114,
+                  107,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "market_token"
+              }
+            ]
+          }
+        },
+        {
+          "name": "gm_market"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "market_token",
+          "type": "pubkey"
+        },
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "MarketParams"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "upsert_tier",
+      "discriminator": [
+        238,
+        232,
+        181,
+        0,
+        157,
+        149,
+        0,
+        202
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "tier",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  105,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "id",
+          "type": "u16"
+        },
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "TierParams"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "withdraw_capital",
+      "discriminator": [
+        82,
+        32,
+        82,
+        118,
+        160,
+        116,
+        65,
+        104
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin_usdc",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "capital_vault",
+          "writable": true
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "withdraw_sol_treasury",
+      "discriminator": [
+        100,
+        50,
+        91,
+        49,
+        183,
+        237,
+        36,
+        52
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "sol_treasury",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  111,
+                  108,
+                  95,
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "lamports",
+          "type": "u64"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Config",
+      "discriminator": [
+        155,
+        12,
+        170,
+        224,
+        30,
+        250,
+        204,
+        130
+      ]
+    },
+    {
+      "name": "Evaluation",
+      "discriminator": [
+        212,
+        70,
+        25,
+        106,
+        239,
+        24,
+        93,
+        220
+      ]
+    },
+    {
+      "name": "FundedAccount",
+      "discriminator": [
+        243,
+        213,
+        249,
+        109,
+        66,
+        122,
+        63,
+        208
+      ]
+    },
+    {
+      "name": "IdentityLock",
+      "discriminator": [
+        248,
+        246,
+        9,
+        101,
+        144,
+        56,
+        209,
+        232
+      ]
+    },
+    {
+      "name": "MarketConfig",
+      "discriminator": [
+        119,
+        255,
+        200,
+        88,
+        252,
+        82,
+        128,
+        24
+      ]
+    },
+    {
+      "name": "PayoutRequest",
+      "discriminator": [
+        182,
+        69,
+        255,
+        168,
+        65,
+        179,
+        121,
+        171
+      ]
+    },
+    {
+      "name": "Tier",
+      "discriminator": [
+        18,
+        149,
+        18,
+        34,
+        50,
+        201,
+        207,
+        55
+      ]
+    },
+    {
+      "name": "TraderProfile",
+      "discriminator": [
+        99,
+        135,
+        170,
+        100,
+        49,
+        79,
+        225,
+        169
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "AccountBreached",
+      "discriminator": [
+        13,
+        23,
+        23,
+        163,
+        10,
+        177,
+        199,
+        234
+      ]
+    },
+    {
+      "name": "AccountClosed",
+      "discriminator": [
+        19,
+        250,
+        79,
+        236,
+        91,
+        80,
+        148,
+        48
+      ]
+    },
+    {
+      "name": "AccountRestricted",
+      "discriminator": [
+        151,
+        99,
+        235,
+        224,
+        157,
+        128,
+        151,
+        4
+      ]
+    },
+    {
+      "name": "CapitalDeposited",
+      "discriminator": [
+        193,
+        124,
+        182,
+        129,
+        144,
+        1,
+        221,
+        53
+      ]
+    },
+    {
+      "name": "CapitalWithdrawn",
+      "discriminator": [
+        202,
+        30,
+        139,
+        204,
+        45,
+        210,
+        182,
+        244
+      ]
+    },
+    {
+      "name": "CompletedOrderClosed",
+      "discriminator": [
+        82,
+        165,
+        207,
+        110,
+        81,
+        70,
+        218,
+        68
+      ]
+    },
+    {
+      "name": "ConfigChanged",
+      "discriminator": [
+        147,
+        25,
+        86,
+        98,
+        98,
+        77,
+        78,
+        192
+      ]
+    },
+    {
+      "name": "EvaluationPurchased",
+      "discriminator": [
+        236,
+        7,
+        10,
+        61,
+        193,
+        209,
+        76,
+        136
+      ]
+    },
+    {
+      "name": "EvaluationResolved",
+      "discriminator": [
+        176,
+        38,
+        204,
+        76,
+        223,
+        133,
+        148,
+        143
+      ]
+    },
+    {
+      "name": "FeesSwept",
+      "discriminator": [
+        96,
+        218,
+        115,
+        136,
+        74,
+        170,
+        202,
+        172
+      ]
+    },
+    {
+      "name": "FundedActivated",
+      "discriminator": [
+        119,
+        43,
+        37,
+        84,
+        142,
+        191,
+        142,
+        101
+      ]
+    },
+    {
+      "name": "IdentitySet",
+      "discriminator": [
+        207,
+        143,
+        155,
+        168,
+        233,
+        175,
+        52,
+        179
+      ]
+    },
+    {
+      "name": "OrderCancelled",
+      "discriminator": [
+        108,
+        56,
+        128,
+        68,
+        168,
+        113,
+        168,
+        239
+      ]
+    },
+    {
+      "name": "OrderRequested",
+      "discriminator": [
+        233,
+        57,
+        116,
+        185,
+        63,
+        88,
+        154,
+        140
+      ]
+    },
+    {
+      "name": "OrderUpdated",
+      "discriminator": [
+        172,
+        140,
+        210,
+        241,
+        108,
+        117,
+        122,
+        145
+      ]
+    },
+    {
+      "name": "OwnerToppedUp",
+      "discriminator": [
+        178,
+        73,
+        99,
+        250,
+        204,
+        210,
+        52,
+        139
+      ]
+    },
+    {
+      "name": "PayoutCancelled",
+      "discriminator": [
+        78,
+        190,
+        217,
+        66,
+        73,
+        23,
+        172,
+        182
+      ]
+    },
+    {
+      "name": "PayoutPaid",
+      "discriminator": [
+        64,
+        207,
+        193,
+        176,
+        14,
+        102,
+        54,
+        159
+      ]
+    },
+    {
+      "name": "PayoutRejected",
+      "discriminator": [
+        59,
+        154,
+        242,
+        246,
+        203,
+        126,
+        213,
+        199
+      ]
+    },
+    {
+      "name": "PayoutRequested",
+      "discriminator": [
+        65,
+        18,
+        121,
+        118,
+        19,
+        164,
+        79,
+        166
+      ]
+    },
+    {
+      "name": "ProtectionSet",
+      "discriminator": [
+        85,
+        187,
+        36,
+        64,
+        195,
+        98,
+        226,
+        124
+      ]
+    },
+    {
+      "name": "SolTreasuryWithdrawn",
+      "discriminator": [
+        163,
+        85,
+        22,
+        101,
+        16,
+        168,
+        245,
+        167
+      ]
+    },
+    {
+      "name": "Synced",
+      "discriminator": [
+        114,
+        244,
+        163,
+        97,
+        99,
+        80,
+        164,
+        70
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "NotUpgradeAuthority",
+      "msg": "Signer is not the program's upgrade authority"
+    },
+    {
+      "code": 6001,
+      "name": "Unauthorized",
+      "msg": "Signer is not allowed to perform this action"
+    },
+    {
+      "code": 6002,
+      "name": "InvalidParams",
+      "msg": "Invalid parameters"
+    },
+    {
+      "code": 6003,
+      "name": "TooManyRiskAuthorities",
+      "msg": "Too many risk authorities"
+    },
+    {
+      "code": 6004,
+      "name": "Paused",
+      "msg": "This action is paused"
+    },
+    {
+      "code": 6005,
+      "name": "TierDisabled",
+      "msg": "Tier is disabled"
+    },
+    {
+      "code": 6006,
+      "name": "MarketNotPure",
+      "msg": "GMTrade market is not a pure USDC-USDC market of the pinned store"
+    },
+    {
+      "code": 6007,
+      "name": "MarketMismatch",
+      "msg": "Account does not match the market"
+    },
+    {
+      "code": 6008,
+      "name": "MarketDisabled",
+      "msg": "Market is not enabled for funded trading"
+    },
+    {
+      "code": 6009,
+      "name": "InvalidEvaluationStatus",
+      "msg": "Evaluation status does not allow this action"
+    },
+    {
+      "code": 6010,
+      "name": "InvalidAccountStatus",
+      "msg": "Funded account status does not allow this action"
+    },
+    {
+      "code": 6011,
+      "name": "NotVerified",
+      "msg": "Trader identity is not verified"
+    },
+    {
+      "code": 6012,
+      "name": "AlreadyVerified",
+      "msg": "Trader identity is already set"
+    },
+    {
+      "code": 6013,
+      "name": "AlreadyFunded",
+      "msg": "Trader already has an active funded account"
+    },
+    {
+      "code": 6014,
+      "name": "InsufficientCapital",
+      "msg": "Not enough unallocated capital"
+    },
+    {
+      "code": 6015,
+      "name": "InvalidAmount",
+      "msg": "Invalid amount"
+    },
+    {
+      "code": 6016,
+      "name": "ZeroAcceptablePrice",
+      "msg": "Acceptable price must be set"
+    },
+    {
+      "code": 6017,
+      "name": "InvalidTriggerPrice",
+      "msg": "Trigger price is required for this order type and not allowed otherwise"
+    },
+    {
+      "code": 6018,
+      "name": "InvalidOrderType",
+      "msg": "Order type not allowed here"
+    },
+    {
+      "code": 6019,
+      "name": "CollateralExceedsBalance",
+      "msg": "Collateral exceeds the account's available USDC"
+    },
+    {
+      "code": 6020,
+      "name": "LeverageTooHigh",
+      "msg": "Leverage above the market limit"
+    },
+    {
+      "code": 6021,
+      "name": "PositionTooLarge",
+      "msg": "Position size above the market limit"
+    },
+    {
+      "code": 6022,
+      "name": "ExposureTooHigh",
+      "msg": "Total exposure above the account limit"
+    },
+    {
+      "code": 6023,
+      "name": "MarketOpenInterestCap",
+      "msg": "Funded open interest cap reached for this market side"
+    },
+    {
+      "code": 6024,
+      "name": "NoFreeSlot",
+      "msg": "All position slots are in use"
+    },
+    {
+      "code": 6025,
+      "name": "TooManyOrders",
+      "msg": "Too many open orders"
+    },
+    {
+      "code": 6026,
+      "name": "NoPosition",
+      "msg": "No position in this market and side"
+    },
+    {
+      "code": 6027,
+      "name": "OrderNotTracked",
+      "msg": "Order is not tracked by this account"
+    },
+    {
+      "code": 6028,
+      "name": "OrderNotPending",
+      "msg": "Order is no longer pending; close it with close_completed_order"
+    },
+    {
+      "code": 6029,
+      "name": "OrderPending",
+      "msg": "Order is still pending"
+    },
+    {
+      "code": 6030,
+      "name": "InvalidOrderAccount",
+      "msg": "Invalid GMTrade order account"
+    },
+    {
+      "code": 6031,
+      "name": "InvalidPositionAccount",
+      "msg": "Invalid GMTrade position account"
+    },
+    {
+      "code": 6032,
+      "name": "InvalidRemainingAccounts",
+      "msg": "Remaining accounts do not match the account state"
+    },
+    {
+      "code": 6033,
+      "name": "NotFlat",
+      "msg": "Account has open positions or orders"
+    },
+    {
+      "code": 6034,
+      "name": "NoProfit",
+      "msg": "No realized profit"
+    },
+    {
+      "code": 6035,
+      "name": "BelowMinPayout",
+      "msg": "Trader share below the minimum payout"
+    },
+    {
+      "code": 6036,
+      "name": "InvalidPayoutStatus",
+      "msg": "Payout status does not allow this action"
+    },
+    {
+      "code": 6037,
+      "name": "BalanceChanged",
+      "msg": "Account balance dropped since the payout request"
+    },
+    {
+      "code": 6038,
+      "name": "OwnerFloatSufficient",
+      "msg": "Owner SOL float is above the minimum"
+    },
+    {
+      "code": 6039,
+      "name": "MathOverflow",
+      "msg": "Arithmetic overflow"
+    }
+  ],
+  "types": [
+    {
+      "name": "AccountBreached",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AccountClosed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "principal",
+            "type": "u64"
+          },
+          {
+            "name": "usdc_returned",
+            "type": "u64"
+          },
+          {
+            "name": "lamports_returned",
+            "type": "u64"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AccountRestricted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "restricted",
+            "type": "bool"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CapitalDeposited",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "capital_vault_balance",
+            "type": "u64"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CapitalWithdrawn",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "to",
+            "type": "pubkey"
+          },
+          {
+            "name": "capital_vault_balance",
+            "type": "u64"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ClosePositionArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "is_long",
+            "type": "bool"
+          },
+          {
+            "name": "size_delta_usd",
+            "docs": [
+              "`u128::MAX` closes the whole position (GMTrade caps it to the position size)."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "acceptable_price",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CompletedOrderClosed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "order",
+            "type": "pubkey"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Config",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "pending_admin",
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "risk_authorities",
+            "type": {
+              "vec": "pubkey"
+            }
+          },
+          {
+            "name": "kyc_authority",
+            "docs": [
+              "`Pubkey::default()` until set."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "usdc_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "gmtrade_program",
+            "type": "pubkey"
+          },
+          {
+            "name": "gmtrade_store",
+            "type": "pubkey"
+          },
+          {
+            "name": "capital_vault",
+            "docs": [
+              "ATA(vault, USDC), recorded at initialize."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "trader_share_bps",
+            "type": "u16"
+          },
+          {
+            "name": "min_payout",
+            "type": "u64"
+          },
+          {
+            "name": "owner_sol_target",
+            "type": "u64"
+          },
+          {
+            "name": "owner_sol_min",
+            "type": "u64"
+          },
+          {
+            "name": "paused",
+            "type": {
+              "defined": {
+                "name": "Pauses"
+              }
+            }
+          },
+          {
+            "name": "fees_collected",
+            "docs": [
+              "Totals, USDC base units."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "allocated_principal",
+            "type": "u64"
+          },
+          {
+            "name": "payouts_paid",
+            "type": "u64"
+          },
+          {
+            "name": "profit_to_vault",
+            "type": "u64"
+          },
+          {
+            "name": "evaluations_sold",
+            "type": "u64"
+          },
+          {
+            "name": "funded_activated",
+            "type": "u64"
+          },
+          {
+            "name": "funded_active",
+            "type": "u32"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "vault_bump",
+            "type": "u8"
+          },
+          {
+            "name": "fee_vault_bump",
+            "type": "u8"
+          },
+          {
+            "name": "sol_treasury_bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ConfigChange",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Initialized"
+          },
+          {
+            "name": "AdminProposed"
+          },
+          {
+            "name": "AdminAccepted"
+          },
+          {
+            "name": "Authorities"
+          },
+          {
+            "name": "Params"
+          },
+          {
+            "name": "Pauses"
+          },
+          {
+            "name": "Tier"
+          },
+          {
+            "name": "Market"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ConfigChanged",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "change",
+            "type": {
+              "defined": {
+                "name": "ConfigChange"
+              }
+            }
+          },
+          {
+            "name": "subject",
+            "docs": [
+              "The admin, the new admin, the tier or the market config, depending on `change`."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "paused",
+            "type": {
+              "defined": {
+                "name": "Pauses"
+              }
+            }
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ConfigParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "trader_share_bps",
+            "type": "u16"
+          },
+          {
+            "name": "min_payout",
+            "docs": [
+              "Minimum trader share of a payout, USDC base units."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "owner_sol_target",
+            "docs": [
+              "Owner PDA SOL float, lamports: topped up to `owner_sol_target` whenever it drops below `owner_sol_min`."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "owner_sol_min",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Evaluation",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "trader",
+            "type": "pubkey"
+          },
+          {
+            "name": "index",
+            "type": "u32"
+          },
+          {
+            "name": "tier_id",
+            "type": "u16"
+          },
+          {
+            "name": "terms",
+            "type": {
+              "defined": {
+                "name": "Terms"
+              }
+            }
+          },
+          {
+            "name": "fee_paid",
+            "type": "u64"
+          },
+          {
+            "name": "status",
+            "type": {
+              "defined": {
+                "name": "EvaluationStatus"
+              }
+            }
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "resolved_at",
+            "type": "i64"
+          },
+          {
+            "name": "final_equity",
+            "docs": [
+              "Micro-USD."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "trades_root",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EvaluationPurchased",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "evaluation",
+            "type": "pubkey"
+          },
+          {
+            "name": "trader",
+            "type": "pubkey"
+          },
+          {
+            "name": "tier_id",
+            "type": "u16"
+          },
+          {
+            "name": "tier_version",
+            "type": "u32"
+          },
+          {
+            "name": "fee_paid",
+            "type": "u64"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EvaluationResolved",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "evaluation",
+            "type": "pubkey"
+          },
+          {
+            "name": "trader",
+            "type": "pubkey"
+          },
+          {
+            "name": "passed",
+            "type": "bool"
+          },
+          {
+            "name": "final_equity",
+            "type": "i64"
+          },
+          {
+            "name": "trades_root",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EvaluationStatus",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Active"
+          },
+          {
+            "name": "Passed"
+          },
+          {
+            "name": "Failed"
+          },
+          {
+            "name": "Funded"
+          }
+        ]
+      }
+    },
+    {
+      "name": "FeesSwept",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "FundedAccount",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "trader",
+            "type": "pubkey"
+          },
+          {
+            "name": "evaluation",
+            "type": "pubkey"
+          },
+          {
+            "name": "terms",
+            "type": {
+              "defined": {
+                "name": "Terms"
+              }
+            }
+          },
+          {
+            "name": "principal",
+            "docs": [
+              "USDC posted from the capital vault (= L)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "status",
+            "type": {
+              "defined": {
+                "name": "FundedStatus"
+              }
+            }
+          },
+          {
+            "name": "slots",
+            "type": {
+              "array": [
+                {
+                  "defined": {
+                    "name": "Slot"
+                  }
+                },
+                8
+              ]
+            }
+          },
+          {
+            "name": "orders",
+            "type": {
+              "array": [
+                {
+                  "defined": {
+                    "name": "TrackedOrder"
+                  }
+                },
+                8
+              ]
+            }
+          },
+          {
+            "name": "order_seq",
+            "docs": [
+              "GMTrade orders created so far; the next order's nonce (see `next_order_nonce`)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "payouts_paid",
+            "type": "u64"
+          },
+          {
+            "name": "payout_seq",
+            "type": "u32"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "last_sync_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "owner_bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "FundedActivated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "evaluation",
+            "type": "pubkey"
+          },
+          {
+            "name": "trader",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "principal",
+            "type": "u64"
+          },
+          {
+            "name": "owner_lamports",
+            "type": "u64"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "FundedStatus",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Active"
+          },
+          {
+            "name": "Restricted"
+          },
+          {
+            "name": "PayoutPending"
+          },
+          {
+            "name": "Breached"
+          },
+          {
+            "name": "Closed"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IdentityLock",
+      "docs": [
+        "One per person: `init`-only, so an identity can be attached to one wallet."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "profile",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IdentitySet",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "profile",
+            "type": "pubkey"
+          },
+          {
+            "name": "wallet",
+            "type": "pubkey"
+          },
+          {
+            "name": "identity_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MarketConfig",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "market_token",
+            "type": "pubkey"
+          },
+          {
+            "name": "gm_market",
+            "docs": [
+              "GMTrade Market account (pure USDC-USDC, verified at upsert)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "enabled",
+            "type": "bool"
+          },
+          {
+            "name": "index_symbol",
+            "type": {
+              "array": [
+                "u8",
+                16
+              ]
+            }
+          },
+          {
+            "name": "max_leverage_bps",
+            "type": "u32"
+          },
+          {
+            "name": "closed_max_leverage_bps",
+            "type": "u32"
+          },
+          {
+            "name": "max_position_usd",
+            "type": "u64"
+          },
+          {
+            "name": "max_total_oi_usd",
+            "type": "u64"
+          },
+          {
+            "name": "oi_long_usd",
+            "docs": [
+              "Committed funded open interest (synced size + pending increase orders), GMTrade USD."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "oi_short_usd",
+            "type": "u128"
+          },
+          {
+            "name": "session_restricted",
+            "type": "bool"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MarketParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "enabled",
+            "type": "bool"
+          },
+          {
+            "name": "index_symbol",
+            "type": {
+              "array": [
+                "u8",
+                16
+              ]
+            }
+          },
+          {
+            "name": "max_leverage_bps",
+            "docs": [
+              "Leverage limits as size / collateral in bps (25× = 250_000)."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "closed_max_leverage_bps",
+            "type": "u32"
+          },
+          {
+            "name": "max_position_usd",
+            "docs": [
+              "Per funded position, micro-USD."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "max_total_oi_usd",
+            "docs": [
+              "All funded accounts together, per side, micro-USD."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "session_restricted",
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OpenPositionArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "is_long",
+            "type": "bool"
+          },
+          {
+            "name": "order_type",
+            "docs": [
+              "`Market` or `Limit`."
+            ],
+            "type": {
+              "defined": {
+                "name": "OrderType"
+              }
+            }
+          },
+          {
+            "name": "collateral",
+            "docs": [
+              "USDC base units moved from the owner ATA into the order."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "size_delta_usd",
+            "docs": [
+              "GMTrade USD (1 USD = 10^20)."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "trigger_price",
+            "docs": [
+              "GMTrade unit price; required for `Limit`, zero for `Market`."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "acceptable_price",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OrderCancelled",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "order",
+            "type": "pubkey"
+          },
+          {
+            "name": "by",
+            "type": "pubkey"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OrderRequested",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "order",
+            "type": "pubkey"
+          },
+          {
+            "name": "market_token",
+            "type": "pubkey"
+          },
+          {
+            "name": "is_long",
+            "type": "bool"
+          },
+          {
+            "name": "order_type",
+            "type": {
+              "defined": {
+                "name": "OrderType"
+              }
+            }
+          },
+          {
+            "name": "size_delta_usd",
+            "type": "u128"
+          },
+          {
+            "name": "collateral",
+            "type": "u64"
+          },
+          {
+            "name": "trigger_price",
+            "type": "u128"
+          },
+          {
+            "name": "acceptable_price",
+            "type": "u128"
+          },
+          {
+            "name": "by",
+            "type": "pubkey"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OrderType",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Market"
+          },
+          {
+            "name": "Limit"
+          },
+          {
+            "name": "Close"
+          },
+          {
+            "name": "TakeProfit"
+          },
+          {
+            "name": "StopLoss"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OrderUpdated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "order",
+            "type": "pubkey"
+          },
+          {
+            "name": "size_delta_usd",
+            "type": {
+              "option": "u128"
+            }
+          },
+          {
+            "name": "trigger_price",
+            "type": {
+              "option": "u128"
+            }
+          },
+          {
+            "name": "acceptable_price",
+            "type": {
+              "option": "u128"
+            }
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "OwnerToppedUp",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "lamports",
+            "type": "u64"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Pauses",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "new_evaluations",
+            "type": "bool"
+          },
+          {
+            "name": "trading",
+            "type": "bool"
+          },
+          {
+            "name": "payouts",
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PayoutCancelled",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "request",
+            "type": "pubkey"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PayoutPaid",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "request",
+            "type": "pubkey"
+          },
+          {
+            "name": "trader",
+            "type": "pubkey"
+          },
+          {
+            "name": "trader_amount",
+            "type": "u64"
+          },
+          {
+            "name": "vault_amount",
+            "type": "u64"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PayoutRejected",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "request",
+            "type": "pubkey"
+          },
+          {
+            "name": "reason_code",
+            "type": "u16"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PayoutRequest",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "trader",
+            "type": "pubkey"
+          },
+          {
+            "name": "seq",
+            "type": "u32"
+          },
+          {
+            "name": "balance_at_request",
+            "docs": [
+              "USDC base units."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "profit",
+            "type": "u64"
+          },
+          {
+            "name": "trader_amount",
+            "type": "u64"
+          },
+          {
+            "name": "vault_amount",
+            "type": "u64"
+          },
+          {
+            "name": "status",
+            "type": {
+              "defined": {
+                "name": "PayoutStatus"
+              }
+            }
+          },
+          {
+            "name": "reason_code",
+            "type": "u16"
+          },
+          {
+            "name": "created_at",
+            "type": "i64"
+          },
+          {
+            "name": "resolved_at",
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PayoutRequested",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "request",
+            "type": "pubkey"
+          },
+          {
+            "name": "seq",
+            "type": "u32"
+          },
+          {
+            "name": "balance",
+            "type": "u64"
+          },
+          {
+            "name": "profit",
+            "type": "u64"
+          },
+          {
+            "name": "trader_amount",
+            "type": "u64"
+          },
+          {
+            "name": "vault_amount",
+            "type": "u64"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PayoutStatus",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Requested"
+          },
+          {
+            "name": "Paid"
+          },
+          {
+            "name": "Rejected"
+          },
+          {
+            "name": "Cancelled"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProtectionSet",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "order",
+            "type": "pubkey"
+          },
+          {
+            "name": "market_token",
+            "type": "pubkey"
+          },
+          {
+            "name": "is_long",
+            "type": "bool"
+          },
+          {
+            "name": "order_type",
+            "type": {
+              "defined": {
+                "name": "OrderType"
+              }
+            }
+          },
+          {
+            "name": "size_delta_usd",
+            "type": "u128"
+          },
+          {
+            "name": "trigger_price",
+            "type": "u128"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SetProtectionArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "is_long",
+            "type": "bool"
+          },
+          {
+            "name": "order_type",
+            "docs": [
+              "`TakeProfit` or `StopLoss`."
+            ],
+            "type": {
+              "defined": {
+                "name": "OrderType"
+              }
+            }
+          },
+          {
+            "name": "trigger_price",
+            "type": "u128"
+          },
+          {
+            "name": "size_delta_usd",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Slot",
+      "docs": [
+        "One GMTrade position (market, side) of a funded account. Free when `market_token` is default."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "market_token",
+            "type": "pubkey"
+          },
+          {
+            "name": "gm_position",
+            "type": "pubkey"
+          },
+          {
+            "name": "is_long",
+            "type": "bool"
+          },
+          {
+            "name": "collateral",
+            "docs": [
+              "Position collateral (USDC base units) and size (GMTrade USD) at the last sync."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "size_usd",
+            "type": "u128"
+          },
+          {
+            "name": "pending_usd",
+            "docs": [
+              "Σ size of tracked, pending increase orders on this slot."
+            ],
+            "type": "u128"
+          },
+          {
+            "name": "last_sync",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SlotSnapshot",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "market_token",
+            "type": "pubkey"
+          },
+          {
+            "name": "is_long",
+            "type": "bool"
+          },
+          {
+            "name": "size_usd",
+            "type": "u128"
+          },
+          {
+            "name": "collateral",
+            "type": "u64"
+          },
+          {
+            "name": "pending_usd",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SolTreasuryWithdrawn",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "lamports",
+            "type": "u64"
+          },
+          {
+            "name": "to",
+            "type": "pubkey"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Synced",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "slots",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "SlotSnapshot"
+                }
+              }
+            }
+          },
+          {
+            "name": "orders_dropped",
+            "type": {
+              "vec": "pubkey"
+            }
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Terms",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "size_usd",
+            "docs": [
+              "Account size S, micro-USD."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "profit_target_bps",
+            "type": "u16"
+          },
+          {
+            "name": "max_drawdown_bps",
+            "type": "u16"
+          },
+          {
+            "name": "max_exposure_bps",
+            "type": "u16"
+          },
+          {
+            "name": "trader_share_bps",
+            "type": "u16"
+          },
+          {
+            "name": "terms_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "tier_version",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Tier",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "id",
+            "type": "u16"
+          },
+          {
+            "name": "size_usd",
+            "type": "u64"
+          },
+          {
+            "name": "fee_usdc",
+            "type": "u64"
+          },
+          {
+            "name": "profit_target_bps",
+            "type": "u16"
+          },
+          {
+            "name": "max_drawdown_bps",
+            "type": "u16"
+          },
+          {
+            "name": "max_exposure_bps",
+            "type": "u16"
+          },
+          {
+            "name": "enabled",
+            "type": "bool"
+          },
+          {
+            "name": "terms_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "version",
+            "docs": [
+              "Incremented on every upsert; snapshotted into evaluations."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TierParams",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "size_usd",
+            "docs": [
+              "Account size S, micro-USD."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "fee_usdc",
+            "docs": [
+              "Evaluation fee, USDC base units."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "profit_target_bps",
+            "type": "u16"
+          },
+          {
+            "name": "max_drawdown_bps",
+            "type": "u16"
+          },
+          {
+            "name": "max_exposure_bps",
+            "type": "u16"
+          },
+          {
+            "name": "enabled",
+            "type": "bool"
+          },
+          {
+            "name": "terms_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "TrackedOrder",
+      "docs": [
+        "A GMTrade order owned by the account's owner PDA. Free when `order` is default."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "order",
+            "type": "pubkey"
+          },
+          {
+            "name": "slot",
+            "type": "u8"
+          },
+          {
+            "name": "order_type",
+            "type": {
+              "defined": {
+                "name": "OrderType"
+              }
+            }
+          },
+          {
+            "name": "size_usd",
+            "type": "u128"
+          },
+          {
+            "name": "collateral",
+            "type": "u64"
+          },
+          {
+            "name": "placed_by_risk",
+            "docs": [
+              "Orders placed by a risk authority (forced closes) cannot be cancelled by the trader."
+            ],
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TraderProfile",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "wallet",
+            "type": "pubkey"
+          },
+          {
+            "name": "identity_hash",
+            "docs": [
+              "Zero until the KYC authority verifies the wallet."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "verified_at",
+            "type": "i64"
+          },
+          {
+            "name": "active_funded",
+            "type": "u8"
+          },
+          {
+            "name": "evaluation_count",
+            "type": "u32"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateOrderArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "trigger_price",
+            "type": {
+              "option": "u128"
+            }
+          },
+          {
+            "name": "acceptable_price",
+            "type": {
+              "option": "u128"
+            }
+          },
+          {
+            "name": "size_delta_usd",
+            "type": {
+              "option": "u128"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

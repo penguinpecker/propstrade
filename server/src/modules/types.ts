@@ -2,15 +2,22 @@
 // Core owns: config, db, auth, stream hub, registry. Each module owns its folder and exports a default
 // `register(ctx)` that returns its service. Modules talk to each other only through these interfaces.
 import type { FastifyInstance, FastifyBaseLogger } from 'fastify';
+import type { Connection } from '@solana/web3.js';
 import type { Market, PriceTick, CandleInterval, CandlesResponse, MarketTrade, PriceImpactQuote, StreamEvent } from '@props/shared';
+import type { Config } from '../config.js';
+import type { Db, Sql } from '../db/client.js';
 
 export interface ModuleContext {
-  app: FastifyInstance;                 // register routes under /v1
+  app: FastifyInstance;                 // register routes under /v1; auth guard: app.requireWallet (see auth/routes.ts)
   log: FastifyBaseLogger;
   env: Record<string, string | undefined>;
   publish(event: StreamEvent, audience?: { wallet?: string }): void; // SSE hub; no audience = broadcast
   services: Services;                   // filled in registration order: marketdata → sim → chain → keeper
   signal: AbortSignal;                  // aborted on shutdown
+  config: Config;                       // validated env (server/src/config.ts)
+  db: Db;                               // Drizzle over the shared pool (server/src/db/schema.ts)
+  sql: Sql;                             // raw postgres-js client for the same pool
+  rpc: Connection;                      // Solana RPC (commitment 'confirmed')
 }
 
 export interface Services {
@@ -26,7 +33,7 @@ export interface MarketState {
   indexToken: string;
   pure: boolean;
   isClosed: boolean;
-  /** Decoded onchain Market account (gmsol_store v0.10.0 layout) as plain JSON, for the WASM model. */
+  /** { market: base64 Market account, virtualInventories: { address: base64 }, slot } — raw images the WASM model reads. */
   raw: unknown;
   fetchedAt: number;
 }

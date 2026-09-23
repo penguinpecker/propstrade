@@ -1,23 +1,34 @@
 {
-  "name": "props-trade-interface",
+  "name": "@props/app",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 4187",
-    "build": "vite build",
+    "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4187",
-    "capture": "node scripts/render.mjs export",
-    "test:flows": "node scripts/verify.mjs"
+    "test": "vitest run",
+    "test:e2e": "node tests/e2e.mjs"
   },
   "dependencies": {
-    "react": "19.3.0",
-    "react-dom": "19.3.0",
+    "@props/shared": "*",
+    "@solana/wallet-adapter-base": "0.9.28",
+    "@solana/wallet-adapter-react": "0.15.40",
+    "@solana/web3.js": "1.99.0",
+    "@tanstack/react-query": "5.103.2",
+    "@vercel/functions": "3.9.9",
+    "bs58": "6.0.0",
+    "lightweight-charts": "5.2.0",
     "lucide-react": "1.47.0",
-    "lightweight-charts": "5.2.0"
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
   },
   "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "playwright": "^1.58.2",
+    "typescript": "7.0.2",
     "vite": "8.3.0",
-    "playwright": "^1.58.2"
+    "vitest": "5.0.1"
   }
 }
