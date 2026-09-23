@@ -1,7 +1,7 @@
 import type {
   AccountDetail, AccountSummary, ActivityItem, ApiError, AppConfig, CandleInterval, CandlesResponse, ClosedTrade, Market,
-  MarketTrade, Me, NonceResponse, Notification, Order, Payout, Performance, Position, Pubkey, SimCloseRequest, SimOrderRequest,
-  SimOrderResponse, SimProtectionRequest, VaultStats, VerifyRequest, VerifyResult,
+  MarketTrade, Me, NonceResponse, Notification, Order, Payout, PayoutEligibility, Performance, Position, PriceImpactQuote, Pubkey,
+  SimCloseRequest, SimOrderRequest, SimOrderResponse, SimProtectionRequest, VaultStats, VerifyRequest, VerifyResult,
 } from '@props/shared';
 import { env } from './env';
 
@@ -60,6 +60,8 @@ export const api = {
   marketTrades: (symbol: string, limit?: number) => request<MarketTrade[]>('GET', `/v1/markets/${id(symbol)}/trades${query({ limit })}`),
   candles: (symbol: string, interval: CandleInterval, from?: number, to?: number) =>
     request<CandlesResponse>('GET', `/v1/candles${query({ symbol, interval, from, to })}`),
+  quote: (symbol: string, side: 'Long' | 'Short', sizeUsd: string) =>
+    request<PriceImpactQuote>('GET', `/v1/quote${query({ symbol, side, sizeUsd })}`),
 
   nonce: (wallet: Pubkey) => request<NonceResponse>('POST', '/v1/auth/nonce', { wallet }),
   /** Sets the session cookie. The body is not a profile: read that from /v1/me. */
@@ -75,6 +77,7 @@ export const api = {
   activity: (accountId: string) => request<ActivityItem[]>('GET', `/v1/accounts/${id(accountId)}/activity`),
   performance: (accountId: string, period: Performance['period']) =>
     request<Performance>('GET', `/v1/accounts/${id(accountId)}/performance${query({ period })}`),
+  payoutEligibility: (accountId: string) => request<PayoutEligibility>('GET', `/v1/accounts/${id(accountId)}/payout-eligibility`),
 
   placeSimOrder: (accountId: string, body: SimOrderRequest) => request<SimOrderResponse>('POST', `/v1/sim/${id(accountId)}/orders`, body),
   cancelSimOrder: (accountId: string, orderId: string) =>

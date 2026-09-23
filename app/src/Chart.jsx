@@ -1,31 +1,27 @@
 import React, { useEffect, useRef } from 'react';
-import { createChart, CandlestickSeries, HistogramSeries, LineSeries, CrosshairMode } from 'lightweight-charts';
-import { makeCandles } from './data.js';
+import { createChart, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts';
+import { applyTick } from './lib/candles';
 
-export default function PriceChart({ market, interval, line = false, guides = true, theme = 'dark' }) {
+/** GMTrade candles (`candles`), moved live by `tick` ({ price, ts }); `guides` are horizontal price lines ({ price, title }). */
+export default function PriceChart({ market, candles, tick, interval, line = false, guides = [], theme = 'dark' }) {
   const container = useRef(null);
+  const chartRef = useRef(null);
+  const last = useRef(null);
   useEffect(() => {
     const dark = theme === 'dark';
-    const colors = dark ? { surface: '#19181f', axis: '#afa6bc', grid: '#2b2732', border: '#35313e', purple: '#b28aff', green: '#6caf95', red: '#ca7d8b', volumeUp: '#274239', volumeDown: '#493039', entryBg: '#332743', entryText: '#c8a3f3' } : { surface: '#fdfdfb', axis: '#6e6975', grid: '#efeee9', border: '#eeece6', purple: '#8552cc', green: '#459583', red: '#c27878', volumeUp: '#d9e8df', volumeDown: '#efdedd', entryBg: '#f0e8fa', entryText: '#76529b' };
+    const colors = dark ? { surface: '#19181f', axis: '#afa6bc', grid: '#2b2732', border: '#35313e', purple: '#b28aff', green: '#6caf95', red: '#ca7d8b', entry: '#9168ba', entryBg: '#332743', entryText: '#c8a3f3' } : { surface: '#fdfdfb', axis: '#6e6975', grid: '#efeee9', border: '#eeece6', purple: '#8552cc', green: '#459583', red: '#c27878', entry: '#976ccc', entryBg: '#f0e8fa', entryText: '#76529b' };
     const chart = createChart(container.current, {
       autoSize: true,
       layout: { background: { color: colors.surface }, textColor: colors.axis, fontFamily: 'Manrope, sans-serif', fontSize: 10, attributionLogo: true },
       grid: { vertLines: { color: colors.grid }, horzLines: { color: colors.grid } },
-      rightPriceScale: { borderColor: colors.border, scaleMargins: { top: .12, bottom: .22 } },
+      rightPriceScale: { borderColor: colors.border, scaleMargins: { top: .12, bottom: .1 } },
       timeScale: { borderColor: colors.border, timeVisible: true, secondsVisible: false, rightOffset: 7, barSpacing: 6, fixLeftEdge: true },
       crosshair: { mode: CrosshairMode.Normal, vertLine: { color: '#b6aec3', labelBackgroundColor: '#645474' }, horzLine: { color: '#b6aec3', labelBackgroundColor: '#645474' } },
       handleScale: { mouseWheel: true, pinch: true }, handleScroll: { mouseWheel: false, pressedMouseMove: true },
     });
-    const data = makeCandles(market, interval);
     const series = chart.addSeries(line ? LineSeries : CandlestickSeries, line ? { color: colors.purple, lineWidth: 2 } : { upColor: colors.green, downColor: colors.red, wickUpColor: colors.green, wickDownColor: colors.red, borderVisible: false });
-    const lastCandle = data[data.length - 1];
-    series.applyOptions({ priceLineColor: line ? '#7946bc' : lastCandle.close >= lastCandle.open ? '#267963' : '#a24c58', priceFormat: { type: 'price', precision: market.price < 2 ? 5 : 2, minMove: market.price < 2 ? .00001 : .01 } });
-    series.setData(line ? data.map(c => ({ time: c.time, value: c.close })) : data);
-    const volume = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceScaleId: 'volume', priceLineVisible: false, lastValueVisible: false });
-    volume.priceScale().applyOptions({ scaleMargins: { top: .83, bottom: .035 } });
-    volume.setData(data.map((c, i) => ({ time: c.time, value: (Math.sin(i * 2.5) + 1.6) * 420 + Math.abs(c.close - c.open) * 5, color: c.close >= c.open ? colors.volumeUp : colors.volumeDown })));
-    if (guides) series.createPriceLine({ price: market.price * .98314, color: dark ? '#9168ba' : '#976ccc', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'Entry', axisLabelColor: colors.entryBg, axisLabelTextColor: colors.entryText });
-    chart.timeScale().fitContent();
+    series.applyOptions({ priceLineColor: line ? '#7946bc' : colors.green, priceFormat: { type: 'price', precision: market.priceDecimals, minMove: 10 ** -market.priceDecimals } });
+    chartRef.current = { chart, series, line, colors, priceLines: [] };
     // Refit only when the plot width changes; ordinary chart pan/zoom remains user-controlled.
     let width = 0;
     let resizeFrame;
@@ -37,7 +33,33 @@ export default function PriceChart({ market, interval, line = false, guides = tr
       resizeFrame = requestAnimationFrame(() => chart.timeScale().fitContent());
     });
     observer.observe(container.current);
-    return () => { observer.disconnect(); cancelAnimationFrame(resizeFrame); chart.remove(); };
-  }, [market.symbol, interval, line, guides, theme]);
-  return <div className="price-chart" ref={container} aria-label={`${market.name} interactive sample price chart. Drag to pan, pinch or scroll to zoom.`} />;
+    return () => { observer.disconnect(); cancelAnimationFrame(resizeFrame); chart.remove(); chartRef.current = null; };
+  }, [market.symbol, market.priceDecimals, interval, line, theme]);
+
+  useEffect(() => {
+    const current = chartRef.current;
+    if (!current) return;
+    current.series.setData(current.line ? candles.map(c => ({ time: c.time, value: c.close })) : candles);
+    last.current = candles.at(-1) ?? null;
+    // Fit the first data of each chart; later refetches keep the user's pan and zoom.
+    if (!current.fitted && candles.length) { current.chart.timeScale().fitContent(); current.fitted = true; }
+  }, [candles, market.symbol, interval, line, theme]);
+
+  useEffect(() => {
+    const current = chartRef.current;
+    if (!current || !tick) return;
+    const bar = applyTick(last.current, tick.price, tick.ts, interval);
+    if (!bar) return;
+    last.current = bar;
+    current.series.update(current.line ? { time: bar.time, value: bar.close } : bar);
+  }, [tick, candles, market.symbol, interval, line, theme]);
+
+  useEffect(() => {
+    const current = chartRef.current;
+    if (!current) return;
+    for (const priceLine of current.priceLines) current.series.removePriceLine(priceLine);
+    current.priceLines = guides.map(g => current.series.createPriceLine({ price: g.price, color: current.colors.entry, lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: g.title, axisLabelColor: current.colors.entryBg, axisLabelTextColor: current.colors.entryText }));
+  }, [guides, market.symbol, interval, line, theme]);
+
+  return <div className="price-chart" ref={container} aria-label={`${market.name} price chart from GMTrade. Drag to pan, pinch or scroll to zoom.`} />;
 }

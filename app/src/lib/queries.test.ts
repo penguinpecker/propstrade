@@ -4,7 +4,7 @@ import { applyStreamEvent, createQueryClient, keys } from './queries';
 
 const market = (symbol: string, updatedAt: number | null): Market => ({
   symbol, pair: `${symbol} / USD`, name: symbol, category: 'Crypto', marketToken: 'token', pools: [], tradable: true,
-  price: '100', priceDecimals: 2, change24h: null, volume24h: null, openInterestLong: null, openInterestShort: null,
+  price: '100', priceDecimals: 2, indexTokenDecimals: 9, change24h: null, volume24h: null, openInterestLong: null, openInterestShort: null,
   fundingRateHourlyLong: null, borrowRateHourlyLong: null, borrowRateHourlyShort: null, capacityLong: null, capacityShort: null,
   poolLiquidity: null, maxLeverage: 25, closedMaxLeverage: null, session: 'open', freshness: 'stale', updatedAt,
 });

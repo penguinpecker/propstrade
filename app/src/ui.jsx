@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
-import { ArrowUpRight, ArrowRight, ArrowLeft, Bitcoin, CircleDollarSign, Cpu, Euro, PoundSterling, Smartphone, Check, X, ChevronDown, Info, ExternalLink, Wallet } from 'lucide-react';
-import { number, seriesValues } from './data.js';
+import { ArrowUpRight, ArrowRight, ArrowLeft, Bitcoin, CircleDollarSign, Cpu, Euro, PoundSterling, Smartphone, Check, X, ChevronDown, Info, ExternalLink, TriangleAlert, Wallet } from 'lucide-react';
+import { bpsPercent, date, freshnessLabel, usd, utcTime } from './data.js';
 
 export function Brand({ compact = false }) {
   return <a href="#/trade/funded" className="brand" aria-label="Props.trade home"><img src="/brand/symbol.svg" alt="" />{!compact && <span>Props<span className="brand-dot">.</span>trade</span>}</a>;
@@ -11,7 +11,12 @@ export function Button({ children, variant = 'primary', small = false, className
 export function IconButton({ icon: Icon, label, className = '', ...props }) {
   return <button className={`icon-button ${className}`} aria-label={label} title={label} {...props}><Icon size={17} strokeWidth={1.7} /></button>;
 }
-export function Badge({ children, tone = 'neutral', dot = false }) { return <span className={`badge ${tone}`}>{dot && <i />}{children}</span>; }
+export function Badge({ children, tone = 'neutral', dot = false, title }) { return <span className={`badge ${tone}`} title={title}>{dot && <i />}{children}</span>; }
+/** Marks a market price that is not live ("Stale", "Delayed", "Unavailable"), with the time of GMTrade's last update. */
+export function FreshnessBadge({ market }) { return <Badge tone="amber" title={market.updatedAt ? `Last update ${utcTime(market.updatedAt)}` : 'GMTrade has not published a price'}>{freshnessLabel(market)}</Badge>; }
+const ICON_COLORS = { BTC: '#bd8238', ETH: '#7b79a4', SOL: '#756193', XAU: '#aa8b37', EUR: '#59749a', AAPL: '#72706e', NVDA: '#61825b', GBP: '#776384' };
+/** A stable hue per symbol, so a market keeps its monogram color everywhere. */
+const monogramColor = symbol => `hsl(${[...symbol].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7)} 28% 56%)`;
 export function MarketIcon({ market, small = false }) {
   const size = small ? 15 : 20;
   const Icon = { BTC: Bitcoin, EUR: Euro, GBP: PoundSterling, AAPL: Smartphone, NVDA: Cpu }[market.symbol];
@@ -20,7 +25,8 @@ export function MarketIcon({ market, small = false }) {
     SOL: <><path d="M6 4h15l-3 4H3ZM3 10h15l3 4H6ZM6 16h15l-3 4H3Z" fill="currentColor" /></>,
     XAU: <><path d="m7 6-4 12h18L17 6Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" /><path d="M7 6h10l-3 5H5m9 0 7 7M14 11v7" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" /></>,
   };
-  return <span className={`market-icon ${small ? 'small' : ''}`} style={{ '--coin-color': market.color }} aria-hidden="true">{Icon ? <Icon size={size} strokeWidth={1.8} /> : <svg width={size} height={size} viewBox="0 0 24 24">{paths[market.symbol]}</svg>}</span>;
+  const mark = Icon ? <Icon size={size} strokeWidth={1.8} /> : paths[market.symbol] ? <svg width={size} height={size} viewBox="0 0 24 24">{paths[market.symbol]}</svg> : <span style={{ fontSize: small ? 9 : 11, letterSpacing: '-.02em' }}>{market.symbol.slice(0, 2)}</span>;
+  return <span className={`market-icon ${small ? 'small' : ''}`} style={{ '--coin-color': ICON_COLORS[market.symbol] ?? monogramColor(market.symbol) }} aria-hidden="true">{mark}</span>;
 }
 export function UsdcIcon() { return <span className="usdc-icon" aria-hidden="true"><CircleDollarSign size={18} strokeWidth={1.6} /></span>; }
 export function PageHeading({ title, description, children, back }) {
@@ -42,16 +48,27 @@ export function Dialog({ title, children, onClose, wide = false }) {
   useEffect(() => { const node = ref.current; node.showModal(); const handler = e => { e.preventDefault(); closeRef.current(); }; node.addEventListener('cancel', handler); return () => { node.removeEventListener('cancel', handler); if (node.open) node.close(); }; }, []);
   return <dialog ref={ref} className={`dialog ${wide ? 'wide' : ''}`} onClick={e => { if (e.target === ref.current) onClose(); }} aria-labelledby="dialog-title"><div className="dialog-head"><h2 id="dialog-title">{title}</h2><IconButton icon={X} label="Close dialog" onClick={onClose} /></div>{children}</dialog>;
 }
-export function LineGraph({ height = 220, end = 1742.5, muted = false, showLabels = true, period = '1M' }) {
-  const values = seriesValues(period === '1W' ? 28 : 60, end);
-  const width = 900, pad = 20, baseline = height - 38;
-  const max = Math.max(...values.map(v => v.value)) * 1.13;
-  const points = values.map((v, i) => `${pad + i / (values.length - 1) * (width - pad * 2)},${baseline - Math.max(0, v.value) / max * (height - 68)}`).join(' ');
-  return <svg className={`line-graph ${muted ? 'muted' : ''}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`Sample net profit over the selected period, ending at ${number(end)} dollars`} preserveAspectRatio="none">{[0, 1, 2, 3].map(i => <line key={i} x1={pad} x2={width - pad} y1={28 + i * (baseline - 28) / 3} y2={28 + i * (baseline - 28) / 3} stroke="var(--line-soft)" strokeDasharray="3 5" />)}<polygon points={`${pad},${baseline} ${points} ${width - pad},${baseline}`} fill={muted ? 'var(--graph-muted-fill, #efefeb)' : 'var(--graph-fill, #f0eaf8)'} opacity=".65" /><polyline points={points} fill="none" stroke={muted ? 'var(--subtle)' : 'var(--purple)'} strokeWidth="2.3" vectorEffect="non-scaling-stroke" />{showLabels && ['Sep 01', 'Sep 05', 'Sep 09', 'Sep 13', 'Sep 17', 'Sep 23'].map((s, i) => <text key={s} x={pad + i * (width - pad * 2) / 5} y={height - 6} textAnchor={i === 0 ? 'start' : i === 5 ? 'end' : 'middle'}>{s}</text>)}</svg>;
+/** Real series only: `points` are { ts, value } in time order; fewer than two points render nothing. */
+export function LineGraph({ points, height = 220, muted = false, showLabels = true, label }) {
+  if (points.length < 2) return null;
+  const width = 900, pad = 20, top = 28, baseline = height - 38;
+  const values = points.map(p => p.value);
+  const low = Math.min(0, ...values), high = Math.max(0, ...values);
+  const span = high - low || 1;
+  const x = i => pad + i / (points.length - 1) * (width - pad * 2);
+  const y = v => baseline - (v - low) / span * (baseline - top);
+  const line = points.map((p, i) => `${x(i)},${y(p.value)}`).join(' ');
+  const labels = [0, 1, 2, 3, 4, 5].map(i => Math.round(i * (points.length - 1) / 5));
+  return <svg className={`line-graph ${muted ? 'muted' : ''}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={label} preserveAspectRatio="none">{[0, 1, 2, 3].map(i => <line key={i} x1={pad} x2={width - pad} y1={top + i * (baseline - top) / 3} y2={top + i * (baseline - top) / 3} stroke="var(--line-soft)" strokeDasharray="3 5" />)}<polygon points={`${pad},${y(Math.max(low, 0))} ${line} ${width - pad},${y(Math.max(low, 0))}`} fill={muted ? 'var(--graph-muted-fill, #efefeb)' : 'var(--graph-fill, #f0eaf8)'} opacity=".65" /><polyline points={line} fill="none" stroke={muted ? 'var(--subtle)' : 'var(--purple)'} strokeWidth="2.3" vectorEffect="non-scaling-stroke" />{showLabels && labels.map((index, i) => <text key={i} x={x(index)} y={height - 6} textAnchor={i === 0 ? 'start' : i === 5 ? 'end' : 'middle'}>{date(points[index].ts).slice(0, 6)}</text>)}</svg>;
 }
 export function Steps({ active = 1, labels = ['Choose account', 'Connect wallet', 'Start evaluation'] }) { return <div className="steps">{labels.map((label, i) => <div key={label} className={`${i + 1 === active ? 'current' : ''} ${i + 1 < active ? 'done' : ''}`}><span>{i + 1 < active ? <Check size={13} /> : i + 1}</span>{label}{i < labels.length - 1 && <div className="step-rule" />}</div>)}</div>; }
 export function InlineLink({ href, children, external = false }) { return <a href={href} className="inline-link" {...external ? { target: '_blank', rel: 'noreferrer' } : {}}>{children}{external ? <ExternalLink size={13} /> : <ArrowUpRight size={14} />}</a>; }
-export function RuleList({ size = 25000 }) { return <div className="rule-list"><DataRow label="Profit target" value={`8% · $${number(size * .08, 0)}`} /><DataRow label="Maximum drawdown" value={`5% · $${number(size * .05, 0)}`} /><DataRow label="Drawdown type" value="Static · includes open P&L" /><DataRow label="Daily loss limit" value="None" /><DataRow label="Time limit" value="None" /><DataRow label="Your profit share" value="80%" /></div>; }
+/** Rules in the AccountRules shape (an account's pinned terms, or `tierRules(tier)` before purchase). */
+export function RuleList({ rules }) { const size = Number(rules.sizeUsd), share = pct => bpsPercent(Math.round(pct * 10_000)); return <div className="rule-list"><DataRow label="Profit target" value={rules.profitTargetUsd == null ? 'None' : `${share(Number(rules.profitTargetUsd) / size)} · ${usd(rules.profitTargetUsd, 0)}`} /><DataRow label="Maximum drawdown" value={`${share(Number(rules.lossAllowanceUsd) / size)} · ${usd(rules.lossAllowanceUsd, 0)}`} /><DataRow label="Drawdown type" value="Static · includes open P&L" /><DataRow label="Daily loss limit" value="None" /><DataRow label="Time limit" value="None" /><DataRow label="Your profit share" value={bpsPercent(rules.traderShareBps)} /></div>; }
+/** Loading state for a section. */
+export function Pending({ children }) { return <div className="empty" role="status"><span className="spinner" /><p>{children}</p></div>; }
+/** A section whose data failed to load, with a retry. */
+export function Unavailable({ title, error, retry }) { return <Empty icon={TriangleAlert} title={title} action={retry && <Button variant="secondary" small onClick={() => retry()}>Try again</Button>}>{error?.message ?? 'The Props.trade service could not be reached.'}</Empty>; }
 /** One live region (role=status) so screen readers announce each sign-in problem as it replaces the guidance. */
 export function SessionNotice({ session, children }) {
   // A wrong network blocks sign-in, so it wins; otherwise the latest failure beats a slow-RPC warning.
