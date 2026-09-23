@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { walletSchema } from './lib/solana.js';
 
-const EnvSchema = z.object({
+export const EnvSchema = z.object({
   DATABASE_URL: z.url(),
   APP_ORIGIN: z.url().refine((v) => new URL(v).origin === v, 'must be a bare origin such as https://props.trade'),
   SESSION_SECRET: z.string().min(32),

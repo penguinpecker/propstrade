@@ -11,6 +11,6 @@ main(async () => {
   const riskAuthorities = String(ctx.values.risk).split(',').map((k) => new PublicKey(k.trim()));
   const kycAuthority = new PublicKey(String(ctx.values.kyc));
   await submit(ctx, 'set_authorities', [
-    await ctx.vault.setAuthorities({ admin: ctx.operator.publicKey, riskAuthorities, kycAuthority }),
+    await ctx.vault.setAuthorities({ admin: ctx.admin, riskAuthorities, kycAuthority }),
   ]);
 });

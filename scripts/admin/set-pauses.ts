@@ -23,5 +23,5 @@ main(async () => {
     payouts: flag('payouts', config.paused.payouts),
   };
   console.log('current', config.paused, '→ new', paused);
-  await submit(ctx, 'set_pauses', [await ctx.vault.setPauses({ admin: ctx.operator.publicKey, paused })]);
+  await submit(ctx, 'set_pauses', [await ctx.vault.setPauses({ admin: ctx.admin, paused })]);
 });

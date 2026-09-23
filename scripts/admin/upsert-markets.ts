@@ -80,7 +80,7 @@ main(async () => {
     console.log(`${enabled ? 'enable ' : 'disable'} ${m.name.padEnd(24)} ${symbol.padEnd(8)} ${category ?? 'unreviewed'} ${caps.max}× (closed ${caps.closed}×)`);
     instructions.push(
       await ctx.vault.upsertMarket({
-        admin: ctx.operator.publicKey,
+        admin: ctx.admin,
         marketToken: m.marketToken,
         params: {
           enabled,
