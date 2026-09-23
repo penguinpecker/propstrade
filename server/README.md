@@ -52,7 +52,7 @@ npm run typecheck --workspace @props/server
 | `GET /v1/notifications` | cookie | newest 100 `Notification`s |
 | `POST /v1/notifications/read` `{ ids? }` | cookie | marks the given ids (or all) read |
 | `GET /v1/admin/kyc?status=&limit=` | admin | review queue with the linked chain job's status |
-| `POST /v1/admin/kyc/:id/approve` `{ identityHash }` | admin | 32-byte hex salted identity hash from the review process; queues a `set_identity` chain job; one approved wallet per identity |
+| `POST /v1/admin/kyc/:id/approve` `{ identityHash }` | admin | 32-byte hex salted identity hash, made by `scripts/admin/identity-hash.ts` from the reviewed document; queues a `set_identity` chain job; one approved wallet per identity |
 | `POST /v1/admin/kyc/:id/reject` `{ reason }` | admin | |
 
 Admin routes take `Authorization: Bearer $ADMIN_API_TOKEN` (constant-time compare) and write `admin_audit_log`.
@@ -86,5 +86,6 @@ Orders are accepted by any process; fills, liquidations and the 1 s rules loop r
 ## Deploy (Railway)
 
 `server/railway.json` is config-as-code: set the service's root directory to the repo root and its config file path
-to `server/railway.json`. Migrations run as the pre-deploy command; one replica; health check `/v1/health`;
-15 s drain after SIGTERM. Set every required variable from `.env.example` in the service.
+to `server/railway.json`. Railpack builds it (`railpack.json` at the repo root pins the Node provider). Migrations run as
+the pre-deploy command; one replica; health check `/v1/health`; 15 s drain after SIGTERM. Set every required variable
+from `.env.example` in the service. The full procedure is `docs/runbooks/launch.md`.

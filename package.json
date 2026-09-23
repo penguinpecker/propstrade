@@ -3,5 +3,8 @@
   "private": true,
   "type": "module",
   "workspaces": ["packages/*", "server", "app", "tests/program"],
-  "engines": { "node": ">=22" }
+  "engines": { "node": "22.x" },
+  "scripts": {
+    "test:admin": "node --test scripts/admin/*.test.ts"
+  }
 }

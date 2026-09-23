@@ -251,7 +251,8 @@ browser with `packages/sdk`**; the server never holds user keys.
   SSE for live data. Env: `VITE_API_URL`, `VITE_RPC_URL`, `VITE_PROGRAM_ID`, `VITE_CLUSTER`.
 - Replace `data.js` fixtures with API data; keep the formatting helpers.
 - Screen index (`/screens`) and its 4K exports are design artefacts: dev builds only.
-- Edge middleware (`app/middleware.js`, Vercel): 451 page for US and sanctioned countries.
+- Edge middleware (`app/middleware.js`, Vercel): 451 page for US and sanctioned countries; every other response gets the
+  Content-Security-Policy (connect-src = the API and RPC origins only).
 - Every screen's states (loading, empty, stale, pending, failed, uncertain) come from real data.
 
 ## 6. Environments
@@ -434,3 +435,16 @@ Keeper module (round 2):
   jobs failed for good, an account the keeper cannot read or value, and an indexer more than 5 min behind.
 - The venue loop keeps reading an account's GMTrade fills for 3 min after it goes flat (subsquid lags ~35 s), so the
   closing fills a payout review reconciles against are indexed.
+
+Launch (round 3, `docs/runbooks/launch.md` is the go-live procedure):
+- The program's Anchor IDL must be published onchain (`anchor idl init`) before the server can mark any market tradable:
+  marketdata decodes the `MarketConfig` allowlist with the IDL it reads from chain.
+- Railway builds with Railpack; `railpack.json` forces the Node provider (the root `Cargo.toml` otherwise makes it a Rust
+  build). Vercel installs with `npm ci` at the repo root (`app/vercel.json`). Node is pinned to 22.x.
+- The app's CSP is built at the edge from the same `VITE_*` variables the build inlined; the Android Mobile Wallet Adapter
+  needs `ws://localhost:*`, `http://localhost`, inline styles and Google Fonts, so those are allowed.
+- Admin scripts build for a multisig with `--print-for <ADMIN>` once the admin is the Squads vault: simulated with the
+  vault as fee payer, then printed as an unsigned base58 legacy transaction for Squads' "Import base58 encoded tx". A
+  failing dry run exits 1 and prints nothing to import.
+- Identity hashes come only from `scripts/admin/identity-hash.ts`: HMAC-SHA256 under IDENTITY_SALT of one document in
+  canonical form (`<ISSUER alpha-2>:<PASSPORT|ID_CARD>:<NUMBER A-Z0-9>`), so one document always gives one hash.
