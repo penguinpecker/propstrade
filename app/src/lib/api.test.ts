@@ -22,10 +22,14 @@ describe('api client', () => {
     await api.positions('practice:Wallet/1');
     await api.candles('BTC', '15m');
     await api.marketTrades('XAU');
+    await api.quote('BTC', 'Short', '2500.5');
+    await api.payoutEligibility('Funded/1');
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       '/v1/accounts/practice%3AWallet%2F1/positions',
       '/v1/candles?symbol=BTC&interval=15m',
       '/v1/markets/XAU/trades',
+      '/v1/quote?symbol=BTC&side=Short&sizeUsd=2500.5',
+      '/v1/accounts/Funded%2F1/payout-eligibility',
     ]);
   });
 

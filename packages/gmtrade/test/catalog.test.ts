@@ -43,6 +43,7 @@ test('one row per index asset, preferring the pure USDC pool, with model stats',
   assert.deepEqual([SOL!.pair, SOL!.name, SOL!.category], ['SOL / USD', 'Solana', 'Crypto']);
   assert.equal(SOL!.price, '118.13082');
   assert.equal(SOL!.priceDecimals, 5);
+  assert.equal(SOL!.indexTokenDecimals, 9);
   assert.equal(SOL!.change24h!.toFixed(4), ((118.13082 / 120 - 1) * 100).toFixed(4));
   assert.ok(Math.abs(Number(SOL!.openInterestLong) - 1_137_971) < 2); // research: OI long=$1137971
   // research: shorts paid 6.2473491685e-9 /s borrowing, longs nothing
