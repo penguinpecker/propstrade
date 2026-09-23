@@ -904,3 +904,18 @@ Pinocchio evaluated (2026-09-23; measured in a scratch copy, 59/59 LiteSVM tests
   but means ~600 hand-written account checks, hand-built GMTrade CPIs (create_order_v2 has 25 accounts), 3-5 weeks and a
   new audit. SPL Token -> p-token shrank only 19% (133,352 -> 108,600 B): logic-heavy code does not shrink much.
   Anchor v2 on Pinocchio (anchor-lang 2.0.0-rc.1, otter-sec/anchor) is alpha and unaudited. Not now.
+
+2026-09-23 DEPLOYED 8cfe99b (self-healing market data, chart drag + indicators, Google-only sign-in, "not live yet"
+           state), server first then app, from a git-archive export of the pushed commit. First full push of the repo to
+           GitHub (private): the unpushed history was rewritten first so learnings.txt carries placeholders for account
+           identifiers (Railway/Vercel project, service, team and deployment ids); the values live in the local-only
+           records.txt (git-excluded).
+           - `railway up --ci` exited 1 with "Failed to stream build logs" while the build carried on: follow the
+             deployment with `railway deployment list` until SUCCESS instead of trusting the CLI's exit code.
+           - Verified live: /v1/health upstreams reported (candles 'degraded' during a GMTrade blip, chart still drawn),
+             /v1/config answers 503 not_initialized, get-funded shows "Evaluations open soon", the wallet window offers
+             only Google, the chart shows Indicators/Auto and Recent trades.
+- /v1/config and /v1/vault answer 503 `not_initialized` (was a generic `unavailable`) until props_vault is deployed and
+  initialized: the app does not retry it and says so instead of spinning ~8 s into an error.
+- The database was never the cause of "Loading the evaluation programs...": Postgres is its own Railway service; the
+  tiers come from the onchain program, which is not deployed yet.
