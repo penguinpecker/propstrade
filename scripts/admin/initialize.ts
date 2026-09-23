@@ -14,5 +14,5 @@ main(async () => {
     ownerSolTarget: new BN(0.25 * LAMPORTS_PER_SOL),
     ownerSolMin: new BN(0.1 * LAMPORTS_PER_SOL),
   };
-  await submit(ctx, 'initialize', [await ctx.vault.initialize({ admin: ctx.operator.publicKey, params })]);
+  await submit(ctx, 'initialize', [await ctx.vault.initialize({ admin: ctx.admin, params })]);
 });

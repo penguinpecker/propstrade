@@ -8,5 +8,5 @@ main(async () => {
   });
   if (!ctx.values.amount) throw new Error('--amount is required');
   const amount = toMicro(String(ctx.values.amount));
-  await submit(ctx, `deposit_capital ${ctx.values.amount} USDC`, [await ctx.vault.depositCapital({ admin: ctx.operator.publicKey, amount })]);
+  await submit(ctx, `deposit_capital ${ctx.values.amount} USDC`, [await ctx.vault.depositCapital({ admin: ctx.admin, amount })]);
 });

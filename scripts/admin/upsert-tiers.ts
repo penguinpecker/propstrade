@@ -1,5 +1,8 @@
 // Upserts the spec §1 tiers. Each tier's terms hash is sha256 of its canonical rules JSON (printed), so the
 // published rules can be checked against the onchain tier.
+// --smoke-test instead makes tier 1 a tiny account for the mainnet smoke test (docs/runbooks/launch.md) and disables
+// the others: 200 USD size (a 10 USDC loss allowance), 1 USDC fee, 0.1% target. Purchased evaluations keep the terms
+// they were bought with, so running this script again without the flag restores the spec tiers for everyone else.
 import { createHash } from 'node:crypto';
 import BN from 'bn.js';
 import { toMicro } from '@props/sdk';
@@ -18,29 +21,35 @@ const RULES = {
 } as const;
 
 const TIERS = [
-  { id: 1, name: '10K', sizeUsd: '10000', feeUsdc: '79', enabled: true },
-  { id: 2, name: '25K', sizeUsd: '25000', feeUsdc: '149', enabled: true },
-  { id: 3, name: '50K', sizeUsd: '50000', feeUsdc: '249', enabled: false }, // pool depth limits size at launch
-  { id: 4, name: '100K', sizeUsd: '100000', feeUsdc: '449', enabled: false },
+  { id: 1, name: '10K', sizeUsd: '10000', feeUsdc: '79', enabled: true, rules: RULES },
+  { id: 2, name: '25K', sizeUsd: '25000', feeUsdc: '149', enabled: true, rules: RULES },
+  { id: 3, name: '50K', sizeUsd: '50000', feeUsdc: '249', enabled: false, rules: RULES }, // pool depth limits size at launch
+  { id: 4, name: '100K', sizeUsd: '100000', feeUsdc: '449', enabled: false, rules: RULES },
+];
+const SMOKE_TEST_TIERS = [
+  { id: 1, name: 'smoke test', sizeUsd: '200', feeUsdc: '1', enabled: true, rules: { ...RULES, profitTargetBps: 10 } },
+  ...TIERS.slice(1).map((t) => ({ ...t, enabled: false })),
 ];
 
 main(async () => {
-  const ctx = setUp('node scripts/admin/upsert-tiers.ts [--cluster ...] [--execute]');
+  const ctx = setUp('node scripts/admin/upsert-tiers.ts [--smoke-test] [--cluster ...] [--execute]', {
+    'smoke-test': { type: 'boolean', default: false },
+  });
   const instructions = [];
-  for (const t of TIERS) {
-    const terms = JSON.stringify({ tier: t.name, sizeUsd: t.sizeUsd, feeUsdc: t.feeUsdc, ...RULES });
+  for (const t of ctx.values['smoke-test'] ? SMOKE_TEST_TIERS : TIERS) {
+    const terms = JSON.stringify({ tier: t.name, sizeUsd: t.sizeUsd, feeUsdc: t.feeUsdc, ...t.rules });
     const termsHash = createHash('sha256').update(terms).digest();
-    console.log(`tier ${t.id} ${t.name}: fee ${t.feeUsdc} USDC, ${t.enabled ? 'enabled' : 'disabled'}, terms ${termsHash.toString('hex')}`);
+    console.log(`tier ${t.id} ${t.name}: size ${t.sizeUsd} USD, fee ${t.feeUsdc} USDC, target ${t.rules.profitTargetBps / 100}%, ${t.enabled ? 'enabled' : 'disabled'}, terms ${termsHash.toString('hex')}`);
     instructions.push(
       await ctx.vault.upsertTier({
-        admin: ctx.operator.publicKey,
+        admin: ctx.admin,
         id: t.id,
         params: {
           sizeUsd: new BN(toMicro(t.sizeUsd).toString()),
           feeUsdc: new BN(toMicro(t.feeUsdc).toString()),
-          profitTargetBps: RULES.profitTargetBps,
-          maxDrawdownBps: RULES.maxDrawdownBps,
-          maxExposureBps: RULES.maxExposureBps,
+          profitTargetBps: t.rules.profitTargetBps,
+          maxDrawdownBps: t.rules.maxDrawdownBps,
+          maxExposureBps: t.rules.maxExposureBps,
           enabled: t.enabled,
           termsHash: Array.from(termsHash),
         },

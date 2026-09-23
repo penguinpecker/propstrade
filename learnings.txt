@@ -606,3 +606,39 @@ Round-1 learnings (non-obvious):
   yet, so re-planning then sends the work twice. Wait for `confirmed` (or for the status to disappear).
 - Telegram bots may post 20 messages a minute to a group (core.telegram.org/bots/faq); a 429 carries
   `parameters.retry_after` (seconds).
+2026-09-23 Round 3 launch readiness: docs/runbooks/launch.md (replaces program-deploy.md), status/fund-sol-treasury/
+           gen-authority-key/set-params scripts, --print-for multisig mode, app CSP, env documentation tests. Every
+           runbook command rehearsed on solana-test-validator (throwaway keys) and from a clean copy of the repo.
+- Mainnet rent on 2026-09-23 is ~5,080 lamports/byte (not 6,960): the 978,072-byte program = 4.9695 SOL, 5.4663 SOL at
+  --max-len +10 %; a zero-data account's floor is 0.00065024 SOL (not 890,880 lamports). Check with `solana rent <bytes>`.
+- The server marks no market tradable until the program's Anchor IDL is onchain (`anchor idl init`, 13,804 B,
+  ~0.071 SOL): marketdata decodes MarketConfig with the IDL read from chain; the log says "has no Anchor IDL account".
+- solana-cli 3.1.14: `program deploy --buffer` drains the buffer to the payer before paying the program data, so the peak
+  is ~1x rent; re-running `write-buffer` with the same buffer keypair writes only what is missing (nothing when complete);
+  `write-buffer --buffer-authority X` needs X to sign (write, then `set-buffer-authority`); `program extend` needs the
+  upgrade authority and fails in the slot of an upgrade. solana-verify's program hash ignores the --max-len padding.
+- Railpack (Railway's default builder; NIXPACKS is deprecated) detects the repo root as Rust because of Cargo.toml:
+  railpack.json {"provider":"node"} fixes it. Its npm install step is `npm install` unless RAILPACK_NODE_NPM_INSTALL is set.
+- app/package-lock.json was a stale copy from the interface import (no @solana/*, no workspaces) and is gone: the root
+  lockfile is the only one, and app/vercel.json installs with `npm ci` at the repo root (`vercel build` runs it).
+- @solana/wallet-adapter-react always bundles the Solana Mobile Wallet Adapter: on Android it opens ws://localhost:<port>,
+  fetches http://localhost (Chrome local-network permission) and injects <style> + Google Fonts into a shadow-DOM dialog,
+  so a CSP must allow those. index.html's inline theme script is allowed by its sha256.
+- The server never sends mark_breached / close_funded: a breached or finished funded account keeps its principal counted
+  in allocated_principal until something closes it.
+- Squads' TX Builder "Import base58 encoded tx" takes what `solana-verify export-pda-tx` prints: an unsigned, bincode
+  (wire-format) legacy transaction with the vault as fee payer, base58. web3.js `new Transaction()` + feePayer +
+  serialize({ requireAllSignatures: false }) gives the same bytes; a JSON instruction list has no import path.
+- solana-verify reads finalized state (RpcClient's default): right after `program deploy` it says "Program … is not
+  deployed" until the deploy finalizes (19 s locally), and after an upgrade it hashes the old binary for as long.
+  `anchor idl init` refused the just-deployed program the same way. Waiting until `solana program show <ID>
+  --commitment finalized` succeeds made both work first time.
+- A SystemProgram transfer smaller than the rent-exempt minimum into an empty account fails (InsufficientFundsForRent);
+  the 1-lamport Squads import rehearsal only works once the SOL treasury is funded.
+- request_payout compares min_payout with the trader's share (80 % of profit), not the profit: a $20 smoke-test position
+  makes cents after 2-4 bp of round-trip fees, so the smoke test runs with min payout 0.000001 USDC (the program's floor
+  is > 0) and restores 50 at go-live.
+- JSON.parse errors quote the start of their input: parsing a key file that is not JSON (e.g. a base58 export) printed
+  the first 10 characters of the secret. Catch and replace the message wherever a secret is parsed.
+- ICU region names resolve aliases (Intl "UK" = United Kingdom): canonicalize with new Intl.Locale(`und-${code}`).region
+  ("UK" → "GB", "DD" → "DE") before hashing or comparing country codes.
