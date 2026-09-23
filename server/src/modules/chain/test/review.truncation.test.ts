@@ -94,7 +94,7 @@ after(async () => {
 
 /** Evaluation bought, identity set, passed: ready for activate_funded. */
 async function passedEvaluation(trader: Keypair, person: string) {
-  await send([await vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0 })], [trader]);
+  await send([await vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0, feeUsdc: usdc(TIERS.t10k.fee), tierVersion: 1 })], [trader]);
   const evaluation = evaluationPda(trader.publicKey, 0);
   await send([await vault.setIdentity({ kycAuthority: kyc.publicKey, wallet: trader.publicKey, identityHash: hash32(person) })], [kyc]);
   await send([await vault.recordEvaluationResult({ riskAuthority: risk.publicKey, evaluation, passed: true, finalEquity: usdc('10800'), tradesRoot: hash32('fills') })], [risk]);
@@ -146,7 +146,7 @@ test('a trader-induced log truncation must not lose events or stall the indexer 
   await send([attackOpen.instruction], [attacker]);
 
   // An unrelated trader buys an evaluation afterwards.
-  await send([await vault.buyEvaluation({ trader: victim.publicKey, tierId: TIERS.t10k.id, index: 0 })], [victim]);
+  await send([await vault.buyEvaluation({ trader: victim.publicKey, tierId: TIERS.t10k.id, index: 0, feeUsdc: usdc(TIERS.t10k.fee), tierVersion: 1 })], [victim]);
 
   const { sim, created } = simStub();
   const indexer = createIndexer({

@@ -160,7 +160,7 @@ describe('capital and treasury', () => {
     env.fails(await v.sweepFees({ admin }), [env.admin], 'InvalidAmount');
     const trader = env.wallet();
     env.setUsdc(trader.publicKey, usdc('200'));
-    env.ok(await v.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0 }), [trader]);
+    env.ok(await v.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0, ...env.reviewed(TIERS.t10k.id) }), [trader]);
     assert.equal(env.usdcBalance(feeVaultPda()), usdc('79'));
     env.fails(await v.sweepFees({ admin: stranger.publicKey }), [stranger], 'Unauthorized');
     env.ok(await v.sweepFees({ admin }), [env.admin]);

@@ -3,7 +3,7 @@ import { ArrowUpRight, ArrowRight, ArrowLeft, Bitcoin, CircleDollarSign, Cpu, Eu
 import { bpsPercent, date, freshnessLabel, usd, utcTime } from './data.js';
 
 export function Brand({ compact = false }) {
-  return <a href="#/trade/funded" className="brand" aria-label="Props.trade home"><img src="/brand/symbol.svg" alt="" />{!compact && <span>Props<span className="brand-dot">.</span>trade</span>}</a>;
+  return <a href="#/" className="brand" aria-label="Props.trade home"><img src="/brand/symbol.svg" alt="" />{!compact && <span>Props<span className="brand-dot">.</span>trade</span>}</a>;
 }
 export function Button({ children, variant = 'primary', small = false, className = '', icon: Icon, ...props }) {
   return <button className={`button ${variant} ${small ? 'small' : ''} ${className}`} {...props}>{children}{Icon && <Icon size={15} />}</button>;
@@ -49,6 +49,7 @@ export function Dialog({ title, children, onClose, wide = false }) {
   return <dialog ref={ref} className={`dialog ${wide ? 'wide' : ''}`} onClick={e => { if (e.target === ref.current) onClose(); }} aria-labelledby="dialog-title"><div className="dialog-head"><h2 id="dialog-title">{title}</h2><IconButton icon={X} label="Close dialog" onClick={onClose} /></div>{children}</dialog>;
 }
 /** Real series only: `points` are { ts, value } in time order; fewer than two points render nothing. */
+const hourMinute = new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
 export function LineGraph({ points, height = 220, muted = false, showLabels = true, label }) {
   if (points.length < 2) return null;
   const width = 900, pad = 20, top = 28, baseline = height - 38;
@@ -58,8 +59,11 @@ export function LineGraph({ points, height = 220, muted = false, showLabels = tr
   const x = i => pad + i / (points.length - 1) * (width - pad * 2);
   const y = v => baseline - (v - low) / span * (baseline - top);
   const line = points.map((p, i) => `${x(i)},${y(p.value)}`).join(' ');
-  const labels = [0, 1, 2, 3, 4, 5].map(i => Math.round(i * (points.length - 1) / 5));
-  return <svg className={`line-graph ${muted ? 'muted' : ''}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={label} preserveAspectRatio="none">{[0, 1, 2, 3].map(i => <line key={i} x1={pad} x2={width - pad} y1={top + i * (baseline - top) / 3} y2={top + i * (baseline - top) / 3} stroke="var(--line-soft)" strokeDasharray="3 5" />)}<polygon points={`${pad},${y(Math.max(low, 0))} ${line} ${width - pad},${y(Math.max(low, 0))}`} fill={muted ? 'var(--graph-muted-fill, #efefeb)' : 'var(--graph-fill, #f0eaf8)'} opacity=".65" /><polyline points={line} fill="none" stroke={muted ? 'var(--subtle)' : 'var(--purple)'} strokeWidth="2.3" vectorEffect="non-scaling-stroke" />{showLabels && labels.map((index, i) => <text key={i} x={x(index)} y={height - 6} textAnchor={i === 0 ? 'start' : i === 5 ? 'end' : 'middle'}>{date(points[index].ts).slice(0, 6)}</text>)}</svg>;
+  // Times of day for a series under two days long (dates would all read the same), and no label twice.
+  const labelOf = points.at(-1).ts - points[0].ts < 2 * 86_400_000 ? ts => hourMinute.format(ts) : ts => date(ts).slice(0, 6);
+  const labels = [...new Map([0, 1, 2, 3, 4, 5].map(i => Math.round(i * (points.length - 1) / 5)).reverse().map(index => [labelOf(points[index].ts), index])).entries()]
+    .map(([text, index]) => ({ text, index })).sort((a, b) => a.index - b.index);
+  return <svg className={`line-graph ${muted ? 'muted' : ''}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={label} preserveAspectRatio="none">{[0, 1, 2, 3].map(i => <line key={i} x1={pad} x2={width - pad} y1={top + i * (baseline - top) / 3} y2={top + i * (baseline - top) / 3} stroke="var(--line-soft)" strokeDasharray="3 5" />)}<polygon points={`${pad},${y(Math.max(low, 0))} ${line} ${width - pad},${y(Math.max(low, 0))}`} fill={muted ? 'var(--graph-muted-fill, #efefeb)' : 'var(--graph-fill, #f0eaf8)'} opacity=".65" /><polyline points={line} fill="none" stroke={muted ? 'var(--subtle)' : 'var(--purple)'} strokeWidth="2.3" vectorEffect="non-scaling-stroke" />{showLabels && labels.map(({ text, index }) => <text key={index} x={x(index)} y={height - 6} textAnchor={index === 0 ? 'start' : index === points.length - 1 ? 'end' : 'middle'}>{text}</text>)}</svg>;
 }
 export function Steps({ active = 1, labels = ['Choose account', 'Connect wallet', 'Start evaluation'] }) { return <div className="steps">{labels.map((label, i) => <div key={label} className={`${i + 1 === active ? 'current' : ''} ${i + 1 < active ? 'done' : ''}`}><span>{i + 1 < active ? <Check size={13} /> : i + 1}</span>{label}{i < labels.length - 1 && <div className="step-rule" />}</div>)}</div>; }
 export function InlineLink({ href, children, external = false }) { return <a href={href} className="inline-link" {...external ? { target: '_blank', rel: 'noreferrer' } : {}}>{children}{external ? <ExternalLink size={13} /> : <ArrowUpRight size={14} />}</a>; }

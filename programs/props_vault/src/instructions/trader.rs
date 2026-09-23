@@ -66,12 +66,23 @@ pub struct BuyEvaluation<'info> {
 }
 
 /// Pays the tier fee and creates the evaluation in one transaction. `index` must be the profile's
-/// evaluation count (0 for a new trader).
-pub(crate) fn buy_evaluation(ctx: Context<BuyEvaluation>, tier_id: u16, index: u32) -> Result<()> {
+/// evaluation count (0 for a new trader). The fee and tier version are the ones the trader reviewed: an
+/// `upsert_tier` landing between review and purchase (it bumps the version) makes the purchase fail.
+pub(crate) fn buy_evaluation(
+    ctx: Context<BuyEvaluation>,
+    tier_id: u16,
+    index: u32,
+    expected_fee_usdc: u64,
+    expected_tier_version: u32,
+) -> Result<()> {
     let a = &ctx.accounts;
     require!(!a.config.paused.new_evaluations, VaultError::Paused);
     require!(a.tier.enabled, VaultError::TierDisabled);
     require!(index == a.profile.evaluation_count, VaultError::InvalidParams);
+    require!(
+        a.tier.fee_usdc == expected_fee_usdc && a.tier.version == expected_tier_version,
+        VaultError::TierChanged
+    );
     let fee = a.tier.fee_usdc;
     token::transfer_checked(
         CpiContext::new(
@@ -241,6 +252,7 @@ pub(crate) fn activate_funded(ctx: Context<ActivateFunded>) -> Result<()> {
     ctx.accounts.evaluation.status = EvaluationStatus::Funded;
     ctx.accounts.profile.active_funded = 1;
     let c = &mut ctx.accounts.config;
+    c.allocate_daily_principal(principal, ts)?;
     c.allocated_principal = c.allocated_principal.checked_add(principal).ok_or(VaultError::MathOverflow)?;
     c.funded_activated = c.funded_activated.checked_add(1).ok_or(VaultError::MathOverflow)?;
     c.funded_active = c.funded_active.checked_add(1).ok_or(VaultError::MathOverflow)?;

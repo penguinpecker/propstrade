@@ -5,7 +5,7 @@ import bs58 from 'bs58';
 import { ComputeBudgetProgram, Connection, Keypair, SystemProgram, VersionedTransaction } from '@solana/web3.js';
 import { GMTRADE_PROGRAM_ID, PROPS_VAULT_PROGRAM_ID, PropsVaultClient, buildTransaction, toUnitPrice } from '@props/sdk';
 // @ts-expect-error test-only JavaScript module
-import { startStub } from '../../tests/stub.mjs';
+import { marketRef, startStub } from '../../tests/stub.mjs';
 import { TxError, confirm, describeFailure, prepareOpen, signAndSend, unitPrice } from './chain';
 
 const VAULT = PROPS_VAULT_PROGRAM_ID.toBase58();
@@ -82,7 +82,7 @@ describe('order amounts', () => {
   it('keeps an order at the market\'s maximum leverage within the program\'s leverage check (XAU 15×, $1,001)', async () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());
-    const xau = { marketToken: Keypair.generate().publicKey.toBase58(), indexTokenDecimals: 8 };
+    const xau = marketRef('XAU');
     // What the order ticket passes at 15× (Trading.jsx: collateralUsd: sizeNum / lev).
     const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: xau, isLong: true, kind: 'Market', price: '2674.3', sizeUsd: 1001, collateralUsd: 1001 / 15, slippageBps: 50 });
     const ix = p.tx.message.compiledInstructions.find(i => p.tx.message.staticAccountKeys[i.programIdIndex]!.equals(PROPS_VAULT_PROGRAM_ID))!;
@@ -95,7 +95,7 @@ describe('order amounts', () => {
   it('gives an open with take-profit and stop-loss enough compute units (measured 377k–445k CU on the GMTrade binary)', async () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());
-    const btc = { marketToken: Keypair.generate().publicKey.toBase58(), indexTokenDecimals: 8 };
+    const btc = marketRef('BTC');
     const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, kind: 'Market', price: '64482', sizeUsd: 500, collateralUsd: 50, slippageBps: 50, takeProfit: '90000', stopLoss: '40000' });
     const budget = p.tx.message.compiledInstructions.find(i => p.tx.message.staticAccountKeys[i.programIdIndex]!.equals(ComputeBudgetProgram.programId) && i.data[0] === 2)!;
     // LiteSVM, tests/program env, 16 funded accounts, open + TP + SL on BTC: 377,371–444,876 CU (11 of 16 above 400k).

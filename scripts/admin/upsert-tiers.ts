@@ -1,5 +1,6 @@
 // Upserts the spec §1 tiers. Each tier's terms hash is sha256 of its canonical rules JSON (printed), so the
-// published rules can be checked against the onchain tier.
+// published rules can be checked against the onchain tier. `--test-tier` adds one more, small tier for local
+// rehearsals (scripts/local-stack.ts); it is refused on mainnet.
 import { createHash } from 'node:crypto';
 import BN from 'bn.js';
 import { toMicro } from '@props/sdk';
@@ -24,11 +25,25 @@ const TIERS = [
   { id: 4, name: '100K', sizeUsd: '100000', feeUsdc: '449', enabled: false },
 ];
 
+const MAINNET_GENESIS = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
+
 main(async () => {
-  const ctx = setUp('node scripts/admin/upsert-tiers.ts [--cluster ...] [--execute]');
+  const ctx = setUp('node scripts/admin/upsert-tiers.ts [--test-tier <id>:<sizeUsd>:<feeUsdc>:<profitTargetBps>] [--cluster ...] [--execute]', {
+    'test-tier': { type: 'string' },
+  });
+  const tiers: { id: number; name: string; sizeUsd: string; feeUsdc: string; enabled: boolean; profitTargetBps?: number }[] = [...TIERS];
+  if (ctx.values['test-tier']) {
+    if ((await ctx.connection.getGenesisHash()) === MAINNET_GENESIS) throw new Error('--test-tier is for local clusters only');
+    const [id, sizeUsd, feeUsdc, profitTargetBps] = String(ctx.values['test-tier']).split(':');
+    if (!/^\d+$/.test(id ?? '') || !sizeUsd || !feeUsdc || !/^\d+$/.test(profitTargetBps ?? '')) {
+      throw new Error('--test-tier takes <id>:<sizeUsd>:<feeUsdc>:<profitTargetBps>, e.g. 9:1000:1:10');
+    }
+    tiers.push({ id: Number(id), name: `test ${sizeUsd}`, sizeUsd, feeUsdc, enabled: true, profitTargetBps: Number(profitTargetBps) });
+  }
   const instructions = [];
-  for (const t of TIERS) {
-    const terms = JSON.stringify({ tier: t.name, sizeUsd: t.sizeUsd, feeUsdc: t.feeUsdc, ...RULES });
+  for (const t of tiers) {
+    const rules = { ...RULES, profitTargetBps: t.profitTargetBps ?? RULES.profitTargetBps };
+    const terms = JSON.stringify({ tier: t.name, sizeUsd: t.sizeUsd, feeUsdc: t.feeUsdc, ...rules });
     const termsHash = createHash('sha256').update(terms).digest();
     console.log(`tier ${t.id} ${t.name}: fee ${t.feeUsdc} USDC, ${t.enabled ? 'enabled' : 'disabled'}, terms ${termsHash.toString('hex')}`);
     instructions.push(
@@ -38,7 +53,7 @@ main(async () => {
         params: {
           sizeUsd: new BN(toMicro(t.sizeUsd).toString()),
           feeUsdc: new BN(toMicro(t.feeUsdc).toString()),
-          profitTargetBps: RULES.profitTargetBps,
+          profitTargetBps: rules.profitTargetBps,
           maxDrawdownBps: RULES.maxDrawdownBps,
           maxExposureBps: RULES.maxExposureBps,
           enabled: t.enabled,
@@ -47,5 +62,5 @@ main(async () => {
       }),
     );
   }
-  await submit(ctx, 'upsert_tier ×4', instructions);
+  await submit(ctx, `upsert_tier ×${instructions.length}`, instructions);
 });

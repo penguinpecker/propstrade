@@ -7,6 +7,8 @@ import { z } from 'zod';
 import type { Db } from '../db/client.js';
 import { adminAuditLog, chainJobs, kycRequests } from '../db/schema.js';
 import { ApiError, parse } from '../errors.js';
+import { isBlocked, refineResidence, residence } from '../lib/geo.js';
+import type { Sealer } from '../lib/integrity.js';
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest();
 
@@ -15,7 +17,8 @@ const ListQuery = z.object({
   limit: z.coerce.number().int().min(1).max(500).default(100),
 });
 const IdParams = z.object({ id: z.uuid() });
-const ApproveBody = z.object({ identityHash: z.string().regex(/^[0-9a-f]{64}$/, '32-byte lowercase hex') });
+/** The identity hash and the residence the reviewer confirmed from the documents (not what the trader declared). */
+const ApproveBody = z.object({ identityHash: z.string().regex(/^[0-9a-f]{64}$/, '32-byte lowercase hex'), ...residence }).superRefine(refineResidence);
 const RejectBody = z.object({ reason: z.string().trim().min(1).max(500) });
 
 /** Postgres unique_violation, raw or wrapped by drizzle. */
@@ -40,7 +43,7 @@ export function adminAuth(adminToken: string) {
 export const audit = (req: FastifyRequest, action: string, target: string, details: Record<string, unknown>) =>
   ({ action, target, details, ip: req.ip, requestId: req.id });
 
-export function registerAdminRoutes(app: FastifyInstance, { db, adminToken }: { db: Db; adminToken: string }) {
+export function registerAdminRoutes(app: FastifyInstance, { db, adminToken, sealer }: { db: Db; adminToken: string; sealer: Sealer }) {
   app.register(async (admin) => {
     admin.addHook('onRequest', adminAuth(adminToken));
 
@@ -48,7 +51,7 @@ export function registerAdminRoutes(app: FastifyInstance, { db, adminToken }: { 
       const { status, limit } = parse(ListQuery, req.query);
       const rows = await db.select({
         id: kycRequests.id, wallet: kycRequests.wallet, country: kycRequests.country, status: kycRequests.status,
-        identityHash: kycRequests.identityHash, reason: kycRequests.reason, createdAt: kycRequests.createdAt,
+        region: kycRequests.region, identityHash: kycRequests.identityHash, reason: kycRequests.reason, createdAt: kycRequests.createdAt,
         reviewedAt: kycRequests.reviewedAt, jobStatus: chainJobs.status, jobSignature: chainJobs.signature,
         jobError: chainJobs.lastError,
       }).from(kycRequests).leftJoin(chainJobs, eq(chainJobs.id, kycRequests.setIdentityJob))
@@ -59,20 +62,23 @@ export function registerAdminRoutes(app: FastifyInstance, { db, adminToken }: { 
     /** Approves a pending request and queues the onchain `set_identity` write for the chain module. */
     admin.post('/kyc/:id/approve', async (req) => {
       const { id } = parse(IdParams, req.params);
-      const { identityHash } = parse(ApproveBody, req.body);
+      const { identityHash, country, region } = parse(ApproveBody, req.body);
+      if (isBlocked({ country, region })) {
+        throw new ApiError(403, 'region_blocked', 'Funded accounts are not available where this person lives: reject the request instead');
+      }
       try {
         return await db.transaction(async (tx) => {
           const [request] = await tx.select().from(kycRequests).where(eq(kycRequests.id, id)).for('update');
           if (!request) throw new ApiError(404, 'not_found', 'KYC request not found');
           if (request.status !== 'pending') throw new ApiError(409, 'not_pending', `Request is already ${request.status}`);
-          const [job] = await tx.insert(chainJobs)
-            .values({ kind: 'set_identity', payload: { wallet: request.wallet, identityHash } })
-            .returning({ id: chainJobs.id });
+          const job = { kind: 'set_identity' as const, subject: null, payload: { wallet: request.wallet, identityHash } };
+          const [row] = await tx.insert(chainJobs).values({ ...job, mac: sealer.job(job) }).returning({ id: chainJobs.id });
           await tx.update(kycRequests)
-            .set({ status: 'approved', identityHash, setIdentityJob: job!.id, reviewedAt: sql`now()` })
+            .set({ status: 'approved', identityHash, country, region: region ?? null, setIdentityJob: row!.id, reviewedAt: sql`now()` })
             .where(eq(kycRequests.id, id));
-          await tx.insert(adminAuditLog).values(audit(req, 'kyc.approve', request.wallet, { requestId: id, identityHash, job: job!.id }));
-          return { id, status: 'approved' as const, job: job!.id };
+          const declared = { country: request.country, region: request.region };
+          await tx.insert(adminAuditLog).values(audit(req, 'kyc.approve', request.wallet, { requestId: id, identityHash, country, region, declared, job: row!.id }));
+          return { id, status: 'approved' as const, job: row!.id };
         });
       } catch (err) {
         if (isUniqueViolation(err)) throw new ApiError(409, 'identity_in_use', 'This identity is already approved for another wallet');

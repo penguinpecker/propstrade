@@ -3,11 +3,12 @@
 import { createHash, createPublicKey, randomBytes, verify } from 'node:crypto';
 import { createServer } from 'node:http';
 import bs58 from 'bs58';
+import { SIWS_STATEMENT, buildSiwsMessage } from '@props/shared/siws';
 import BN from 'bn.js';
 import { ComputeBudgetProgram, Connection, PublicKey, VersionedTransaction } from '@solana/web3.js';
 import {
-  POSITION_DISCRIMINATOR, POSITION_LAYOUT, PROPS_VAULT_IDL, PROPS_VAULT_PROGRAM_ID, PropsVaultClient, USDC_MINT, capitalVaultAddress,
-  evaluationPda, feeVaultPda, fundedPda, payoutPda, tierPda, traderProfilePda,
+  MARKET_DISCRIMINATOR, MARKET_LAYOUT, POSITION_DISCRIMINATOR, POSITION_LAYOUT, PROPS_VAULT_IDL, PROPS_VAULT_PROGRAM_ID, PropsVaultClient, USDC_MINT, capitalVaultAddress,
+  evaluationPda, feeVaultPda, fundedPda, marketConfigPda, payoutPda, tierPda, traderProfilePda,
 } from '@props/sdk';
 
 export const MAINNET_GENESIS = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
@@ -74,6 +75,30 @@ export function market([symbol, name, category, price, priceDecimals, indexToken
     freshness: 'live', updatedAt: now,
   };
 }
+/** What an order passes as its market (app/src/lib/chain.ts MarketRef) for one of the fixture markets. */
+export const marketRef = symbol => ({ marketToken: fakeKey(`market:${symbol}`), symbol });
+/** A fixture market as the chain has it: its MarketConfig, the GMTrade Market that config pins, and its index token mint. */
+function onchainMarket(m) {
+  const gmMarket = fakeKey(`gm-market:${m.symbol}`), indexMint = fakeKey(`index-token:${m.symbol}`);
+  const symbol = Buffer.alloc(16);
+  symbol.write(m.symbol);
+  const config = encodeAccount('marketConfig', {
+    marketToken: new PublicKey(m.marketToken), gmMarket: new PublicKey(gmMarket), enabled: m.tradable, indexSymbol: [...symbol], maxLeverageBps: m.maxLeverage * 10_000,
+    closedMaxLeverageBps: (m.closedMaxLeverage ?? m.maxLeverage) * 10_000, maxPositionUsd: new BN(10_000_000_000), maxTotalOiUsd: new BN(100_000_000_000),
+    oiLongUsd: new BN(0), oiShortUsd: new BN(0), sessionRestricted: m.closedMaxLeverage !== null, bump: 255,
+  });
+  const market = Buffer.alloc(MARKET_LAYOUT.store + 32);
+  Buffer.from(MARKET_DISCRIMINATOR).copy(market);
+  for (const [key, at] of [[m.marketToken, MARKET_LAYOUT.marketToken], [indexMint, MARKET_LAYOUT.indexToken], [m.pools[0].longToken, MARKET_LAYOUT.longToken], [m.pools[0].shortToken, MARKET_LAYOUT.shortToken]]) new PublicKey(key).toBuffer().copy(market, at);
+  const mint = Buffer.alloc(82);
+  mint[44] = m.indexTokenDecimals;
+  mint[45] = 1; // initialized
+  return [
+    [marketConfigPda(new PublicKey(m.marketToken)).toBase58(), { owner: PROGRAM_ID, data: config }],
+    [gmMarket, { owner: GMTRADE, data: market }],
+    [indexMint, { owner: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', data: mint }],
+  ];
+}
 const STEP = { '5m': 300, '15m': 900, '1h': 3600, '4h': 14_400, '1D': 86_400 };
 export function candles(m, interval) {
   const step = STEP[interval], end = Math.floor(Date.now() / 1000 / step) * step, last = Number(m.price);
@@ -109,7 +134,7 @@ function createWallet(state, wallet) {
     accounts: [
       summary({ id: `practice:${wallet}`, stage: 'practice', label: 'Practice account', shortId: 'PRACTICE', rules: rules(25_000, null), equity: '25000', allowanceRemaining: '1250', availableMargin: '1250', createdAt: now - 9 * DAY }),
       summary({ id: evalActive, stage: 'evaluation', label: 'Evaluation 25K', shortId: short(evalActive), rules: rules(25_000, true), equity: '26185.25', realizedPnl: '992.73', unrealizedPnl: '192.52', allowanceRemaining: '2435.25', availableMargin: '2242.73', openNotional: '4600', targetProgressPct: 59.3, createdAt: now - 6 * DAY, evidence: { evaluation: evalActive, purchaseSignature: fakeSignature(`buy:${evalActive}`) } }),
-      summary({ id: evalFunded, stage: 'evaluation', status: 'passed', label: 'Evaluation 25K', shortId: short(evalFunded), rules: rules(25_000, true), equity: '27064.10', realizedPnl: '2064.10', allowanceRemaining: '3314.10', availableMargin: '3314.10', targetProgressPct: 103.2, createdAt: now - 30 * DAY, resolvedAt: now - 20 * DAY, evidence: { evaluation: evalFunded, purchaseSignature: fakeSignature(`buy:${evalFunded}`) } }),
+      summary({ id: evalFunded, stage: 'evaluation', status: 'passed', label: 'Evaluation 25K', shortId: short(evalFunded), rules: rules(25_000, true), equity: '27064.10', realizedPnl: '2064.10', allowanceRemaining: '3314.10', availableMargin: '3314.10', targetProgressPct: 103.2, createdAt: now - 30 * DAY, resolvedAt: now - 20 * DAY, evidence: { evaluation: evalFunded, purchaseSignature: fakeSignature(`buy:${evalFunded}`), resultSignature: fakeSignature(`result:${evalFunded}`) } }),
       summary({ id: funded, stage: 'funded', label: 'Funded 25K', shortId: short(funded), rules: rules(25_000, null), equity: '25312.50', realizedPnl: '312.50', allowanceRemaining: '1562.50', availableMargin: '1562.50', eligiblePayout: '250', createdAt: now - 19 * DAY, activatedAt: now - 19 * DAY, evidence: { evaluation: evalFunded, funded, owner: fakeKey(`owner:${funded}`), activationSignature: fakeSignature(`activate:${funded}`) } }),
     ],
     positions: { [evalActive]: [], [funded]: [], [`practice:${wallet}`]: [] },
@@ -171,6 +196,7 @@ export async function startStub() {
     markets: MARKETS.map(m => market(m)), wallets: new Map(), accounts: new Map(), statuses: new Map(), sent: [], simulationLogs: null, simulations: 0, blockHeight: 10, trustKeys: new Map(),
   };
   for (const t of TIERS) state.accounts.set(tierPda(t.id).toBase58(), { owner: PROGRAM_ID, encode: () => tierAccount(t) });
+  for (const m of state.markets) for (const [address, account] of onchainMarket(m)) state.accounts.set(address, account);
   const walletData = wallet => state.wallets.get(wallet) ?? createWallet(state, wallet);
   const publish = (event, wallet) => { for (const s of state.streams) if (!wallet || s.wallet === wallet) s.res.write(`data: ${JSON.stringify(event)}\n\n`); };
   const account = (w, id) => w.accounts.find(a => a.id === id);
@@ -304,7 +330,14 @@ export async function startStub() {
       case 'POST /v1/auth/nonce': {
         const nonce = randomBytes(8).toString('hex');
         state.nonces.set(nonce, body.wallet);
-        return send(res, 200, { message: `127.0.0.1 wants you to sign in with your Solana account:\n${body.wallet}\n\nNonce: ${nonce}`, nonce, expiresAt: Date.now() + 300_000 });
+        // The server's message for the app that asks (APP_ORIGIN is the app's origin there), on the stub's cluster.
+        const origin = req.headers.origin ?? 'http://127.0.0.1';
+        const issuedAt = new Date();
+        const message = buildSiwsMessage({
+          domain: new URL(origin).host, address: body.wallet, statement: SIWS_STATEMENT, uri: origin, chainId: 'mainnet', nonce, issuedAt,
+          expirationTime: new Date(issuedAt.getTime() + 300_000),
+        });
+        return send(res, 200, { message, nonce, expiresAt: issuedAt.getTime() + 300_000 });
       }
       case 'POST /v1/auth/verify': {
         const nonce = /Nonce: (\w+)/.exec(body.message)?.[1];

@@ -1,4 +1,5 @@
-// /v1/sim/* and /v1/practice/* (api.ts). Every route needs a signed-in wallet and reaches only that wallet's accounts.
+// /v1/sim/* and /v1/practice/* (api.ts). Every route needs a signed-in wallet and reaches only that wallet's accounts,
+// except the fill list of an evaluation whose result is onchain, which anyone can read.
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { ApiError, parse } from '../../errors.ts';
@@ -46,8 +47,9 @@ export function registerRoutes(app: FastifyInstance, engine: Engine, reader: Ret
     const { id, positionId } = parse(PositionParams, req.params);
     return engine.setProtection(walletOf(req), id, positionId, parse(ProtectionBody, req.body));
   });
-  app.get('/v1/sim/:id/fills', auth, async (req) => {
-    const fills = await reader.fills(walletOf(req), parse(AccountParams, req.params).id);
+  // The owner's, or anyone's once the result is onchain: the trades root it commits to is public from then on.
+  app.get('/v1/sim/:id/fills', async (req) => {
+    const fills = await reader.fills((await app.session(req))?.wallet ?? null, parse(AccountParams, req.params).id);
     if (!fills) throw new ApiError(404, 'not_found', 'Account not found');
     return fills;
   });

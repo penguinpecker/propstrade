@@ -3,6 +3,7 @@
 // route that acknowledges a GMTrade deploy. Every transaction is signed by RISK_AUTHORITY_KEYPAIR and sent only after
 // the leader lock is confirmed still held.
 import { PropsVaultClient } from '@props/sdk';
+import { createSealer } from '../../lib/integrity.ts';
 import { LOCK_KEYS, runAsLeader } from '../../lib/leader.ts';
 import { loadKeypair } from '../../lib/solana.ts';
 import { createReader } from '../chain/reader.ts';
@@ -30,7 +31,7 @@ export function createKeeperModule(ctx: ModuleContext, opts: KeeperOptions = {})
   const keeper = createKeeper({
     db: ctx.db, rpc: ctx.rpc, client, reader: createReader(client, ctx.rpc), marketdata: ctx.services.marketdata,
     risk: loadKeypair(ctx.env, 'RISK_AUTHORITY_KEYPAIR'), reviewedDeploySlot: reviewedDeploySlot(ctx.env), log: ctx.log, notify: ctx.notify,
-    alerts: createAlerts({ env: ctx.env, log: ctx.log }), now: opts.now,
+    alerts: createAlerts({ env: ctx.env, log: ctx.log }), now: opts.now, sealer: createSealer(ctx.config.SESSION_SECRET),
   });
   const leader = runAsLeader({
     databaseUrl: ctx.config.DATABASE_URL, key: LOCK_KEYS.keeper, signal: ctx.signal, log: ctx.log, intervalMs: opts.intervals?.leader,

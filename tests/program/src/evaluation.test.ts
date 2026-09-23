@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { SystemProgram } from '@solana/web3.js';
+import { Keypair, PublicKey, SystemProgram } from '@solana/web3.js';
 import {
   capitalVaultAddress,
   configPda,
@@ -14,7 +14,7 @@ import {
   solTreasuryPda,
   traderProfilePda,
 } from '@props/sdk';
-import { CONFIG_PARAMS, Env, TIERS, hash32, usdc } from './env.ts';
+import { CONFIG_PARAMS, Env, TIERS, bn, hash32, usdc } from './env.ts';
 
 describe('buy_evaluation', () => {
   it('takes the tier fee and snapshots the terms in one transaction', async () => {
@@ -22,7 +22,7 @@ describe('buy_evaluation', () => {
     await env.setUpVault();
     const trader = env.wallet();
     env.setUsdc(trader.publicKey, usdc('500'));
-    const r = env.ok(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t25k.id, index: 0 }), [trader]);
+    const r = env.ok(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t25k.id, index: 0, ...env.reviewed(TIERS.t25k.id) }), [trader]);
     assert.equal(r.events[0]?.name, 'evaluationPurchased');
     assert.equal(env.usdcBalance(feeVaultPda()), usdc('149'));
 
@@ -41,9 +41,9 @@ describe('buy_evaluation', () => {
     assert.equal(BigInt(c.feesCollected.toString()), usdc('149'));
     assert.equal(c.evaluationsSold.toString(), '1');
 
-    env.fails(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0 }), [trader], 'already in use');
-    env.fails(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 2 }), [trader], 'InvalidParams');
-    env.ok(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 1 }), [trader]);
+    env.fails(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0, ...env.reviewed(TIERS.t10k.id) }), [trader], 'already in use');
+    env.fails(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 2, ...env.reviewed(TIERS.t10k.id) }), [trader], 'InvalidParams');
+    env.ok(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 1, ...env.reviewed(TIERS.t10k.id) }), [trader]);
     assert.equal(env.usdcBalance(feeVaultPda()), usdc('228'));
   });
 
@@ -52,10 +52,10 @@ describe('buy_evaluation', () => {
     await env.setUpVault();
     const trader = env.wallet();
     env.setUsdc(trader.publicKey, usdc('100'));
-    env.fails(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t50k.id, index: 0 }), [trader], 'TierDisabled');
-    env.fails(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t25k.id, index: 0 }), [trader], 'insufficient funds');
+    env.fails(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t50k.id, index: 0, ...env.reviewed(TIERS.t50k.id) }), [trader], 'TierDisabled');
+    env.fails(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t25k.id, index: 0, ...env.reviewed(TIERS.t25k.id) }), [trader], 'insufficient funds');
     env.ok(await env.vault.setPauses({ admin: env.admin.publicKey, paused: { newEvaluations: true, trading: false, payouts: false } }), [env.admin]);
-    env.fails(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0 }), [trader], 'Paused');
+    env.fails(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0, ...env.reviewed(TIERS.t10k.id) }), [trader], 'Paused');
     assert.equal(env.usdcBalance(feeVaultPda()), 0n);
   });
 });
@@ -89,7 +89,7 @@ describe('record_evaluation_result', () => {
     await env.setUpVault();
     const trader = env.wallet();
     env.setUsdc(trader.publicKey, usdc('100'));
-    env.ok(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0 }), [trader]);
+    env.ok(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0, ...env.reviewed(TIERS.t10k.id) }), [trader]);
     const evaluation = evaluationPda(trader.publicKey, 0);
     const result = (riskAuthority = env.risk.publicKey, passed = false) =>
       env.vault.recordEvaluationResult({ riskAuthority, evaluation, passed, finalEquity: usdc('9480'), tradesRoot: hash32('fills') });
@@ -142,7 +142,7 @@ describe('activate_funded', () => {
     await env.setUpVault({ capital: usdc('600') });
     const trader = env.wallet();
     env.setUsdc(trader.publicKey, usdc('1000'));
-    env.ok(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0 }), [trader]);
+    env.ok(await env.vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0, ...env.reviewed(TIERS.t10k.id) }), [trader]);
     const evaluation = evaluationPda(trader.publicKey, 0);
     env.fails(await env.vault.activateFunded({ trader: trader.publicKey, evaluation }), [trader], 'InvalidEvaluationStatus');
     env.ok(
@@ -162,5 +162,28 @@ describe('activate_funded', () => {
 
     env.ok(await env.vault.withdrawCapital({ admin: env.admin.publicKey, amount: usdc('200') }), [env.admin]);
     env.fails(await env.vault.activateFunded({ trader: trader.publicKey, evaluation }), [trader], 'InsufficientCapital');
+  });
+
+  it('posts at most the daily principal limit, whoever signed the passes and identities', async () => {
+    const env = new Env();
+    await env.setUpVault();
+    env.ok(await env.vault.setParams({ admin: env.admin.publicKey, params: { ...CONFIG_PARAMS, maxDailyPrincipal: bn(usdc('1000')) } }), [env.admin]);
+    const passed: { trader: Keypair; evaluation: PublicKey }[] = [];
+    for (let i = 0; i < 3; i++) {
+      const trader = env.wallet();
+      passed.push({ trader, evaluation: await env.passedEvaluation(trader, TIERS.t10k.id) });
+    }
+    const activate = (p: { trader: Keypair; evaluation: PublicKey }) => env.vault.activateFunded({ trader: p.trader.publicKey, evaluation: p.evaluation });
+    env.ok(await activate(passed[0]!), [passed[0]!.trader]);
+    env.ok(await activate(passed[1]!), [passed[1]!.trader]);
+    env.fails(await activate(passed[2]!), [passed[2]!.trader], 'DailyPrincipalLimit');
+    assert.equal(BigInt(env.account('config', configPda()).principalInWindow.toString()), usdc('1000'));
+
+    const clock = env.svm.getClock();
+    clock.unixTimestamp += 86_400n;
+    env.svm.setClock(clock);
+    env.ok(await activate(passed[2]!), [passed[2]!.trader]);
+    assert.equal(BigInt(env.account('config', configPda()).principalInWindow.toString()), usdc('500'), 'a new day starts a new window');
+    env.fails(await env.vault.setParams({ admin: env.admin.publicKey, params: { ...CONFIG_PARAMS, maxDailyPrincipal: bn(0) } }), [env.admin], 'InvalidParams');
   });
 });

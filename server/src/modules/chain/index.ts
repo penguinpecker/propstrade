@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import type { StreamEvent } from '@props/shared';
 import { PROPS_VAULT_PROGRAM_ID, PropsVaultClient } from '@props/sdk';
 import { accounts, equitySnapshots, fundedAccounts } from '../../db/schema.ts';
+import { createSealer } from '../../lib/integrity.ts';
 import { LOCK_KEYS, runAsLeader } from '../../lib/leader.ts';
 import { loadKeypair } from '../../lib/solana.ts';
 import type { ChainService, ModuleContext } from '../types.ts';
@@ -42,13 +43,14 @@ export async function createChain(ctx: ModuleContext, opts: ChainOptions = {}) {
       program.changed(events);
     },
   });
+  const sealer = createSealer(ctx.config.SESSION_SECRET);
   const jobs = createJobs({
-    db, rpc, client, sim: services.sim, log,
+    db, rpc, client, sim: services.sim, log, sealer,
     keys: { risk: loadKeypair(ctx.env, 'RISK_AUTHORITY_KEYPAIR'), kyc: loadKeypair(ctx.env, 'KYC_AUTHORITY_KEYPAIR') },
   });
 
   services.sim?.onResolved((result) => {
-    enqueue(db, 'record_evaluation_result', result.evaluation, result)
+    enqueue(db, sealer, 'record_evaluation_result', result.evaluation, result)
       .catch((err: unknown) => log.error({ err, evaluation: result.evaluation }, 'could not queue the evaluation result'));
   });
 
@@ -80,7 +82,7 @@ export async function createChain(ctx: ModuleContext, opts: ChainOptions = {}) {
 
   registerRoutes(ctx.app, {
     db, sim: services.sim, funded, program, verify: createVerify({ db, rpc, programId, cluster: ctx.config.SOLANA_CLUSTER }),
-    adminToken: ctx.config.ADMIN_API_TOKEN,
+    adminToken: ctx.config.ADMIN_API_TOKEN, sealer,
   });
 
   const leader = runAsLeader({

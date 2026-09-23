@@ -46,7 +46,7 @@ signed by the program's upgrade authority, so it has to run before the upgrade a
 | Program account | 36 B | 0.0011 |
 | Deploy buffer (refunded when the deploy completes) | same as program data | 7.5037 temporarily |
 | Deploy transactions (~1,100 writes × 5,000 lamports + priority fee) | | ≈ 0.01–0.05 |
-| `Config` + fee vault + capital vault ATA (initialize) | 450 B + 2 × 165 B | ≈ 0.0081 |
+| `Config` + fee vault + capital vault ATA (initialize) | 474 B + 2 × 165 B | ≈ 0.0083 |
 | Each tier / market config (upserts) | 70 B / 147 B | 0.0014 / 0.0019 each (55 markets ≈ 0.105) |
 | SOL treasury float: owner PDA target per funded account (`owner_sol_target`) | | 0.25 per active funded account, mostly refundable at closure |
 | Per trader (paid by the trader): profile, evaluation, funded account, payout request | 86 / 164 / 1,547 / 129 B | 0.0015 / 0.0020 / 0.0117 / 0.0018 |
@@ -121,6 +121,10 @@ solana transfer <SOL_TREASURY_PDA> <SOL_AMOUNT> --keypair "$OPERATOR_KEYPAIR" --
   pool depth (learnings §8: keep all funded accounts together under ~10% of a pool's LP money).
 - The risk and KYC authority keys live only on the server (`RISK_AUTHORITY_KEYPAIR`,
   `KYC_AUTHORITY_KEYPAIR`); pass their public keys here.
+- `initialize` sets `max_daily_principal` to 2,500 USDC: `activate_funded` posts at most that much principal per day
+  (a window that opens with the first activation after the previous one ended). It bounds what a compromised risk or
+  KYC key, or a tampered server database, can put at risk. Raise it with `set_params` (all `ConfigParams` fields are
+  set together; read the current ones with `fetchConfig()` first) as the vault and demand grow.
 - The SOL treasury is the PDA `["sol_treasury"]` of the program (`solTreasuryPda()` in `@props/sdk`). It
   pays each funded account's owner float (`owner_sol_target`) and payout ATA rents. Budget
   0.25 SOL × expected funded accounts + 0.5 SOL.
@@ -145,10 +149,12 @@ console.log(JSON.stringify(await v.fetchConfig(), null, 2));"
    activate (posts 500 USDC), open a $50 SOL position with $10 collateral, wait for the GMTrade keeper
    fill (3–8 s), run `sync`, close it, `sync`, cancel any leftover order, and check that the owner PDA's
    USDC ends at principal ± PnL and that nothing left the owner PDA except order escrows.
-3. Close the test account with `mark_breached` + `close_funded` (positions = `fetchOwnerPositions()`: only
-   existing accounts, an address without an account is refused) and confirm the capital vault got the
-   USDC back and `allocated_principal` is 0. An order GMTrade finished but left open keeps the account
-   from closing until `close_completed_order` sweeps it and `sync` runs.
+3. Close the test account: `POST /v1/admin/funded/<FUNDED_ACCOUNT>/close` (admin token) queues `close_funded`,
+   which the server signs with the risk key (positions = `fetchOwnerPositions()`: only existing accounts, an
+   address without an account is refused). Confirm the capital vault got the USDC back and
+   `allocated_principal` is 0. The account must be flat: an order GMTrade finished but left open keeps it
+   from closing until the keeper's `close_completed_order` sweeps it and `sync` runs (the job fails with that
+   reason; retry it with `POST /v1/admin/jobs/<JOB>/retry`).
 4. Deposit the real capital with `deposit-capital.ts`, then release the app build that uses the program.
 
 ## 6. Handover to Squads (last)

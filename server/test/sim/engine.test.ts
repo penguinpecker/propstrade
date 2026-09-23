@@ -9,7 +9,7 @@ import { USDC_MINT, decodeMarket, decodePosition, formatFixed } from '@props/gmt
 import { model, type ModelInput } from '@props/gmsol-wasm';
 import { fromUnitPrice, toUnitPrice } from '@props/sdk';
 import { accounts, equitySnapshots, notifications, simFills, simOrders, simPositions, simResults } from '../../src/db/schema.js';
-import { tradesRoot } from '../../src/modules/sim/merkle.js';
+import { tradesRoot } from '@props/shared/merkle';
 import { stampPosition, triggered, withPosition } from '../../src/modules/sim/model.js';
 import type { EvaluationResult } from '../../src/modules/types.js';
 import { startSim, type Sim } from './harness.js';
@@ -73,7 +73,7 @@ async function evaluation(u: User) {
   return id;
 }
 
-/** The documented trades-root encoding (merkle.ts), implemented independently: what any verifier would run. */
+/** The documented trades-root encoding (@props/shared/merkle), implemented independently: what any verifier would run. */
 function recomputeRoot(list: Fill[]): string {
   const h = (b: Buffer | string) => createHash('sha256').update(b).digest();
   let level = [...list].sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : 1)).map((f) => h([
@@ -130,7 +130,15 @@ describe('fills', () => {
     const wallet = t.events.filter((e) => e.wallet === u.wallet).map((e) => e.event.type);
     expect(wallet).toEqual(expect.arrayContaining(['orders', 'positions', 'account']));
     expect(t.events.some((e) => e.wallet === undefined && e.event.type !== 'heartbeat')).toBe(false);
-    expect(await t.db.select().from(notifications).where(and(eq(notifications.wallet, u.wallet), eq(notifications.kind, 'fill')))).toHaveLength(1);
+    const notices = await t.db.select().from(notifications).where(and(eq(notifications.wallet, u.wallet), eq(notifications.kind, 'fill')));
+    expect(notices).toHaveLength(1);
+    // Links name the account; prices show at the market's display precision; P&L carries its sign ahead of the $.
+    const decimals = t.md.market('SOL')!.priceDecimals;
+    const shown = Number(fill!.price).toLocaleString('en-US', { minimumFractionDigits: decimals, maximumFractionDigits: decimals });
+    expect(notices[0]).toMatchObject({
+      href: `/account/practice?id=${encodeURIComponent(id)}`,
+      body: `Practice account: $10,000.00 at ${shown}, P&L −$${Math.abs(Number(fill!.realizedPnl)).toFixed(2)} (simulated)`,
+    });
     expect((await t.db.select().from(equitySnapshots).where(eq(equitySnapshots.accountId, id))).length).toBeGreaterThanOrEqual(2);
   });
 
@@ -416,7 +424,7 @@ describe('sessions and limits', () => {
     const btc = t.md.market('BTC')!;
     t.md.setRow('BTC', { tradable: false, unavailableReason: 'Not available for funded trading' });
     try {
-      expect((await place(u, ev, { symbol: 'BTC' })).json().error).toEqual({ code: 'market_unavailable', message: 'Not available for funded trading' });
+      expect((await place(u, ev, { symbol: 'BTC' })).json().error).toEqual({ code: 'market_unavailable', message: 'BTC is not available in evaluations: they trade only the markets funded accounts can' });
       expect((await place(u, practiceOf(u), { symbol: 'BTC' })).statusCode).toBe(200);
       t.md.setRow('BTC', { pools: btc.pools.map((p) => ({ ...p, pure: false })) });
       expect((await place(u, practiceOf(u), { symbol: 'BTC' })).json().error.code).toBe('market_unavailable');
@@ -449,7 +457,9 @@ describe('account rules', () => {
     expect(mine).toHaveLength(1);
     expect(mine[0]).toMatchObject({ wallet: u.wallet, passed: false, finalEquityUsd: '23750', tradesRoot: recomputeRoot(await fills(u, ev)) });
     expect((await place(u, ev)).json().error.code).toBe('account_inactive');
-    expect(await t.db.select().from(notifications).where(and(eq(notifications.wallet, u.wallet), eq(notifications.title, 'Evaluation failed')))).toHaveLength(1);
+    const failed = await t.db.select().from(notifications).where(and(eq(notifications.wallet, u.wallet), eq(notifications.title, 'Evaluation failed')));
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ href: `/account/evaluation?id=${ev}`, body: `${account.label} ${account.shortId}: Equity $23,750.00 reached the $23,750.00 floor` });
   });
 
   it('marks an evaluation checking at the target with open positions, passes it when flat, and resolves it once', async () => {
@@ -478,10 +488,26 @@ describe('account rules', () => {
     const list = await fills(u, ev);
     expect(list).toHaveLength(2);
     expect(mine[0]).toMatchObject({ passed: true, finalEquityUsd: passed.equity, tradesRoot: recomputeRoot(list), resolvedAt: passed.resolvedAt });
-    expect(tradesRoot([...list].reverse())).toBe(mine[0]!.tradesRoot);
+    const [notice] = await t.db.select().from(notifications).where(and(eq(notifications.wallet, u.wallet), eq(notifications.title, 'Evaluation passed')));
+    expect(notice).toMatchObject({ href: `/result?id=${ev}` });
+    expect(await tradesRoot([...list].reverse())).toBe(mine[0]!.tradesRoot);
 
+    // The fill list is the owner's until the result is onchain, then anyone's: the trades root it commits to is public.
+    const stranger = await t.user();
+    const anonymous = () => t.app.inject({ method: 'GET', url: `${path(ev)}/fills` });
+    expect((await stranger.get(`${path(ev)}/fills`)).statusCode).toBe(404);
+    expect((await anonymous()).statusCode).toBe(404);
+    expect((await t.sim.detail(u.wallet, ev))!.evidence.resultSignature, 'decided, not recorded yet').toBeUndefined();
+
+    const published = t.events.length;
     await t.sim.markRecorded(ev, '5'.repeat(87));
     await t.sim.markRecorded(ev, '6'.repeat(87)); // already recorded: keeps the first
+    expect((await t.sim.detail(u.wallet, ev))!.evidence).toMatchObject({ evaluation: ev, resultSignature: '5'.repeat(87) });
+    const update = t.events.slice(published).find((e) => e.event.type === 'account' && e.event.account.id === ev);
+    expect(update, 'the owner\'s stream hears of the record').toMatchObject({ wallet: u.wallet, event: { account: { evidence: { resultSignature: '5'.repeat(87) } } } });
+    expect((await stranger.get(`${path(ev)}/fills`)).json()).toEqual(list);
+    expect(await tradesRoot((await anonymous()).json() as Fill[])).toBe(mine[0]!.tradesRoot);
+    expect((await t.app.inject({ method: 'GET', url: `${path(practiceOf(u))}/fills` })).statusCode, 'practice stays private').toBe(404);
     const [row] = await t.db.select().from(simResults).where(eq(simResults.evaluation, ev));
     expect(row!.recordedSignature).toBe('5'.repeat(87));
     expect((await t.sim.activity(u.wallet, ev))!.filter((a) => a.title === 'Result recorded onchain')).toHaveLength(1);
@@ -596,13 +622,13 @@ describe('trades root', () => {
     fundingUsd: '0', borrowUsd: '0', realizedPnl: '-1.000123', ts, venue: 'simulated', ...extra,
   });
 
-  it('is the documented SHA-256 Merkle root, independent of input order', () => {
+  it('is the documented SHA-256 Merkle root, independent of input order', async () => {
     const list = [fill('b', 2), fill('a', 2, { isIncrease: false, realizedPnl: null }), fill('c', 1), fill('d', 3), fill('e', 3)];
     const leaf = createHash('sha256').update('c|SOL|Long|increase|10000|118.53831|1|-0.012345|0|0|-1.000123|1').digest('hex');
-    expect(tradesRoot([fill('c', 1)])).toBe(leaf);
-    expect(tradesRoot(list)).toBe(recomputeRoot(list));
-    expect(tradesRoot([...list].reverse())).toBe(tradesRoot(list));
-    expect(tradesRoot(list.slice(0, 4))).not.toBe(tradesRoot(list));
-    expect(tradesRoot([])).toBe('0'.repeat(64));
+    expect(await tradesRoot([fill('c', 1)])).toBe(leaf);
+    expect(await tradesRoot(list)).toBe(recomputeRoot(list));
+    expect(await tradesRoot([...list].reverse())).toBe(await tradesRoot(list));
+    expect(await tradesRoot(list.slice(0, 4))).not.toBe(await tradesRoot(list));
+    expect(await tradesRoot([])).toBe('0'.repeat(64));
   });
 });

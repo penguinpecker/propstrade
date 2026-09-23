@@ -643,3 +643,63 @@ Round-2 learnings (non-obvious):
 - Telegram groups accept 20 bot messages/minute; batch + honour retry_after.
 - A failed CPI logs the throwing program first: attribute errors to the first 'failed: custom program error' line.
 2026-09-23 Build round 3 started (full-stack local rehearsal; launch runbook + ops; whole-system review).
+2026-09-23 Round 3 full-stack rehearsal: scripts/local-stack.ts (validator + scripts/admin + real server + production app
+           build) and app/tests/fullstack.e2e.mjs (Chrome, Wallet Standard test wallet): connect + SIWS, live markets,
+           practice fill + close, checkout, evaluation to a pass (record_evaluation_result onchain), KYC + set_identity,
+           activate_funded, funded open + TP + SL (3 real GMTrade orders) canceled through the UI, verify, vault. About
+           80 s per run, stack start included. Integration bugs found and fixed:
+- marketdata read the program IDL from the onchain Anchor IDL account, which no deploy step publishes (`anchor idl init`
+  is not in the runbook): on a fresh deploy every market would stay "Not available for funded trading". Now decoded with
+  the IDL bundled in @props/sdk.
+- Trade history stayed empty after a close: the close request invalidated it before the fill (2 s later), and the fill
+  arrives only as stream events that never touched history. The app now refetches history when a position leaves the
+  positions stream (not on every valuation tick).
+- KYC showed "In review" for up to 60 s after set_identity landed: /v1/me derived "verified" from the chain job status,
+  which the executor marks after the indexer has already applied the event, and nothing told the trader or the app.
+  /v1/me now reads the identity hash from the onchain TraderProfile it already fetches; identitySet notifies the trader;
+  the app re-reads /v1/me on account and payout notifications.
+- Notification links: chain + keeper linked /account/<funded PDA> (the app's account page ignores the id and showed
+  whichever stage was open last); the sim linked #/account/<stage> and #/result, which the app opened as external links
+  in a new tab. All are app routes now.
+- Canceling a pending funded order from Open orders made the order ticket say "GMTrade did not execute the order, for
+  example because the price moved past your slippage tolerance" (its execution follow saw the order account vanish with
+  no fill). A trader cancel of the followed order now ends that follow.
+- Evaluations cannot be passed deterministically at live prices (a round trip needs a move larger than its fees). The
+  server has a NODE_ENV=test-only price pin (PUT /v1/test/prices/:symbol, admin token) that the rehearsal uses; the sim
+  engine's own rules decide the result.
+Facts:
+- Chrome accepts the Secure __Host- session cookie from http://127.0.0.1, and an app on 127.0.0.1:38173 with the API on
+  127.0.0.1:38080 is same-site: the SameSite=Lax cookie flows with credentials: 'include' and EventSource.
+- The chain module reads index-token decimals from the RPC, so a local validator needs the markets' index-token mints;
+  the stack clones them and the virtual inventories from mainnet (solana-test-validator --clone needs --url).
+- GMTrade loaded at genesis has ProgramData last-deploy slot 0: GMTRADE_DEPLOY_SLOT=0 locally.
+- The keeper cancels a TP/SL pair whose opening order was canceled within one tick, with a sync in the same transaction
+  ("2 TP/SL without a position").
+- After startup the keeper price stream needs a few seconds before its first message; until then prices are polled
+  (freshness "delayed").
+- solana-test-validator helpers used to take whatever already answered on their RPC port for the validator they had
+  just spawned (another suite's, another worktree's): startValidator now refuses a port that already answers, and the
+  stack refuses busy API/app ports (LOCAL_STACK_PORT moves all of them).
+- GMTrade's candle service sometimes takes longer than the server's 15 s timeout (/v1/candles → 502); the app shows
+  its unavailable state and Chrome logs the 502.
+- Playwright getByText matches case-insensitive substrings by default ("Verified" matched a toast "Identity verified");
+  page.goto to a URL that differs only in its hash does not reload an SPA; an untrusted test wallet refuses the silent
+  reconnect, so a page.reload() signs the journey out.
+2026-09-23 Round 4 review fixes: breached funded accounts are marked breached and closed (keeper), purchases bind the
+           reviewed fee and tier version, a daily onchain cap on activated principal, sealed chain jobs and evaluation
+           results, account-addressed notification links and pages, public evaluation fill lists with an in-browser
+           trades-root check, SIWS and order-market checks in the app, KYC regions, SIGTERM-safe local stack.
+- Nothing sent mark_breached or close_funded before: a breached account stayed `restricted`, kept active_funded = 1 (the
+  trader's next pass could not be activated: AlreadyFunded), its SOL float and principal in the totals, and a restriction
+  lift (the documented step after a GMTrade upgrade review) would have let it trade again once a liquidation left V > 0.
+- upsert_tier bumps Tier.version on every call, so buy_evaluation(expected_fee_usdc, expected_tier_version) binds every
+  tier term the trader reviewed; trader_share_bps still comes from Config at purchase.
+- Postgres jsonb stores objects with its own key order: a MAC over JSON.stringify(payload) did not verify on the row read
+  back. Seal canonical JSON (sorted keys). A seal must cover only the sealed fields, never the whole row (id, status…).
+- Vite's preview() registers process.once('SIGTERM') (node_modules/vite/dist/node/chunks/node.js setupSIGTERMListener)
+  that closes its own server and calls process.exit(): a script that also runs a validator and a server must own
+  SIGTERM itself and remove Vite's listener after preview().
+- crypto.subtle.digest needs Uint8Array<ArrayBuffer> under TS 5.9 (a plain Uint8Array may be SharedArrayBuffer-backed).
+- GMTrade's subsquid answered Cloudflare 522 around 12:00 UTC on 2026-09-23: /v1/markets/:symbol/trades returns 502 and
+  the live marketdata test fails until it is back (no Props.trade change involved).
+

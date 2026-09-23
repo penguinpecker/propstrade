@@ -1,6 +1,7 @@
 // sim: the practice + evaluation engine (ARCHITECTURE.md §4.3). Routes /v1/sim/* and /v1/practice/*; implements
 // SimService. Fills, liquidations and the rules loop run while this process holds the sim leader lock.
 import { z } from 'zod';
+import { createSealer } from '../../lib/integrity.ts';
 import { LOCK_KEYS, runAsLeader } from '../../lib/leader.ts';
 import type { ModuleContext, SimService } from '../types.ts';
 import { createEngine } from './engine.ts';
@@ -19,6 +20,7 @@ export default async function register(ctx: ModuleContext) {
   const { SIM_FILL_DELAY_MS } = Env.parse({ SIM_FILL_DELAY_MS: ctx.env.SIM_FILL_DELAY_MS || undefined });
   const engine = createEngine({
     db: ctx.db, log: ctx.log, marketdata, publish: ctx.publish, notify: ctx.notify, fillDelayMs: SIM_FILL_DELAY_MS,
+    sealer: createSealer(ctx.config.SESSION_SECRET),
   });
   const reader = createReader(ctx.db, marketdata, engine.ensurePractice);
   registerRoutes(ctx.app, engine, reader);
