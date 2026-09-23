@@ -739,3 +739,17 @@ Facts:
   the first 10 characters of the secret. Catch and replace the message wherever a secret is parsed.
 - ICU region names resolve aliases (Intl "UK" = United Kingdom): canonicalize with new Intl.Locale(`und-${code}`).region
   ("UK" → "GB", "DD" → "DE") before hashing or comparing country codes.
+2026-09-23 Build round 3 done and merged (26bb8b7 + 8ac75c1): full-stack local rehearsal (scripts/local-stack.ts +
+           app/tests/fullstack.e2e.mjs: sign-in -> live markets -> practice fill -> buy_evaluation -> pass recorded onchain
+           -> KYC set_identity -> activate_funded -> real GMTrade open+TP+SL from the owner PDA -> cancel -> verify -> vault,
+           all asserted against DB rows and onchain accounts), launch runbook docs/runbooks/launch.md (every command rehearsed
+           on a local validator), admin scripts status/fund-sol-treasury/gen-authority-key/set-params/identity-hash, edge CSP,
+           Railpack/Vercel configs, env-doc tests. Whole-system review fixes: breached accounts now marked + closed by the
+           keeper; buy_evaluation binds expected fee + tier version (TierChanged); chain jobs + sim results sealed with an
+           HMAC (DB write access alone cannot make the keys sign); Config.max_daily_principal (2,500 USDC/day) bounds a key
+           or DB compromise; app verifies the SIWS message and the market/decimals onchain before signing; notification links
+           name their account; KYC refuses sanctioned Ukrainian regions; trades root recomputable publicly in the browser.
+           Final verification on main: program build + IDL in sync (982 KB), cargo 3/3, LiteSVM 59/59, validator smoke 1/1,
+           SDK 8/8, admin 6/6, server 99/99 + modules 62/62, app 105 unit + e2e + ui-review + review e2e + SIWS review,
+           full-stack journey PASS. Live data 28/30: the two failures were network errors from GMTrade's public subsquid
+           (flaky, 522s today); both pass on re-run (reconcile 6/7 runs, 8/8 fills exact whenever data arrived).
