@@ -96,8 +96,21 @@ export interface AppConfig {
 }
 
 // ---------- auth / me ----------
+/**
+ * An outside source the service depends on: 'checking' until its first answer, 'degraded' after a failure, 'down' after
+ * three in a row, with why, since when, and what the service does meanwhile (`fallback`).
+ */
+export interface UpstreamStatus {
+  state: 'checking' | 'ok' | 'degraded' | 'down'; since: Millis | null; lastOkAt: Millis | null; lastError: string | null;
+  latencyMs: number | null; fallback: string;
+}
+/** `status` is 'degraded' when the database is down (HTTP 503) or an outside source is down (HTTP 200: fallbacks serve). */
 export interface Health {
   status: 'ok' | 'degraded'; db: 'ok' | 'down'; modules: Record<string, 'running' | 'absent'>; time: Millis;
+  /** p99 time the process was busy over the last minute: high means this server is overloaded, not its sources. */
+  eventLoopDelayMs: number;
+  /** Present when marketdata runs: GMTrade's price stream, candles, trades, market-info and the Solana RPC. */
+  upstreams?: Record<string, UpstreamStatus>;
   /** Present when the keeper module runs: whether this replica leads it, its last completed tick, and the last GMTrade
    *  program upgrade it saw (after which every active funded account is restricted until an operator acknowledges it). */
   keeper?: {

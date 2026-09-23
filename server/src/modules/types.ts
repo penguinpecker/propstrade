@@ -10,6 +10,7 @@ import type {
 import type { Prices } from '@props/gmsol-wasm';
 import type { Config } from '../config.js';
 import type { Db, Sql } from '../db/client.js';
+import type { UpstreamStatus } from './marketdata/upstreams.js';
 
 export interface ModuleContext {
   app: FastifyInstance;                 // register routes under /v1; auth guard: app.requireWallet (see auth/routes.ts)
@@ -106,6 +107,8 @@ export interface MarketDataService {
   candles(symbol: string, interval: CandleInterval, from?: number, to?: number): Promise<CandlesResponse>;
   trades(symbol: string, limit?: number): Promise<MarketTrade[]>;
   quote(symbol: string, side: 'Long' | 'Short', sizeUsd: string): Promise<PriceImpactQuote>;
+  /** Each outside source's state: which is failing, since when, why, and what the service does meanwhile. */
+  health(): Record<string, UpstreamStatus>;
 }
 
 export type ModuleRegister<S> = (ctx: ModuleContext) => Promise<S>;

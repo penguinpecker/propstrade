@@ -398,6 +398,20 @@ export const vaultLedger = pgTable('vault_ledger', {
 ]);
 
 /**
+ * Props.trade's own record of GMTrade's live index price (the keeper feed's mid): one OHLC bar a minute per market,
+ * t = unix seconds of the minute's start. Charts fall back to it while GMTrade's candle service is slow or down
+ * (modules/marketdata/record.ts), so they never depend on that service alone. Kept 30 days.
+ */
+export const priceBars = pgTable('price_bars', {
+  symbol: text('symbol').notNull(),
+  t: bigint('t', { mode: 'number' }).notNull(),
+  open: price('open').notNull(),
+  high: price('high').notNull(),
+  low: price('low').notNull(),
+  close: price('close').notNull(),
+}, (t) => [primaryKey({ columns: [t.symbol, t.t] })]);
+
+/**
  * GMTrade program deploys the keeper has seen (the program data's last-deploy slot). acknowledged_at is when the deploy
  * was accepted as reviewed: GMTRADE_DEPLOY_SLOT on first sight (or, without it, the first deploy seen), else an operator
  * through the admin API. Until then it is an upgrade: detected_at is when it was noticed, handled_at when every active
