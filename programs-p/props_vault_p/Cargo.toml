@@ -1,0 +1,32 @@
+[package]
+name = "props_vault_p"
+version = "0.1.0"
+description = "Props.trade vault on Pinocchio: drop-in replacement for the Anchor props_vault program (same id, instructions, accounts, events, errors)"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+no-entrypoint = []
+
+[dependencies]
+pinocchio = { version = "=0.11.2", default-features = false, features = ["cpi", "copy"] }
+
+[dev-dependencies]
+sha2 = "0.10"
+solana-address = { version = "2.8", features = ["curve25519", "decode"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
+
+# Its own workspace: the Anchor build's Cargo.toml, Cargo.lock and profile stay untouched (`anchor build` discovers
+# programs/* only). Same release profile as the root; opt-level chosen by measurement (see PORTING.md).
+[workspace]
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+opt-level = "s"
+codegen-units = 1

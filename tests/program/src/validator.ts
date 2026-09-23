@@ -14,7 +14,8 @@ import type { AddressLookupTableAccount, Keypair, TransactionInstruction } from 
 import { GMTRADE_PROGRAM_ID, GMTRADE_STORE, PROPS_VAULT_PROGRAM_ID, USDC_MINT, buildTransaction } from '@props/sdk';
 
 const FIXTURES = new URL('../fixtures/', import.meta.url);
-const PROGRAM_SO = new URL('../../../target/deploy/props_vault.so', import.meta.url).pathname;
+/** The props_vault binary under test: PROPS_VAULT_SO (absolute path), else the Anchor build. */
+const PROGRAM_SO = process.env.PROPS_VAULT_SO || new URL('../../../target/deploy/props_vault.so', import.meta.url).pathname;
 const STORE_LAST_RESTART_OFFSET = 4800;
 
 export interface ValidatorOptions {
