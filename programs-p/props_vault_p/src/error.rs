@@ -84,8 +84,6 @@ pub enum E {
     MathOverflow,
     TierChanged,
     DailyPrincipalLimit,
-    /// Porting scaffold only: the instruction is dispatched but not ported yet. Remove once all 31 are ported.
-    NotPorted = 7000,
 }
 
 /// A program error as the u64 the entrypoint returns: `code` for Anchor/VaultError codes (`Custom(code)`), `n << 32`
@@ -137,7 +135,7 @@ pub fn require(cond: bool, e: E) -> Result {
 
 /// (key, name, message) of every error this program raises. key = the Anchor code, or `n << 24` for the runtime error
 /// `n << 32` (its ProgramError Debug name and Display message).
-const TEXT: [(u32, &str, &str); 77] = [
+const TEXT: [(u32, &str, &str); 76] = [
     (101, "InstructionFallbackNotFound", "Fallback functions are not supported"),
     (102, "InstructionDidNotDeserialize", "The program could not deserialize the given instruction"),
     (1000, "IdlInstructionStub", "The program was compiled without idl instructions"),
@@ -219,7 +217,6 @@ const TEXT: [(u32, &str, &str); 77] = [
     (6039, "MathOverflow", "Arithmetic overflow"),
     (6040, "TierChanged", "The tier's fee or terms changed since they were reviewed"),
     (6041, "DailyPrincipalLimit", "Funded activations reached the vault's daily limit; try again later"),
-    (7000, "NotPorted", "Instruction not ported to Pinocchio yet"),
     (4 << 24, "InvalidAccountData", "An account's data contents was invalid"),
     (10 << 24, "UninitializedAccount", "An attempt to operate on an account that hasn't been initialized"),
     (11 << 24, "NotEnoughAccountKeys", "The instruction expected additional account keys"),

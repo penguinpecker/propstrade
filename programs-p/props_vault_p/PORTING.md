@@ -11,20 +11,18 @@ same `emit_cpi!` events, same error numbers and error log lines. The IDL in `pac
 | Anchor file (`programs/props_vault/src/instructions/`) | Pinocchio file (`src/ix/`) | Instructions | State |
 |---|---|---|---|
 | `admin.rs` | `admin.rs` | initialize, propose_admin, accept_admin, set_authorities, set_params, set_pauses, upsert_tier, upsert_market, deposit_capital, withdraw_capital, sweep_fees, withdraw_sol_treasury | ported |
-| `trader.rs` | `trader.rs` | buy_evaluation, activate_funded, request_payout, cancel_payout | stub |
-| `trading.rs` | `trading.rs` | open_position, close_position, set_protection, update_order, cancel_order | stub |
-| `risk.rs` | `risk.rs` | set_identity, record_evaluation_result, approve_payout, reject_payout, restrict, mark_breached, close_funded | stub |
-| `crank.rs` | `crank.rs` | sync, top_up_owner, close_completed_order | stub |
+| `trader.rs` | `trader.rs` | buy_evaluation, activate_funded, request_payout, cancel_payout | ported |
+| `trading.rs` | `trading.rs` | open_position, close_position, set_protection, update_order, cancel_order | ported |
+| `risk.rs` | `risk.rs` | set_identity, record_evaluation_result, approve_payout, reject_payout, restrict, mark_breached, close_funded | ported |
+| `crank.rs` | `crank.rs` | sync, top_up_owner, close_completed_order | ported |
 
-A stub returns `NotPorted` (custom error 7000, logged as `Error Code: NotPorted`), so any test that reaches it fails
-loudly. All 31 discriminators, the event self-CPI and Anchor's IDL tag are already dispatched in `src/lib.rs`: a port
-only replaces the stub body in its own file.
+All 31 instructions are ported: `src/lib.rs` dispatches every discriminator, the event self-CPI and Anchor's IDL tag,
+and the suite passes 60/60 on this build as on the Anchor build.
 
-Suggested split: one engineer per `trader.rs`, `risk.rs`, and `trading.rs` + `crank.rs`. Nearly every remaining test
-builds a funded account through `buy_evaluation` → `set_identity` → `record_evaluation_result` → `activate_funded`
-(`Env.activeFunded`), so land those four first; the trading, crank and payout tests cannot run before them.
-
-Binary: 64,128 bytes with admin ported (the Anchor build is 981,640 bytes).
+Binary: 162,800 bytes (145,120 before the payout and risk actions, 88,856 before trading and the cranks, 64,128 with
+admin only; the Anchor build is 981,640 bytes). Trading brought in the GMTrade CPI builders (`CreateOrder::invoke`
+4.2 KB, `CloseOrder::invoke` 2.1 KB, `update_order` 1 KB); the largest handlers are sync 7.3 KB, open_position 6 KB,
+activate_funded 5.6 KB, update_order 4.9 KB and approve_payout 4.1 KB.
 
 ## Build, test, compare
 
@@ -33,8 +31,8 @@ export PATH=$HOME/.cargo/bin:$HOME/.local/share/solana/install/active_release/bi
 cargo build-sbf --manifest-path programs-p/props_vault_p/Cargo.toml --sbf-out-dir target/deploy   # → target/deploy/props_vault_p.so
 cargo test --manifest-path programs-p/props_vault_p/Cargo.toml     # every hard-coded discriminator and PDA vs its sha256 / find_program_address; GMTrade CPI helpers refuse any other program
 cd tests/program && PROPS_VAULT_SO=$PWD/../../target/deploy/props_vault_p.so npm test          # the suite on this build
-cd tests/program && npm test                                                                    # the suite on the Anchor build (59/59)
-node programs-p/props_vault_p/compare/admin.ts                    # byte-level diff against the Anchor build (needs both .so files)
+cd tests/program && npm test                                                                    # the suite on the Anchor build (60/60)
+node programs-p/props_vault_p/compare/admin.ts                    # byte-level diff against the Anchor build (needs both .so files); also trader.ts, risk.ts, trading.ts, crank.ts
 cd tests/program && PROPS_VAULT_SO=... npm run test:validator    # solana-test-validator, mainnet feature set (needs ports 18001/18899/19900)
 rustfmt --edition 2021 --config max_width=120,use_small_heuristics=Max programs-p/props_vault_p/src/lib.rs
 ```
@@ -46,25 +44,34 @@ The crate has its own `[workspace]` so the Anchor build's `Cargo.toml`, `Cargo.l
 the program id is fixed in `src/lib.rs`).
 
 `compare/harness.ts` runs a scenario on both builds in LiteSVM with deterministic keys and clock and diffs every
-transaction outcome (success, `Error Code`, runtime error, and every inner instruction = events and CPIs: stack height,
-program, account list in order, data) and every snapshotted account (lamports, owner, data). The signer/writable flags
-of CPI accounts are not in the transaction metadata, so check those against the IDL by reading. Add
+transaction outcome (success, `Error Code`, runtime error, error log lines minus the origin of difference 2, and every
+inner instruction = events and CPIs: stack height, program, account list in order, data) and every snapshotted account
+(lamports, owner, data). The signer/writable flags of CPI accounts are not in the transaction metadata, so check those
+against the IDL by reading. Add
 `compare/<your file>.ts` for your instructions (copy `admin.ts`) and keep it at 0 differences. It prints compute units
-side by side.
+side by side. LiteSVM's `airdrop` below the zero-data rent minimum (890,880 lamports) fails without a word, so pre-fund a
+PDA with at least that to reach Anchor's transfer + allocate + assign path (1,000,000 is below every account's rent).
+`trading.ts` exports raw writers for state no instruction reaches directly (funded status, slot and order sums,
+`order_seq`, open interest, GMTrade order state; offsets checked against the IDL decoder) that `crank.ts`, `trader.ts`
+and `risk.ts` reuse. A `program` account (the last `#[event_cpi]` account) that is not this program makes the event
+self-CPI fail with the runtime's `MissingAccount` in LiteSVM, on both builds (neither checks the account itself). An
+owner PDA's 0.25 SOL float covers about four GMTrade positions and four orders: past that GMTrade's rent transfer fails
+(custom error 1), so airdrop more to owners that open more. The SDK's `cancelOrder` / `updateOrder` builders throw for an
+order the account does not track: build those refusals by swapping the order key into a valid instruction.
 
 ## Module map
 
 | File | What it holds |
 |---|---|
 | `src/lib.rs` | program id, entrypoint (pinocchio's input parser; the error code goes out as is), `process_instruction` (program id check, dispatch, one error log line), instruction discriminators, host test of every constant |
-| `src/error.rs` | `E` (every Anchor framework code we raise + `VaultError` 6000..6041 + `NotPorted`), `Error` / `Result` (register-sized), `require`, the Anchor-format error log |
+| `src/error.rs` | `E` (every Anchor framework code we raise + `VaultError` 6000..6041), `Error` / `Result` (register-sized), `require`, the Anchor-format error log |
 | `src/state.rs` | seeds, limits, math helpers (`to_gm_usd`, `apply_bps`), LE field types, every account layout with its discriminator, `load::<T>`, the `Config` view, instruction arg structs (`ConfigParams`, `TierParams`, `MarketParams`, `Pauses`), enum constants, the Anchor state helpers (`FundedAccount::find_slot`, `track_order`, `Terms::loss_allowance`, `MarketConfig::apply_oi_change`, `ConfigTail::allocate_daily_principal`, ...) |
 | `src/accounts.rs` | program ids, singleton PDAs (`CONFIG_PDA`, `VAULT_PDA`, `FEE_VAULT_PDA`, `SOL_TREASURY_PDA`, `EVENT_AUTHORITY_PDA`), Anchor account types and constraints (`take`, `signer`, `system_account`, `program_account`, `mutable`, `keys_eq`, `singleton`, `seeds`, `find_seeds`, `check_event_authority`, `token_account`, `mint_account`, `token_constraint`, `associated_token_constraint`), PDA syscalls, `ata_address`, `now()`, `Rent`, the borsh reader `Args` |
 | `src/cpi.rs` | one `invoke` for every CPI, system/token/ATA instructions with the Anchor build's layouts, `top_up_from_treasury`, Anchor `init` / `init_if_needed` (`init_pda`, `init_token_pda`, `init_ata_if_needed`, `create_account_anchor`), the borsh writer `Buf` |
 | `src/events.rs` | event discriminators, `ConfigChange` indexes, `event::<N>(disc)`, `emit`, `receive` (the self-CPI's receiving end) |
 | `src/gmtrade.rs` | GMTrade layouts and readers (`position_state`, `check_position_identity`, `verified_position_size`, `is_pending_order`, `check_pure_usdc_market`), `order_params`, CPIs `CreateOrder::invoke` (escrow ATA + `prepare_user` + `prepare_position` + `create_order_v2`), `CloseOrder::invoke` (`close_order_v2`), `update_order` (`update_order_v2`) |
 | `src/ix/*.rs` | handlers, one file per Anchor instruction file |
-| `compare/` | the byte-level diff harness and the admin scenario |
+| `compare/` | the byte-level diff harness and one scenario per instruction file |
 
 You should not need to edit the shared modules. If you must, add to them (do not reshape existing helpers) and say so,
 since three ports run in parallel.
@@ -215,10 +222,10 @@ for SPL Token on all six GMTrade-CPI instructions (open_position, close_position
 cancel_order, close_completed_order) and expects `InvalidProgramId`, as the Anchor build answers; give each compare
 scenario the same substitution.
 
-Not exercised yet (nothing ported calls them): the three GMTrade CPIs, the readers other than
-`check_pure_usdc_market`, `close_account`, `create_ata` with a PDA payer, `top_up_from_treasury`, and the
-`FundedAccount` / `Terms` / `MarketConfig` / `ConfigTail::allocate_daily_principal` helpers. They are line-by-line
-translations; the suite and your compare scenario are what prove them.
+Every helper in the shared modules is now exercised by a ported instruction and compared byte for byte
+(`verified_position_size`, `close_account` and `FundedAccount::is_flat` by the payout and closure scenarios in
+`compare/risk.ts` and `compare/trader.ts`); the CPI account flags were checked against `gmsol_store.idl.json` and the
+SPL Token / ATA / System instruction builders by reading.
 
 ## Deliberate differences from the Anchor build
 
@@ -258,6 +265,14 @@ costs ~3.7 KB (`core::fmt::num`, `pad_integral`, `do_count_chars`); pinocchio's 
 soft-float rent formula is ~2.5 KB but gives exactly solana-program 2.3's amounts under any Rent sysvar. pinocchio's
 own `Rent` (`lamports_per_byte × (128 + len)`) ignores `exemption_threshold`, so it agrees only while the sysvar holds
 threshold 1.0 (LiteSVM 0.8 reports 6960 / 1.0); switching to it saves the float code but ties rent amounts to that.
+`apply_bps` divides a u128, which pulls in compiler_builtins' `u128_div_rem`, `__udivti3`, `__lshrti3` and `__ashlti3`
+(5.8 KB; activate_funded's `loss_allowance` is the first caller, request_payout and open_position need it too): with
+q, r = amount / 10⁴, amount % 10⁴, the checked u64 form q·bps + r·bps / 10⁴ gives the same results and errors without
+it. `Buf<N>::bytes`, `event::<N>` and `emit::<N>` are instantiated once per distinct `N`, ~700 bytes each: one `N` per
+file, or a writer core that is not generic over `N`, would save most of that. trading.rs and crank.rs share one
+(`trading::EV` = 904, Synced's largest body; 744 bytes less than one per file). The payout and risk-action events reuse
+`N`s other handlers already instantiate (102, 129, 168), so they added no copy; 10 distinct `N`s remain (5 in admin.rs),
+so one `N` for the whole crate would save roughly 6 KB.
 
 ## Checklist per instruction
 
@@ -267,5 +282,5 @@ threshold 1.0 (LiteSVM 0.8 reports 6960 / 1.0); switching to it saves the float 
    order, errors and checked math.
 4. Writes only to `mut` / `init` accounts; token amounts read before the CPIs that move them.
 5. The event with the same fields in the same order, at the same point.
-6. Replace the stub; build; run the suite with `PROPS_VAULT_SO`; add `compare/<file>.ts` and reach 0 differences;
+6. Build; run the suite with `PROPS_VAULT_SO`; add the scenarios to `compare/<file>.ts` and reach 0 differences;
    check the size.
