@@ -21,8 +21,8 @@ export interface Pair {
   funding_rate: number;
 }
 
-export async function fetchPairs(url = MARKET_INFO): Promise<Pair[]> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+export async function fetchPairs(url = MARKET_INFO, timeoutMs = 15_000): Promise<Pair[]> {
+  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
   if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
   const pairs = (await res.json()) as unknown;
   if (!Array.isArray(pairs)) throw new Error(`${url}: expected an array`);

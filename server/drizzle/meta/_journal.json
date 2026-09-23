@@ -29,6 +29,13 @@
       "when": 1790145713554,
       "tag": "0003_round4_integrity",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1790163069511,
+      "tag": "0004_price_bars",
+      "breakpoints": true
     }
   ]
 }

@@ -117,6 +117,7 @@ export class FixtureMarketData implements MarketDataService {
   candles = () => Promise.reject(new Error('not used by the sim module'));
   trades = () => Promise.reject(new Error('not used by the sim module'));
   quote = () => Promise.reject(new Error('not used by the sim module'));
+  health = () => ({});
 }
 
 /** Starts the app with the sim module on its own database `<TEST_DATABASE_URL>_<name>`. */

@@ -2,6 +2,9 @@ import React, { useEffect, useRef } from 'react';
 import { createChart, CandlestickSeries, LineSeries, CrosshairMode } from 'lightweight-charts';
 import { applyTick } from './lib/candles';
 
+/** Bars shown when a chart opens (of the 300 loaded). */
+const RECENT_BARS = 120;
+
 /** GMTrade candles (`candles`), moved live by `tick` ({ price, ts }); `guides` are horizontal price lines ({ price, title }). */
 export default function PriceChart({ market, candles, tick, interval, line = false, guides = [], theme = 'dark' }) {
   const container = useRef(null);
@@ -9,7 +12,7 @@ export default function PriceChart({ market, candles, tick, interval, line = fal
   const last = useRef(null);
   useEffect(() => {
     const dark = theme === 'dark';
-    const colors = dark ? { surface: '#19181f', axis: '#afa6bc', grid: '#2b2732', border: '#35313e', purple: '#b28aff', green: '#6caf95', red: '#ca7d8b', entry: '#9168ba', entryBg: '#332743', entryText: '#c8a3f3' } : { surface: '#fdfdfb', axis: '#6e6975', grid: '#efeee9', border: '#eeece6', purple: '#8552cc', green: '#459583', red: '#c27878', entry: '#976ccc', entryBg: '#f0e8fa', entryText: '#76529b' };
+    const colors = dark ? { surface: '#19181f', axis: '#afa6bc', grid: '#2b2732', border: '#35313e', purple: '#b28aff', green: '#0ecb81', red: '#f6465d', entry: '#9168ba', entryBg: '#332743', entryText: '#c8a3f3' } : { surface: '#fdfdfb', axis: '#6e6975', grid: '#efeee9', border: '#eeece6', purple: '#8552cc', green: '#0a9e6b', red: '#e5354d', entry: '#976ccc', entryBg: '#f0e8fa', entryText: '#76529b' };
     const chart = createChart(container.current, {
       autoSize: true,
       layout: { background: { color: colors.surface }, textColor: colors.axis, fontFamily: 'Manrope, sans-serif', fontSize: 10, attributionLogo: true },
@@ -21,8 +24,10 @@ export default function PriceChart({ market, candles, tick, interval, line = fal
     });
     const series = chart.addSeries(line ? LineSeries : CandlestickSeries, line ? { color: colors.purple, lineWidth: 2 } : { upColor: colors.green, downColor: colors.red, wickUpColor: colors.green, wickDownColor: colors.red, borderVisible: false });
     series.applyOptions({ priceLineColor: line ? '#7946bc' : colors.green, priceFormat: { type: 'price', precision: market.priceDecimals, minMove: 10 ** -market.priceDecimals } });
-    chartRef.current = { chart, series, line, colors, priceLines: [] };
-    // Refit only when the plot width changes; ordinary chart pan/zoom remains user-controlled.
+    // The latest bars at a readable width; the older ones are a drag away.
+    const showRecent = () => { const n = chartRef.current?.count; if (n) chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - RECENT_BARS), to: n - 1 + 7 }); };
+    chartRef.current = { chart, series, line, colors, priceLines: [], count: 0, showRecent };
+    // Re-show the latest bars only when the plot width changes; ordinary chart pan/zoom remains user-controlled.
     let width = 0;
     let resizeFrame;
     const observer = new ResizeObserver(([entry]) => {
@@ -30,7 +35,7 @@ export default function PriceChart({ market, candles, tick, interval, line = fal
       if (nextWidth === width || nextWidth <= 0) return;
       width = nextWidth;
       cancelAnimationFrame(resizeFrame);
-      resizeFrame = requestAnimationFrame(() => chart.timeScale().fitContent());
+      resizeFrame = requestAnimationFrame(showRecent);
     });
     observer.observe(container.current);
     return () => { observer.disconnect(); cancelAnimationFrame(resizeFrame); chart.remove(); chartRef.current = null; };
@@ -41,8 +46,9 @@ export default function PriceChart({ market, candles, tick, interval, line = fal
     if (!current) return;
     current.series.setData(current.line ? candles.map(c => ({ time: c.time, value: c.close })) : candles);
     last.current = candles.at(-1) ?? null;
-    // Fit the first data of each chart; later refetches keep the user's pan and zoom.
-    if (!current.fitted && candles.length) { current.chart.timeScale().fitContent(); current.fitted = true; }
+    current.count = candles.length;
+    // Place the first data of each chart; later refetches keep the user's pan and zoom.
+    if (!current.fitted && candles.length) { current.showRecent(); current.fitted = true; }
   }, [candles, market.symbol, interval, line, theme]);
 
   useEffect(() => {

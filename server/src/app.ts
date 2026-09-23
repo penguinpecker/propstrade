@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import cookie from '@fastify/cookie';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
@@ -70,14 +71,27 @@ export async function buildApp(deps: AppDeps) {
   registerAdminRoutes(app, { db, adminToken: config.ADMIN_API_TOKEN, sealer: createSealer(config.SESSION_SECRET) });
   registerRpcRelay(app, { rpcUrl: config.RPC_URL });
 
+  // How long the process was busy (p99 over the last minute): high means this server is overloaded, not its sources.
+  const loopDelay = monitorEventLoopDelay({ resolution: 20 });
+  loopDelay.enable();
+  let loopDelayMs = 0;
+  const loopTimer = setInterval(() => { loopDelayMs = Math.round(loopDelay.percentile(99) / 1e6); loopDelay.reset(); }, 60_000);
+  loopTimer.unref();
+  app.addHook('onClose', async () => { clearInterval(loopTimer); loopDelay.disable(); });
+
   app.get('/v1/health', async (_req, reply) => {
     const dbOk = await sql`select 1`.then(() => true, () => false);
+    // Outside sources that fail degrade the service (it serves fallbacks) without making it unhealthy.
+    const upstreams = deps.services?.marketdata?.health();
+    const sourceDown = Object.values(upstreams ?? {}).some((u) => u.state === 'down');
     return reply.status(dbOk ? 200 : 503).send({
-      status: dbOk ? 'ok' : 'degraded',
+      status: dbOk && !sourceDown ? 'ok' : 'degraded',
       db: dbOk ? 'ok' : 'down',
       modules: Object.fromEntries(deps.modules),
       time: Date.now(),
+      eventLoopDelayMs: loopDelayMs,
       keeper: deps.services?.keeper?.status(),
+      upstreams,
     });
   });
 
