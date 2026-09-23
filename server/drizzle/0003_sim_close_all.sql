@@ -1,0 +1,1 @@
+ALTER TABLE "sim_orders" ADD COLUMN "close_all" boolean DEFAULT false NOT NULL;

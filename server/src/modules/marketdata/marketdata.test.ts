@@ -196,7 +196,10 @@ test('live: routes, stream events and service API without a deployed program', {
     const raw = state.raw as { market: string; virtualInventories: Record<string, string>; slot: number };
     assert.equal(decodeMarket(raw.market).meta.market_token_mint, sol.marketToken);
     assert.ok(raw.virtualInventories.EEcQz9yC68rztSEq8XggVtp8Sa8Dj3gWJ8ckJuQvv5xw && raw.slot > 0);
-    assert.deepEqual([state.symbol, state.pure, state.isClosed], ['SOL', true, false]);
+    assert.deepEqual([state.symbol, state.pure, state.isClosed, state.indexDecimals], ['SOL', true, false, 9]);
+    // Collateral is USDC (unit price 1e14 = $1) and the index price is the live SOL price in unit form.
+    assert.ok(state.prices.short.min > 99n * 10n ** 12n && state.prices.short.max < 101n * 10n ** 12n);
+    assert.ok(Math.abs(Number(state.prices.index.min) / 1e11 / Number(sol.price) - 1) < 0.01);
 
     const heard: string[] = [];
     const off = service.onTick((t) => heard.push(t.symbol));

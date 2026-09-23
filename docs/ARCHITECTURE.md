@@ -302,6 +302,37 @@ App (round 1): `VITE_RPC_URL` and `VITE_API_URL` are required at build time (the
 requests). **The API must be same-site with the app** (e.g. app `props.trade`, API `api.props.trade`) or the
 SameSite=Lax session cookie will not flow.
 
+Sim engine (round 2, `server/src/modules/sim`):
+- Account money is USDC. Every fill carries its realized P&L (an increase: its costs; a decrease or liquidation: payout
+  minus collateral released), so realized P&L and a flat account's final equity are the sum over its fills.
+- Because every position's collateral comes out of the available margin and positions carry no debt, equity reaches the
+  floor only when every open position is worth nothing; GMTrade liquidates those in the same step, so a breach cancels
+  pending orders and there is nothing left to close. The static floor still includes open P&L.
+- Simulated positions are valued, changed and liquidated against the live Market account with the position added to
+  its open interest, collateral sum and total borrowing, as a funded position would be (otherwise a simulated position
+  larger than a thin or closed market's real open interest underflows the model, e.g. NVDA overnight: $561 long OI).
+- The closed-market liquidation factor comes from the Market account itself (Closed flag + EnableMarketClosedParams →
+  `market_closed_min_collateral_factor_for_liquidation`), which gmsol-programs' `MarketModel::position_params` applies.
+- Every order (market, limit, TP/SL) executes only on a tick with ts ≥ its last change + `SIM_FILL_DELAY_MS`, so a limit
+  set through the price cannot fill on a quote older than the keeper delay. Market orders expire after 30 min (GMTrade's
+  request_expiration). TP/SL placed with an order arm when it fills; one of each per position; they die with it.
+- TP/SL and 100% closes close the whole position at execution (CLOSE_ALL, as the funded path places them); their shown
+  size follows the position. An account holds at most 8 pending orders (each TP and SL counts) and 8 (market, side)
+  positions or pending increases, the program's MAX_ORDERS / MAX_SLOTS. A reused client id with a different request → 409.
+- Borrowing and funding accrue from a position's last change (its Position image carries GMTrade's increased_at /
+  decreased_at): while the Market account is older than that change, the model restarts its fee clocks there from the
+  position's own snapshots, as GMTrade's execution would have committed them; once the market changes onchain later,
+  its committed accrual is used, as for every position.
+- The leader values every account with open positions in memory each second and locks an account only when a rule has
+  work (liquidation, expired market order, status change, 5-min snapshot); ticks lock only accounts with an order the
+  tick can execute. Accounts with only resting orders cost nothing.
+- Gap: the closed-session leverage guard (§1, §4.5.3) does not yet run for evaluations: it needs the keeper's session
+  schedule (keeper/sessions.ts in the keeper track) to know when a session closes. Until then an evaluation can hold a
+  position above `closedMaxLeverage` through a close.
+- trades_root encoding: `server/src/modules/sim/merkle.ts`, leaves from `GET /v1/sim/:id/fills`. Results go through the
+  `sim_results` outbox: `onResolved` fires when decided and again every 5 min / at leadership start until
+  `markRecorded`, so the chain module's handler must be idempotent.
+
 Round 2 module ownership:
 - `server/src/modules/sim` — practice + evaluation engine; routes `/v1/sim/*`, `/v1/practice/*`; implements `SimService`.
 - `server/src/modules/chain` — indexer, funded accounts, payouts, verify, vault, config, chain-job executor
