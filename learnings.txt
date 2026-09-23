@@ -606,3 +606,40 @@ Round-1 learnings (non-obvious):
   yet, so re-planning then sends the work twice. Wait for `confirmed` (or for the status to disappear).
 - Telegram bots may post 20 messages a minute to a group (core.telegram.org/bots/faq); a 429 carries
   `parameters.retry_after` (seconds).
+2026-09-23 Build round 2 done and merged (b46b516): sim engine, chain indexer + funded/payout/verify/vault APIs, keeper,
+           full app wiring. Migrations from the parallel tracks squashed into server/drizzle/0002_round2.sql (nothing
+           deployed yet). All suites green on the merged tree: program 56/56 + smoke, SDK 8/8, data 30/30, server 91 +
+           modules 54 (chain + keeper e2e on solana-test-validator), app 90 unit + e2e + ui-review + review e2e.
+           Program now emits every event with emit_cpi! (978 KB, rent ~4.97 SOL; open ~182k CU, open+SL ~308k CU).
+           Review fixes of note: CRITICAL log-truncation attack (a trader could pad a tx with memos so props_vault's
+           emit! logs were cut at 10,000 bytes, stalling the indexer for everyone) -> events as self-CPI; false breach
+           from two-slot account reads -> one getMultipleAccounts at one slot; payout hedge check beaten by a $1 stub ->
+           exposure-based linking; job double-send after one RPC error; sim: TP/SL placed with an increase shrank
+           protection, 100% close left residuals, pre-open borrow/funding charged, O(accounts) rules loop; app: open+TP+SL
+           over 400k CU (now simulate and sign with used × 1.2), transient RPC errors shown as failed payments (now
+           'uncertain' and followed), slippage dialog bypass, checkout fee from API not the onchain tier.
+
+Round-2 learnings (non-obvious):
+- Solana keeps only the first 10,000 bytes of a tx's logs; Anchor emit! events can be pushed out by padding instructions
+  while the tx succeeds. emit_cpi! (inner instruction via the ["__event_authority"] PDA) cannot be truncated. A tx holds
+  at most 64 instructions including CPIs.
+- GMTrade subsquid TradeEvents carry no tx signature: instructionRelations(innerId_in) returns txHash; orderRemoveds tells
+  executed / cancelled-by-GMTrade / owner-cancel / position cut. On decreases pnlPnl excludes price impact:
+  realized = pnl + priceImpactValue − (order + liquidation + borrowing + funding fees) × collateral min price
+  (matched a real round trip's USDC flow within $0.006).
+- Traders can pass u128::MAX as an acceptable price (overflows numeric(38,18)) -> store null.
+- Closed-market liquidation factor lives in the Market account: Closed flag + config EnableMarketClosedParams ->
+  market_closed_min_collateral_factor_for_liquidation (NVDA 10%, XAU 5%, EUR 0.4%).
+- Thin real open interest (NVDA overnight long OI $561) makes the model fail when valuing a larger simulated position:
+  add the simulated position to OI/collateral/borrowing before any model call.
+- gmsol-model PositionModel never sets increased_at/decreased_at; a stateless sim must stamp them or it charges pre-open
+  borrow/funding.
+- Anyone can send lamports to a closed GMTrade Position/Order address: only trust accounts GMTrade owns.
+- solana-test-validator cannot write accounts at runtime: place fill-state Position accounts at genesis.
+- A 'processed' signature status means the tx is in a block: never re-plan on 'confirmed' state after that.
+- Anchor 0.31 BorshAccountsCoder.encode uses a fixed 1,000-byte buffer (FundedAccount ~1.5 KB): encode via the layout.
+- NYSE 2026-2027 early closes: 2026-11-27, 2026-12-24, 2027-11-26 only; observed holidays 2026-07-03, 2027-06-18,
+  2027-07-05, 2027-12-24.
+- Telegram groups accept 20 bot messages/minute; batch + honour retry_after.
+- A failed CPI logs the throwing program first: attribute errors to the first 'failed: custom program error' line.
+2026-09-23 Build round 3 started (full-stack local rehearsal; launch runbook + ops; whole-system review).
