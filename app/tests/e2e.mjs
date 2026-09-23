@@ -1,4 +1,5 @@
-// Browser check of the production build (npm run test:e2e) against the test stub API + RPC (tests/stub.mjs).
+// Browser check of the production build (npm run test:e2e) against the test stub API + RPC (tests/stub.mjs), served with the
+// Content-Security-Policy the Vercel middleware sends, so a console error from anything the policy blocks fails the check.
 // 1. Renders every route at 1920x1080 and 390x844, signed in, in both themes (and signed out once), and fails on console
 //    errors, horizontal overflow or missing landmarks.
 // 2. Drives wallet connect + Sign-In With Solana, account switch, expiry, rejection, disconnect, wrong network, no wallet.
@@ -13,6 +14,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { build, preview } from 'vite';
+import { contentSecurityPolicy } from '../middleware.js';
 import { MAINNET_GENESIS, PROGRAM_ID, startStub } from './stub.mjs';
 import { exposeSigner, installTestWallet, testKeys } from './wallet.mjs';
 
@@ -32,7 +34,8 @@ const short = address => `${address.slice(0, 4)}…${address.slice(-4)}`;
 // ---------- build + serve the app against the stub ----------
 Object.assign(process.env, { VITE_API_URL: stub.url, VITE_RPC_URL: `${stub.url}/rpc`, VITE_CLUSTER: 'mainnet-beta', VITE_PROGRAM_ID: PROGRAM_ID });
 await build({ root: appDir, logLevel: 'error', build: { outDir, emptyOutDir: true } });
-const site = await preview({ root: appDir, logLevel: 'error', build: { outDir }, preview: { host: '127.0.0.1', port: 4198 } });
+const csp = contentSecurityPolicy(process.env);
+const site = await preview({ root: appDir, logLevel: 'error', build: { outDir }, preview: { host: '127.0.0.1', port: 4198, headers: { 'content-security-policy': csp } } });
 const siteUrl = site.resolvedUrls.local[0].replace(/\/$/, '');
 
 // Expected console noise, all caused on purpose by the stub: anonymous /v1/me (401) and the stream outage (503).
@@ -104,6 +107,20 @@ try {
       }
       await context.close();
     }
+
+  await check('the content security policy is enforced: the app runs under it and anything else is blocked', async () => {
+    const page = await browser.newPage();
+    const response = await page.goto(`${siteUrl}/#/markets`);
+    assert.equal(response.headers()['content-security-policy'], csp);
+    await page.locator('#main > *').first().waitFor();
+    const blocked = await page.evaluate(async () => {
+      const violation = new Promise(resolve => document.addEventListener('securitypolicyviolation', e => resolve(`${e.effectiveDirective} ${e.blockedURI}`), { once: true }));
+      const fetched = await fetch('https://example.com/').then(() => 'fetched', () => 'refused');
+      return [fetched, await violation];
+    });
+    assert.deepEqual(blocked, ['refused', 'connect-src https://example.com/']);
+    await page.close();
+  });
 
   await check('production build has no screen index', async () => {
     const page = await browser.newPage();

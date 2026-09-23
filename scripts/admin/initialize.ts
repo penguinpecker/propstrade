@@ -17,5 +17,5 @@ main(async () => {
     // as the vault grows; it bounds what a compromised server key or database can put at risk.
     maxDailyPrincipal: new BN(toMicro('2500').toString()),
   };
-  await submit(ctx, 'initialize', [await ctx.vault.initialize({ admin: ctx.operator.publicKey, params })]);
+  await submit(ctx, 'initialize', [await ctx.vault.initialize({ admin: ctx.admin, params })]);
 });
