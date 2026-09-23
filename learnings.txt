@@ -529,3 +529,41 @@ rules pinned at purchase, payout only when flat from realized USDC, equity from 
 2026-09-23 Interface imported into app/ (source: /Users/pp/Props.trade-interface, 22 screens, synthetic data only).
            Spec docs/ARCHITECTURE.md + contract packages/shared/src/api.ts written. Build round 1 started
            (program + tests + sdk; GMTrade data + WASM model + marketdata; server core; app foundation).
+2026-09-23 Build round 1 done and merged (commit 00dec9f + 197c1bb). All suites green on the merged tree:
+           program LiteSVM 55/55 (real mainnet GMTrade binary), validator smoke 1/1, layout 3/3, SDK 7/7, data 34/34 (live),
+           server 57 + module 5, app 48 unit + all e2e checks.
+           Security review of the program found and fixed: trader-chosen order nonces could be reused to hide a filled
+           position (HIGH; nonces now come from FundedAccount.order_seq), cancel_order accepted filled orders, update_order
+           re-priced increases while paused/restricted, initialize could be front-run by pre-creating the capital-vault ATA,
+           absent position accounts counted as flat, USDC could be stranded in finished-but-open orders, dust orders.
+           Server review fixed: HEAD /v1/stream leaked hub subscribers, postgres-js recycled the leader-lock connection every
+           30-60 min (two leaders), SSE caps, cookie now __Host-props_session, US territories in the KYC block.
+           Data review fixed: price subscription never renewed after the keeper ends it; the model skipped GMTrade's
+           update_fees_state before each action (fees under-charged by elapsed × rate × size) -> now 28/28 real fills exact.
+           Program build uses opt-level "s": 899 KB (rent ~4.57 SOL); opt-level "z" corrupts the SBF stack at runtime.
+
+Round-1 learnings (non-obvious):
+- GMTrade keeper API markets{data slot} returns raw Market accounts (no RPC needed); FX pairs quoted vs USD are named
+  USDJPY/USDCAD/USDCHF/USDMXN; token metadata has tickers only (curated names needed); categories Layer1&2, Meme, DeFi,
+  Other, Forex, Commodity, Stock. SOL index token is So1Zu7vPQQxrguzUehKAyVLpjcc769zxgBuDAsxTUMH (not wSOL).
+- Candle service: prices USD × 1e18 for every token; any resolution works natively; bound ranges (a 60 s query from 0
+  timed out). Closed buckets keep being revised for a few seconds -> cache long only after ~1 min.
+- Subsquid ids are chain-ordered (order by id_DESC is fast; slot_DESC takes 20-30 s). TradeEvents carry full before/after
+  Position state; MarketStateUpdated carries post-change pool values -> exact historical fill reconstruction is possible.
+- Real GMTrade order fees are discounted per owner (ratios 0.855-1.0: referral + GT rank).
+- keeper meta.precision is an upper bound (stocks report 6 dp, carry cents).
+- GMTrade Order account: header 520 bytes after discriminator; initial-collateral escrow at 592, final-output escrow at
+  656, params.kind at 2104, state byte 9 (0 pending, 1 completed, 2 cancelled). update_order_v2 on a non-pending order
+  fails PreconditionsAreNotMet. create_order_v2 accepts a pre-funded order PDA. min_position_size_usd = $1.
+- Market flags byte 10: bit0 enabled, bit1 single-token (pure) pool, bit4 GT, bit5 closed. 55 enabled pure USDC-USDC
+  markets on 2026-09-23 (30 crypto, 8 FX, 6 commodities, 11 stocks/ETFs).
+- litesvm npm 0.8.0 is the last release on @solana/web3.js 1.x; it runs the mainnet GMTrade binary; LastRestartSlot is 0.
+- Anchor 0.31 try_accounts with several ATA constraints can exceed the 4 KB SBF stack (ApprovePayout hit 4,224 B).
+- Node ESM: import BN from 'bn.js', not from '@coral-xyz/anchor'. Node 22 runs .ts natively (node --test x.test.ts).
+- Browser: api.mainnet-beta.solana.com returns 403 to any request with an Origin header -> a provider RPC is mandatory
+  in the app. web3.js 1.99 sends a 'solana-client' header (RPC CORS must allow it).
+- @fastify/cors with a string origin echoes it to everyone (use an array). Fastify auto-HEAD drains but never destroys a
+  stream body (tie cleanup to finished(reply.raw)). postgres-js max_lifetime defaults to 30-60 min (breaks session
+  advisory locks; set null). postgres-js sql.reserve() crashes after pg_terminate_backend.
+- The API must be same-site with the app (api.props.trade) for the SameSite=Lax session cookie.
+2026-09-23 Build round 2 started (sim engine; chain indexer + funded/payout/verify/vault APIs + keeper; full app wiring).
