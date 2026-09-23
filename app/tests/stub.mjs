@@ -50,21 +50,22 @@ const overBudget = limit => ({ err: { InstructionError: [1, 'ComputationalBudget
 
 // ---------- markets ----------
 const MARKETS = [
-  ['BTC', 'Bitcoin', 'Crypto', 64482, 2, 8, 142_600_000, 2.48],
-  ['ETH', 'Ethereum', 'Crypto', 2641.82, 2, 8, 86_400_000, 1.86],
-  ['SOL', 'Solana', 'Crypto', 151.84, 2, 9, 42_800_000, 4.12],
-  ['TAO', 'Bittensor', 'Crypto', 312.4, 2, 9, 3_100_000, -3.4],
-  ['FARTCOIN', 'Fartcoin', 'Crypto', 0.8123, 4, 6, 1_900_000, 7.8],
-  ['XAU', 'Gold', 'Commodities', 2674.3, 2, 8, 18_200_000, 0.64],
-  ['EUR', 'Euro / US Dollar', 'Forex', 1.11482, 5, 8, 9_600_000, -0.12],
-  ['USDJPY', 'US Dollar / Japanese Yen', 'Forex', 147.214, 3, 8, 7_200_000, 0.21],
-  ['NVDA', 'NVIDIA', 'Stocks', 124.92, 2, 8, 12_400_000, 3.28],
+  ['BTC', 'Bitcoin', 'Crypto', 'Layer 1 & 2', 64482, 2, 8, 142_600_000, 2.48],
+  ['ETH', 'Ethereum', 'Crypto', 'Layer 1 & 2', 2641.82, 2, 8, 86_400_000, 1.86],
+  ['SOL', 'Solana', 'Crypto', 'Layer 1 & 2', 151.84, 2, 9, 42_800_000, 4.12],
+  ['TAO', 'Bittensor', 'Crypto', 'Other', 312.4, 2, 9, 3_100_000, -3.4],
+  ['FARTCOIN', 'Fartcoin', 'Crypto', 'Meme', 0.8123, 4, 6, 1_900_000, 7.8],
+  ['XAU', 'Gold', 'Commodities', 'Metals', 2674.3, 2, 8, 18_200_000, 0.64],
+  ['EUR', 'Euro / US Dollar', 'Forex', 'Majors', 1.11482, 5, 8, 9_600_000, -0.12],
+  ['USDJPY', 'US Dollar / Japanese Yen', 'Forex', 'Majors', 147.214, 3, 8, 7_200_000, 0.21],
+  ['NVDA', 'NVIDIA', 'Stocks', 'Companies', 124.92, 2, 8, 12_400_000, 3.28],
+  ['SPY', 'SPDR S&P 500 ETF', 'Stocks', 'Index ETFs', 773.61, 2, 8, 4_300_000, 0.42],
 ];
-export function market([symbol, name, category, price, priceDecimals, indexTokenDecimals, volume, change], now = Date.now()) {
+export function market([symbol, name, category, subcategory, price, priceDecimals, indexTokenDecimals, volume, change], now = Date.now()) {
   const marketToken = fakeKey(`market:${symbol}`);
   const pure = symbol !== 'FARTCOIN';
   return {
-    symbol, pair: symbol === 'USDJPY' ? 'USD / JPY' : `${symbol} / USD`, name, category, marketToken,
+    symbol, pair: symbol === 'USDJPY' ? 'USD / JPY' : `${symbol} / USD`, name, category, subcategory, marketToken,
     pools: [{ marketToken, name: `${symbol}/USD[${pure ? 'USDC-USDC' : 'WSOL-USDC'}]`, pure, longToken: pure ? USDC_MINT.toBase58() : fakeKey('wsol'), shortToken: USDC_MINT.toBase58() }],
     tradable: pure, ...(pure ? {} : { unavailableReason: 'Not available for funded trading: GMTrade has no USDC-only pool for this market' }),
     price: price.toFixed(priceDecimals), priceDecimals, indexTokenDecimals, change24h: change, volume24h: String(volume),

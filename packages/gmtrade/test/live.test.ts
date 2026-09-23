@@ -59,6 +59,20 @@ test('live catalog: every GMTrade asset becomes a valid Market row (68 assets / 
       const r = rows.find((x) => x.symbol === s);
       assert.ok(r?.pools.find((p) => p.marketToken === r.marketToken)?.pure, `${s} trades on a pure pool`);
     }
+    // Crypto groups come from GMTrade; the curated groups must cover every live listing (else it shows under 'Other').
+    const bySubcategory: Record<string, number> = {};
+    for (const r of rows) {
+      const key = `${r.category} › ${r.subcategory}`;
+      bySubcategory[key] = (bySubcategory[key] ?? 0) + 1;
+    }
+    console.log('sub-categories:', bySubcategory);
+    assert.ok(rows.every((r) => r.subcategory.length > 0));
+    const uncurated = rows.filter((r) => r.category !== 'Crypto' && r.subcategory === 'Other').map((r) => r.symbol);
+    assert.deepEqual(uncurated, [], `add ${uncurated.join(', ')} to GROUPS in src/metadata.ts`);
+    // categoryOf and subcategoryOf read a listing without a GMTrade category as Crypto › Other, whatever the asset is.
+    const listed = new Set(rows.map((r) => r.symbol));
+    const uncategorised = [...feed.tokens.values()].filter((t) => t.meta && listed.has(t.meta.name) && !t.meta.category).map((t) => t.meta!.name);
+    assert.deepEqual(uncategorised, [], `GMTrade lists ${uncategorised.join(', ')} without a category, so it shows as Crypto › Other`);
     const unnamed = rows.filter((r) => !(r.symbol in NAMES)).map((r) => r.symbol);
     if (unnamed.length) console.log('new listings without a curated name:', unnamed.join(', '));
   } finally {

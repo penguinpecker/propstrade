@@ -6,7 +6,7 @@ import { storeIdl, MarketFlag } from './accounts.ts';
 import { NO_ACCOUNT, STALE_AFTER_MS, USDC_MINT } from './constants.ts';
 import type { KeeperFeed, KeeperMarket, KeeperPrice, KeeperToken } from './keeper.ts';
 import type { Pair } from './marketInfo.ts';
-import { NAMES, SESSION_NOTES, categoryOf, displayDecimals, pairOf } from './metadata.ts';
+import { NAMES, SESSION_NOTES, categoryOf, displayDecimals, pairOf, subcategoryOf } from './metadata.ts';
 import { USD_DECIMALS, USD_UNIT, priceDecimals, priceString, toNumber, usdString } from './units.ts';
 
 export type FeedState = Pick<KeeperFeed, 'tokens' | 'markets' | 'accounts' | 'mode'>;
@@ -153,6 +153,7 @@ export function buildCatalog({ feed, pairs, opens24h, limits, onError, now }: Ca
       pair: pairOf(symbol, token.meta.indexName),
       name: NAMES[symbol] ?? token.meta.uiName ?? symbol,
       category,
+      subcategory: subcategoryOf(symbol, category, token.meta.category),
       marketToken: preferred.marketToken,
       pools: pools.map((p) => ({
         marketToken: p.marketToken, name: p.meta!.name, pure: p.meta!.isPure, longToken: p.meta!.longToken.pubkey, shortToken: p.meta!.shortToken.pubkey,

@@ -1,8 +1,8 @@
-import React, { createContext, lazy, Suspense, useContext, useEffect, useState, useCallback } from 'react';
+import React, { createContext, lazy, Suspense, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { ArrowRight, ArrowUpRight, Bell, BookOpen, Check, ChevronDown, ExternalLink, HelpCircle, LayoutGrid, Menu, Moon, Search, ShieldCheck, Sun, Wallet, X } from 'lucide-react';
-import { dateTime, explorerAddress, explorerTx, freshnessLabel, isCurrent, marketPrice, percent, shortAddress, stageRestriction, tierRules, usd } from './data.js';
-import { Badge, Brand, Button, DataRow, Dialog, Empty, FreshnessBadge, IconButton, InlineLink, MarketIcon, Notice, Pending, RuleList, SessionNotice, Unavailable, WalletOptions } from './ui.jsx';
+import { MARKET_TABS, dateTime, explorerAddress, explorerTx, freshnessLabel, isCurrent, marketPrice, percent, pickMarkets, shortAddress, stageRestriction, tierRules, usd } from './data.js';
+import { Badge, Brand, Button, DataRow, Dialog, Empty, FreshnessBadge, IconButton, InlineLink, MarketIcon, Notice, Pending, RuleList, SessionNotice, Tabs, Unavailable, WalletOptions } from './ui.jsx';
 import Trading from './Trading.jsx';
 import { AccountsPage, AccountPage, PerformancePage, ActivityPage, MarketsPage } from './Workspace.jsx';
 import { FundingPage, ProgramPage, ConnectPage, CheckoutPage, PaymentPage, ResultPage, ActivationPage } from './Onboarding.jsx';
@@ -46,7 +46,6 @@ export default function App() {
   const setTheme = next => setPrefs(prev => ({ ...prev, theme: next }));
   const [modal, setModal] = useState(null);
   const [toast, setToast] = useState(null);
-  const [search, setSearch] = useState('');
   const [mobileNav, setMobileNav] = useState(false);
   const showsNotification = n => n.kind === 'account' || prefs[NOTIFICATION_PREFS[n.kind]] !== false;
   const notify = useCallback((message, detail = '') => setToast({ message, detail, key: Date.now() }), []);
@@ -61,7 +60,7 @@ export default function App() {
   const accountsQuery = useAccounts(signedIn);
   const notificationsQuery = useNotifications(signedIn);
   const accounts = signedIn ? accountsQuery.data ?? [] : [];
-  const closeModal = useCallback(() => { setModal(null); setSearch(''); }, []);
+  const closeModal = useCallback(() => setModal(null), []);
   const navigate = useCallback((to) => { location.hash = to; setModal(null); setMobileNav(false); window.scrollTo(0, 0); }, []);
   useEffect(() => { const handler = () => setRoute(parseHash()); window.addEventListener('hashchange', handler); return () => window.removeEventListener('hashchange', handler); }, []);
   const routeId = ACCOUNT_PAGE.test(path) ? query.get('id') : null;
@@ -108,7 +107,6 @@ export default function App() {
   else if (path === '/settings') page = <SettingsPage />;
   else if (ScreenIndex && path === '/screens') page = <Suspense fallback={null}><ScreenIndex /></Suspense>;
   else page = <div className="page"><h1>This page has moved.</h1><Button onClick={() => navigate(`/trade/${stage}`)}>Open workspace</Button></div>;
-  const pickerRows = markets.filter(m => `${m.symbol} ${m.pair} ${m.name} ${m.category}`.toLowerCase().includes(search.toLowerCase()));
   const unread = (notificationsQuery.data ?? []).filter(n => !n.read && showsNotification(n)).length;
   const bellLabel = unread ? `Notifications, ${unread} unread` : 'Notifications';
 
@@ -119,7 +117,7 @@ export default function App() {
     <footer className="app-footer"><div><span className={`connection-dot ${live ? '' : 'offline'}`} /><span role="status">{STREAM_LABELS[streamStatus]}</span></div><div>{ScreenIndex && <a href="#/screens"><LayoutGrid size={12} /> Screen index</a>}<button onClick={() => setModal('rules')}>Rules</button><button onClick={() => setModal('help')}><HelpCircle size={13} /> Help</button><span className="network-label">{NETWORK_LABEL} <span className="solana-lines" aria-hidden="true"><i /><i /><i /></span></span></div></footer>
   </div>
   {toast && <div className="toast" role="status" key={toast.key}><span className="toast-check"><Check size={16} /></span><div><strong>{toast.message}</strong>{toast.detail && <p>{toast.detail}</p>}</div><IconButton icon={X} label="Dismiss notification" onClick={() => setToast(null)} /></div>}
-  {modal === 'markets' && <Dialog title="Find a market" onClose={closeModal}><div className="search-field"><Search size={17} /><input autoFocus placeholder="Search markets, symbols or asset classes" aria-label="Search markets" value={search} onChange={e => setSearch(e.target.value)} /><kbd>ESC</kbd></div><div className="market-picker-list">{marketsQuery.isPending ? <Pending>Loading GMTrade markets…</Pending> : marketsQuery.isError ? <Unavailable title="Markets are unavailable" error={marketsQuery.error} retry={marketsQuery.refetch} /> : pickerRows.map(m => <button key={m.symbol} onClick={() => selectMarket(m.symbol)}><MarketIcon market={m} /><span><strong>{m.pair}</strong><small>{m.name} · {stageRestriction(m, stage, config.data?.usdcMint)?.label ?? 'Perpetual'}</small></span><span className="picker-price"><strong>{marketPrice(m.price, m)}</strong>{freshnessLabel(m) ? <FreshnessBadge market={m} /> : <small className={m.change24h > 0 ? 'positive' : 'negative'}>{percent(m.change24h)}</small>}</span><ArrowUpRight size={15} /></button>)}{marketsQuery.isSuccess && !pickerRows.length && <div className="empty"><h3>No matching market</h3><p>Try a symbol such as BTC or an asset class.</p></div>}</div><p className="dialog-note">{markets.length ? `${markets.length} GMTrade perpetual markets. Prices update live.` : 'Markets come from GMTrade.'}</p></Dialog>}
+  {modal === 'markets' && <MarketPicker onClose={closeModal} />}
   {modal === 'accounts' && <AccountSwitcher onClose={closeModal} />}
   {modal === 'wallet' && <WalletDialog session={session} onClose={closeModal} navigate={navigate} notify={notify} />}
   {modal === 'rules' && <RulesDialog onClose={closeModal} />}
@@ -127,6 +125,27 @@ export default function App() {
   {modal === 'help' && <Dialog title="A little help, right here" onClose={closeModal}><div className="help-links"><button onClick={() => setModal('rules')}><BookOpen size={20} /><span><strong>Understand your rules</strong><small>Targets, drawdown and payout eligibility.</small></span><ArrowRight size={16} /></button><button onClick={() => navigate('/verify')}><ShieldCheck size={20} /><span><strong>Follow the evidence</strong><small>Account, trade and payout records.</small></span><ArrowRight size={16} /></button><a href="https://docs.gmtrade.xyz/about/trading/" target="_blank" rel="noreferrer"><ExternalLink size={20} /><span><strong>GMTrade documentation</strong><small>How the execution venue fills funded trades.</small></span><ArrowUpRight size={16} /></a></div><div className="shortcut-row"><span>Find a market</span><kbd>⌘ / Ctrl K</kbd></div><div className="shortcut-row"><span>Close a dialog</span><kbd>Esc</kbd></div></Dialog>}
   {modal?.type === 'record' && <RecordDialog record={modal.record} onClose={closeModal} />}
   </AppContext.Provider>;
+}
+
+/** "Find a market": category tabs (the last one used is remembered), sub-category chips and a search within them. */
+function MarketPicker({ onClose }) {
+  const { markets, marketsQuery, favorites, selectMarket, stage, config } = useApp();
+  const [savedTab, setTab] = useSaved('marketTab', 'All');
+  const tab = MARKET_TABS.includes(savedTab) ? savedTab : 'All';
+  const [chosen, setSubcategory] = useState(null);
+  const [search, setSearch] = useState('');
+  const input = useRef(null);
+  const list = useRef(null);
+  // The dialog opens after mount and focuses its first control (Close): focus the search instead, and bring a remembered
+  // tab into view where the tabs scroll (phones).
+  useEffect(() => { input.current.focus(); input.current.closest('dialog').querySelector('.picker-tabs [aria-selected="true"]').scrollIntoView({ block: 'nearest', inline: 'nearest' }); }, []);
+  const { rows, counts, subcategory, subcategories, matchesAnywhere } = pickMarkets(markets, favorites, { tab, subcategory: chosen, search });
+  // Every new selection starts at its first market, not at the scroll position of the last one.
+  useEffect(() => { list.current.scrollTop = 0; }, [tab, subcategory, search]);
+  const loaded = marketsQuery.isSuccess;
+  const chooseTab = next => { setTab(next); setSubcategory(null); };
+  const where = subcategory ? `${tab} › ${subcategory}` : tab === 'Watchlist' ? 'your watchlist' : tab;
+  return <Dialog title="Find a market" className="market-picker" onClose={onClose}><div className="search-field"><Search size={17} /><input ref={input} placeholder="Search markets, symbols or asset classes" aria-label="Search markets" value={search} onChange={e => setSearch(e.target.value)} /><kbd>ESC</kbd></div><Tabs className="picker-tabs" items={MARKET_TABS.map(t => ({ value: t, label: <>{t}{loaded && <span className="quiet">{counts[t]}</span>}</> }))} value={tab} onChange={chooseTab} />{loaded && subcategories.length > 0 && <div className="period-control picker-groups" role="group" aria-label={`${tab} sub-categories`}>{[[null, `All ${tab}`, counts[tab]], ...subcategories.map(([name, size]) => [name, name, size])].map(([value, label, size]) => <button key={label} aria-pressed={subcategory === value} className={subcategory === value ? 'active' : ''} onClick={() => setSubcategory(value)}>{label} <span className="quiet">{size}</span></button>)}</div>}<div className="market-picker-list" ref={list}>{marketsQuery.isPending ? <Pending>Loading GMTrade markets…</Pending> : marketsQuery.isError ? <Unavailable title="Markets are unavailable" error={marketsQuery.error} retry={marketsQuery.refetch} /> : rows.map(m => <button key={m.symbol} onClick={() => selectMarket(m.symbol)}><MarketIcon market={m} /><span><strong>{m.pair}</strong><small>{m.name} · {stageRestriction(m, stage, config.data?.usdcMint)?.label ?? 'Perpetual'}</small></span><span className="picker-price"><strong>{marketPrice(m.price, m)}</strong>{freshnessLabel(m) ? <FreshnessBadge market={m} /> : <small className={m.change24h > 0 ? 'positive' : 'negative'}>{percent(m.change24h)}</small>}</span><ArrowUpRight size={15} /></button>)}<div role="status">{loaded && !rows.length && (search && matchesAnywhere ? <Empty title={`No match in ${where}`} action={<Button variant="secondary" small onClick={() => { chooseTab('All'); input.current.focus(); }}>Search all markets</Button>}>“{search}” matches {matchesAnywhere} {matchesAnywhere === 1 ? 'market' : 'markets'} elsewhere.</Empty> : tab === 'Watchlist' && !search ? <Empty title="Your watchlist is empty">Star a market on the Markets page to add it here.</Empty> : <Empty title="No matching market">Try a symbol such as BTC or an asset class.</Empty>)}</div></div><p className="dialog-note">{markets.length ? `${markets.length} GMTrade perpetual markets. Prices update live.` : 'Markets come from GMTrade.'}</p></Dialog>;
 }
 
 function AccountSwitcher({ onClose }) {

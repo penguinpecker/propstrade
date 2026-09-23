@@ -40,6 +40,10 @@ export interface Market {
   pair: string;                // display pair, e.g. "BTC / USD", "USD / JPY"
   name: string;                // "Bitcoin", "Euro / US Dollar", "NVIDIA"
   category: MarketCategory;
+  // Group within the category: GMTrade's own token category for crypto ("Layer 1 & 2", "DeFi", "Meme", "Other"; a
+  // category GMTrade adds later keeps its GMTrade name), curated by symbol for the rest ("Metals", "Energy", "Majors",
+  // "Emerging", "Index ETFs", "Companies"); "Other" for a symbol the curated table does not know yet.
+  subcategory: string;
   marketToken: Pubkey;         // GMTrade market token of the preferred pool (pure USDC-USDC when available)
   pools: { marketToken: Pubkey; name: string; pure: boolean; longToken: Pubkey; shortToken: Pubkey }[];
   tradable: boolean;           // on the Props allowlist (MarketConfig.enabled) AND pure USDC-USDC

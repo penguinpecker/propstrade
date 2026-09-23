@@ -278,6 +278,107 @@ try {
       await rows.getByText('Closed').waitFor(); // NVDA outside its session
     });
 
+    await check('market picker: category tabs, sub-category chips, search within them, the way out of an empty selection', async () => {
+      await page.goto(`${siteUrl}/#/trade/funded`);
+      await page.locator('.order-panel').waitFor();
+      await page.keyboard.press('Control+k');
+      const dialog = page.getByRole('dialog', { name: 'Find a market' });
+      const search = dialog.getByLabel('Search markets');
+      const rows = dialog.locator('.market-picker-list > button');
+      const pairs = () => rows.locator('strong').filter({ hasText: '/' }).allInnerTexts();
+      const tab = name => dialog.getByRole('tab', { name: new RegExp(`^${name}`) });
+      const chips = dialog.getByRole('group', { name: /sub-categories$/ }).getByRole('button');
+      const focused = () => page.evaluate(() => document.activeElement.getAttribute('aria-label') ?? document.activeElement.textContent);
+      await rows.first().waitFor();
+      assert.equal(await focused(), 'Search markets', '⌘K focuses the search field');
+      assert.equal(await tab('All').getAttribute('aria-selected'), 'true');
+      assert.equal(await rows.count(), state.markets.length);
+      assert.deepEqual(await Promise.all(['All', 'Crypto', 'Commodities', 'Forex', 'Stocks'].map(t => tab(t).locator('.quiet').innerText())), ['10', '5', '1', '2', '2']);
+      assert.equal(await chips.count(), 0, 'All has no sub-categories');
+      await tab('Crypto').click();
+      assert.deepEqual([await tab('Crypto').getAttribute('aria-selected'), await tab('All').getAttribute('aria-selected')], ['true', 'false']);
+      assert.deepEqual(await chips.allTextContents(), ['All Crypto 5', 'Layer 1 & 2 3', 'Meme 1', 'Other 1']);
+      assert.equal(await chips.first().getAttribute('aria-pressed'), 'true');
+      await search.fill('coin');
+      assert.deepEqual(await pairs(), ['BTC / USD', 'FARTCOIN / USD']);
+      await chips.filter({ hasText: 'Meme' }).click();
+      assert.deepEqual([await chips.filter({ hasText: 'Meme' }).getAttribute('aria-pressed'), await chips.first().getAttribute('aria-pressed')], ['true', 'false']);
+      assert.deepEqual(await pairs(), ['FARTCOIN / USD']);
+      // Keyboard only: the tabs are one Tab stop (the selected tab) where the arrow keys, Home and End select; Tab then
+      // reaches the chips and Space presses one. Focus stays on what was operated.
+      await search.fill('');
+      await page.keyboard.press('Tab');
+      assert.match(await focused(), /^Crypto/);
+      await page.keyboard.press('End');
+      await page.keyboard.press('ArrowRight');
+      assert.match(await focused(), /^All/, 'the arrow keys wrap');
+      await page.keyboard.press('ArrowLeft');
+      assert.equal(await tab('Stocks').getAttribute('aria-selected'), 'true');
+      assert.match(await focused(), /^Stocks/);
+      assert.deepEqual(await chips.allTextContents(), ['All Stocks 2', 'Companies 1', 'Index ETFs 1']);
+      for (let i = 0; i < 3; i += 1) await page.keyboard.press('Tab');
+      assert.match(await focused(), /^Index ETFs/);
+      await page.keyboard.press('Space');
+      assert.equal(await chips.filter({ hasText: 'Index ETFs' }).getAttribute('aria-pressed'), 'true');
+      assert.deepEqual(await pairs(), ['SPY / USD']);
+      // A search with no match here but matches elsewhere says so (a live region: announced while focus stays in the search),
+      // and one click searches every market.
+      await search.fill('btc');
+      await dialog.getByRole('status').getByRole('heading', { name: 'No match in Stocks › Index ETFs' }).waitFor();
+      await dialog.getByText('“btc” matches 1 market elsewhere.').waitFor();
+      await dialog.getByRole('button', { name: 'Search all markets' }).click();
+      assert.equal(await tab('All').getAttribute('aria-selected'), 'true');
+      assert.deepEqual(await pairs(), ['BTC / USD']);
+      assert.equal(await focused(), 'Search markets', 'focus returns to the search field');
+      await search.fill('nothing like this');
+      await dialog.getByRole('heading', { name: 'No matching market' }).waitFor();
+      // The last tab is remembered on reopen; the chip and the search start over.
+      await tab('Crypto').click();
+      await page.keyboard.press('Escape');
+      await dialog.waitFor({ state: 'detached' });
+      await page.keyboard.press('Control+k');
+      assert.equal(await tab('Crypto').getAttribute('aria-selected'), 'true');
+      assert.deepEqual([await chips.first().getAttribute('aria-pressed'), await search.inputValue(), await focused()], ['true', '', 'Search markets']);
+      // Phone width: the tabs scroll inside the dialog (the chips do too once they are wider), never the page.
+      await page.setViewportSize({ width: 390, height: 844 });
+      try {
+        const [pageOverflow, dialogOverflow, tabsOverflow] = await page.evaluate(() => [document.documentElement, document.querySelector('dialog'), document.querySelector('.picker-tabs')].map(el => el.scrollWidth - el.clientWidth));
+        assert.ok(pageOverflow <= 0 && dialogOverflow <= 0, `page / dialog overflow ${pageOverflow} / ${dialogOverflow}px`);
+        assert.ok(tabsOverflow > 0, 'the tabs do not scroll');
+        await tab('Stocks').click();
+        assert.deepEqual(await pairs(), ['NVDA / USD', 'SPY / USD']);
+      } finally {
+        await page.setViewportSize({ width: 1920, height: 1080 });
+      }
+      // A short window: the list gives up height so the dialog never scrolls (its title and Close stay in view), and every
+      // new selection opens at its first market. [scrollTop, list scrolls]: the list must scroll for its 0 to mean anything.
+      await page.setViewportSize({ width: 1366, height: 520 });
+      try {
+        const list = dialog.locator('.market-picker-list');
+        const position = () => list.evaluate(l => [l.scrollTop, l.scrollHeight > l.clientHeight]);
+        const toEnd = () => list.evaluate(l => { l.scrollTop = l.scrollHeight; });
+        await tab('All').click();
+        await toEnd();
+        await tab('Crypto').click();
+        assert.deepEqual(await position(), [0, true], 'a new tab opens at its top');
+        assert.equal(await page.evaluate(() => { const d = document.querySelector('dialog'); return d.scrollHeight - d.clientHeight; }), 0, 'the dialog scrolls');
+        await toEnd();
+        await chips.filter({ hasText: 'Layer 1 & 2' }).click();
+        assert.deepEqual(await position(), [0, true], 'a new chip opens at its top');
+      } finally {
+        await page.setViewportSize({ width: 1920, height: 1080 });
+      }
+      await tab('All').click();
+      await page.keyboard.press('Escape');
+      await dialog.waitFor({ state: 'detached' });
+      // Closing hands focus back to what opened the dialog.
+      await page.locator('.search-trigger').click();
+      await rows.first().waitFor();
+      await page.keyboard.press('Escape');
+      await dialog.waitFor({ state: 'detached' });
+      assert.equal(await page.evaluate(() => document.activeElement.className), 'search-trigger');
+    });
+
     await check('chart: GMTrade candles, OHLC of the last candle, and live ticks move it', async () => {
       await page.goto(`${siteUrl}/#/trade/practice`);
       await page.locator('.price-chart canvas').first().waitFor();

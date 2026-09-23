@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  PriceBook, buildCatalog, categoryOf, displayDecimals, pairOf, type CatalogInput, type FeedState, type KeeperMarket,
+  PriceBook, buildCatalog, categoryOf, displayDecimals, pairOf, subcategoryOf, type CatalogInput, type FeedState, type KeeperMarket,
   type KeeperToken, type Pair, type PropsLimits,
 } from '../src/index.ts';
 
@@ -40,7 +40,7 @@ test('one row per index asset, preferring the pure USDC pool, with model stats',
   const { SOL, NVDA } = catalog();
   assert.equal(SOL!.marketToken, '6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc');
   assert.equal(SOL!.pools.length, 2);
-  assert.deepEqual([SOL!.pair, SOL!.name, SOL!.category], ['SOL / USD', 'Solana', 'Crypto']);
+  assert.deepEqual([SOL!.pair, SOL!.name, SOL!.category, SOL!.subcategory], ['SOL / USD', 'Solana', 'Crypto', 'Layer 1 & 2']);
   assert.equal(SOL!.price, '118.13082');
   assert.equal(SOL!.priceDecimals, 5);
   assert.equal(SOL!.indexTokenDecimals, 9);
@@ -54,7 +54,7 @@ test('one row per index asset, preferring the pure USDC pool, with model stats',
   assert.deepEqual([SOL!.session, SOL!.freshness, SOL!.tradable], ['open', 'live', true]);
   assert.equal(SOL!.sessionNote, undefined);
 
-  assert.deepEqual([NVDA!.category, NVDA!.name, NVDA!.session], ['Stocks', 'NVIDIA', 'closed']);
+  assert.deepEqual([NVDA!.category, NVDA!.subcategory, NVDA!.name, NVDA!.session], ['Stocks', 'Companies', 'NVIDIA', 'closed']);
   assert.deepEqual([NVDA!.price, NVDA!.priceDecimals], ['228.82', 2]); // keeper precision 6
   assert.equal(NVDA!.sessionNote, 'US regular market hours, Mon–Fri 9:30–16:00 New York time');
   assert.equal(NVDA!.volume24h, null);
@@ -97,6 +97,15 @@ test('display metadata', () => {
   assert.equal(pairOf('NEW', null), 'NEW / USD');
   assert.deepEqual(['Commodity', 'Forex', 'Stock', 'Layer1&2', 'Meme', 'DeFi', 'Other', null].map(categoryOf),
     ['Commodities', 'Forex', 'Stocks', 'Crypto', 'Crypto', 'Crypto', 'Crypto', 'Crypto']);
+  // [symbol, Props category, GMTrade category, sub-category]: crypto keeps GMTrade's grouping, the rest is curated by symbol.
+  for (const [symbol, category, gm, sub] of [
+    ['SOL', 'Crypto', 'Layer1&2', 'Layer 1 & 2'], ['HYPE', 'Crypto', 'DeFi', 'DeFi'], ['BONK', 'Crypto', 'Meme', 'Meme'],
+    ['TAO', 'Crypto', 'Other', 'Other'], ['NEW', 'Crypto', 'AI', 'AI'], ['NEW', 'Crypto', null, 'Other'],
+    ['XAU', 'Commodities', 'Commodity', 'Metals'], ['XCU', 'Commodities', 'Commodity', 'Metals'], ['WTI', 'Commodities', 'Commodity', 'Energy'],
+    ['EUR', 'Forex', 'Forex', 'Majors'], ['USDJPY', 'Forex', 'Forex', 'Majors'], ['USDMXN', 'Forex', 'Forex', 'Emerging'],
+    ['SPY', 'Stocks', 'Stock', 'Index ETFs'], ['QQQ', 'Stocks', 'Stock', 'Index ETFs'], ['NVDA', 'Stocks', 'Stock', 'Companies'],
+    ['CORN', 'Commodities', 'Commodity', 'Other'], ['USDSEK', 'Forex', 'Forex', 'Other'], ['IWM', 'Stocks', 'Stock', 'Other'],
+  ] as const) assert.equal(subcategoryOf(symbol, category, gm), sub, `${symbol} (${gm})`);
   // [symbol, category, keeper precision, display decimals] as seen live on 2026-09-23
   for (const [symbol, category, precision, dp] of [
     ['NVDA', 'Stocks', 6, 2], ['XAU', 'Commodities', 4, 2], ['WTI', 'Commodities', 5, 2], ['XCU', 'Commodities', 6, 4],

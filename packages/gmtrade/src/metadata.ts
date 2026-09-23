@@ -1,5 +1,5 @@
 // Display metadata GMTrade's APIs lack: human names (the keeper API names only 2 of 68 assets),
-// category mapping, session notes and display decimals. Keyed by keeper token `meta.name`.
+// category and sub-category mapping, session notes and display decimals. Keyed by keeper token `meta.name`.
 import type { MarketCategory } from '@props/shared';
 
 export const NAMES: Record<string, string> = {
@@ -27,6 +27,24 @@ const CATEGORY: Record<string, MarketCategory> = { Commodity: 'Commodities', For
 
 /** GMTrade category -> Props category; every other GMTrade category (Layer1&2, Meme, DeFi, Other) is crypto. */
 export const categoryOf = (gmCategory: string | null): MarketCategory => (gmCategory && CATEGORY[gmCategory]) || 'Crypto';
+
+// Sub-categories. Crypto uses GMTrade's own token category (live on 2026-09-23: Layer1&2 17, DeFi 10, Meme 10,
+// Other 6), renamed where its spelling is not for display. The other categories are curated by symbol; a symbol missing
+// here is 'Other' (a new listing can belong to any group), and the live catalog test fails until it is added.
+const CRYPTO_GROUPS: Record<string, string> = { 'Layer1&2': 'Layer 1 & 2' };
+const GROUPS: Record<string, string> = {
+  // commodities
+  XAU: 'Metals', XAG: 'Metals', XPT: 'Metals', XPD: 'Metals', XCU: 'Metals', WTI: 'Energy',
+  // forex
+  EUR: 'Majors', GBP: 'Majors', AUD: 'Majors', NZD: 'Majors', USDJPY: 'Majors', USDCAD: 'Majors', USDCHF: 'Majors', USDMXN: 'Emerging',
+  // stocks and ETFs
+  SPY: 'Index ETFs', QQQ: 'Index ETFs', AAPL: 'Companies', AMZN: 'Companies', GOOGL: 'Companies', META: 'Companies',
+  MSFT: 'Companies', MSTR: 'Companies', NVDA: 'Companies', SPCX: 'Companies', TSLA: 'Companies',
+};
+
+/** Group of a market within its category; `gmCategory` is the keeper token's category. */
+export const subcategoryOf = (symbol: string, category: MarketCategory, gmCategory: string | null): string =>
+  category === 'Crypto' ? (gmCategory ? CRYPTO_GROUPS[gmCategory] ?? gmCategory : 'Other') : GROUPS[symbol] ?? 'Other';
 
 /** "USD/JPY" -> "USD / JPY"; falls back to "<symbol> / USD". */
 export const pairOf = (symbol: string, indexName: string | null) => (indexName ?? `${symbol}/USD`).replace('/', ' / ');
