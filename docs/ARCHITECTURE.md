@@ -488,3 +488,8 @@ Launch (round 3, `docs/runbooks/launch.md` is the go-live procedure):
   failing dry run exits 1 and prints nothing to import.
 - Identity hashes come only from `scripts/admin/identity-hash.ts`: HMAC-SHA256 under IDENTITY_SALT of one document in
   canonical form (`<ISSUER alpha-2>:<PASSPORT|ID_CARD>:<NUMBER A-Z0-9>`), so one document always gives one hash.
+
+Deployment (2026-09-23): app on Vercel (`propstrade.vercel.app`), server + Postgres 18 on Railway. With no custom domain
+yet, the app's `vercel.json` proxies `/v1/*` to the Railway service (uncached), so the API is same-origin and the
+`__Host-` session cookie flows; `TRUST_PROXY_HOPS=2`. The browser's Solana RPC is the server's allowlisted relay
+`POST /v1/rpc` (`server/src/routes/rpc.ts`), so no RPC provider key ever ships in the bundle.

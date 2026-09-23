@@ -43,6 +43,7 @@ npm run typecheck --workspace @props/server
 | Route | Auth | Notes |
 |---|---|---|
 | `GET /v1/health` | – | `{ status, db, modules }`; 503 when the database is unreachable (Railway health check) |
+| `POST /v1/rpc` | – | same-origin Solana JSON-RPC relay for the app (`VITE_RPC_URL=<app>/v1/rpc`): only the reads and sends the app, `@props/sdk` and the wallet adapter make (`getProgramAccounts` only for owner-filtered GMTrade queries), batches ≤ 10, body only forwarded to `RPC_URL`, `no-store`; keeps the provider key off the browser |
 | `POST /v1/auth/nonce` `{ wallet }` | – | returns `NonceResponse`; the message is Wallet Standard sign-in text with domain, URI, chain id, nonce, 5-minute expiry |
 | `POST /v1/auth/verify` `{ wallet, message, signature }` | – | signature base58; nonce single-use and bound to the wallet and exact message; sets the session cookie; returns `{ wallet, expiresAt }` |
 | `POST /v1/auth/logout` | cookie | deletes the session, ends its open streams, clears the cookie |

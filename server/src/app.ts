@@ -13,6 +13,7 @@ import type { Services } from './modules/types.js';
 import { type BalanceRpc, registerAccountRoutes } from './routes/account.js';
 import { createSealer } from './lib/integrity.js';
 import { registerAdminRoutes } from './routes/admin.js';
+import { registerRpcRelay } from './routes/rpc.js';
 import { registerStream, type StreamHub } from './stream.js';
 
 export interface AppDeps {
@@ -67,6 +68,7 @@ export async function buildApp(deps: AppDeps) {
   registerStream(app, deps.hub);
   registerAccountRoutes(app, { db, config, rpc: deps.rpc });
   registerAdminRoutes(app, { db, adminToken: config.ADMIN_API_TOKEN, sealer: createSealer(config.SESSION_SECRET) });
+  registerRpcRelay(app, { rpcUrl: config.RPC_URL });
 
   app.get('/v1/health', async (_req, reply) => {
     const dbOk = await sql`select 1`.then(() => true, () => false);
