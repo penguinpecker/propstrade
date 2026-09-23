@@ -79,5 +79,28 @@ export function stageRestriction(market, stage, usdcMint) {
     ? { label: 'Not available for funded trading', reason: market.unavailableReason ?? 'Not available for funded trading.' }
     : { label: 'Not available in evaluations', reason: `${market.symbol} is not available in evaluations: they trade only the markets funded accounts can.` };
 }
+/** Tabs of the market picker, in the Markets page's order. */
+export const MARKET_TABS = ['All', 'Watchlist', 'Crypto', 'Commodities', 'Forex', 'Stocks'];
+/**
+ * What the market picker shows for a tab, a sub-category of it (null = all) and a search: the matching rows, the
+ * sub-category in effect (null once the chosen one has no markets left), the size of every tab, the tab's sub-categories
+ * as [name, size] (largest first, 'Other' last; none for All and Watchlist) and how many markets match the search in any
+ * tab, so an empty selection can point to them. Rows without a sub-category (from a server that predates it) join no group.
+ */
+export function pickMarkets(markets, favorites, { tab, subcategory, search }) {
+  const inTab = t => m => t === 'All' || (t === 'Watchlist' ? favorites.includes(m.symbol) : m.category === t);
+  const matches = m => `${m.symbol} ${m.pair} ${m.name} ${m.category} ${m.subcategory ?? ''}`.toLowerCase().includes(search.toLowerCase());
+  const tabRows = markets.filter(inTab(tab));
+  const sizes = new Map();
+  if (tab !== 'All' && tab !== 'Watchlist') for (const m of tabRows) if (m.subcategory) sizes.set(m.subcategory, (sizes.get(m.subcategory) ?? 0) + 1);
+  const group = sizes.has(subcategory) ? subcategory : null;
+  return {
+    rows: tabRows.filter(m => (!group || m.subcategory === group) && matches(m)),
+    subcategory: group,
+    counts: Object.fromEntries(MARKET_TABS.map(t => [t, markets.filter(inTab(t)).length])),
+    subcategories: [...sizes].sort(([a, x], [b, y]) => (a === 'Other') - (b === 'Other') || y - x || a.localeCompare(b)),
+    matchesAnywhere: markets.filter(matches).length,
+  };
+}
 /** Label for a market price that is not live ('Stale', 'Delayed', 'Unavailable'), or null when it is live. */
 export const freshnessLabel = market => market.freshness === 'live' ? null : market.freshness[0].toUpperCase() + market.freshness.slice(1);

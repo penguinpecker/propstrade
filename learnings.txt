@@ -822,3 +822,17 @@ Privy Google wallet (2026-09-23; email first, switched to Google the same day):
   journey 10/10 PASS, and in Chrome under the production CSP: the Google option shows with its mark; from 127.0.0.1 the
   click reaches Privy's oauth/init and the refusal is shown, options re-enabled. NOT verified: a real Google sign-in ->
   wallet -> automatic sign-in -> silent transaction (needs a Google account on the live domain).
+Market picker categories (2026-09-23, branch r4-picker):
+- Market.subcategory (additive API field). Crypto uses GMTrade's own token category ("Layer1&2" shown as "Layer 1 & 2";
+  DeFi, Meme, Other; a new GMTrade category keeps its own name). Commodities/Forex/Stocks come from a hand-kept symbol
+  table in packages/gmtrade/src/metadata.ts; a missing symbol shows "Other" and the live catalog test names it.
+  Live 2026-09-23: 68 markets = Crypto 43 (L1&2 17, DeFi 10, Meme 10, Other 6), Commodities 6 (Metals 5, Energy 1),
+  Forex 8 (Majors 7, Emerging 1), Stocks 11 (Companies 9, Index ETFs 2).
+- GMTrade already has tokens for BZ and NATGAS with category null and no market: if listed before GMTrade fills the
+  category they would land in Crypto > Other. They were left out of the table on purpose.
+- The app tolerates a server without subcategory (older API during a split deploy): no chips, and search ignores it.
+- Dialog: tabs (All, Watchlist, Crypto, Commodities, Forex, Stocks) + sub-category chips; list resets to the top on
+  every tab/chip/search change; the list, not the dialog, gives up height on short windows (1366x768 fits).
+- Shared changes: every Tabs row now uses one Tab stop with arrow keys/Home/End; dialogs return focus to what opened them.
+- GMTrade's market-info API answered in ~20 s on 2026-09-23 while fetchPairs gives up at 15 s: live tests failed there,
+  not on the new checks (they pass with a longer timeout).

@@ -7,6 +7,7 @@
     "pair": "BTC / USD",
     "name": "Bitcoin",
     "category": "Crypto",
+    "subcategory": "Layer 1 & 2",
     "marketToken": "Dqq58gS1TgRMDouUbdvhhzc51XXTNHG921WLxH9X2eB8",
     "pools": [
      {
@@ -84,6 +85,7 @@
     "pair": "EUR / USD",
     "name": "Euro / US Dollar",
     "category": "Forex",
+    "subcategory": "Majors",
     "marketToken": "DLX3Aa17ebmyRp6Paxe16wn3QYtNVqdNH9AM9ZKLScfy",
     "pools": [
      {
@@ -141,6 +143,7 @@
     "pair": "NVDA / USD",
     "name": "NVIDIA",
     "category": "Stocks",
+    "subcategory": "Companies",
     "marketToken": "Gi1dxHsgnVLg1JQYqKDWsTfXD9U9GvhPJDg7Has266FL",
     "pools": [
      {
@@ -198,6 +201,7 @@
     "pair": "SOL / USD",
     "name": "Solana",
     "category": "Crypto",
+    "subcategory": "Layer 1 & 2",
     "marketToken": "6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc",
     "pools": [
      {
@@ -270,6 +274,7 @@
     "pair": "XAU / USD",
     "name": "Gold",
     "category": "Commodities",
+    "subcategory": "Metals",
     "marketToken": "HCEitzjS88T4x3EpZ14EkrcawbhnZdev48a2nQfwAi37",
     "pools": [
      {

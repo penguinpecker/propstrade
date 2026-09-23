@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useLayoutEffect, useRef } from 'react';
 import { ArrowUpRight, ArrowRight, ArrowLeft, Bitcoin, CircleDollarSign, Cpu, Euro, PoundSterling, Smartphone, Check, X, ChevronDown, Info, ExternalLink, TriangleAlert, Wallet } from 'lucide-react';
 import { bpsPercent, date, freshnessLabel, usd, utcTime } from './data.js';
 
@@ -39,14 +39,24 @@ export function DataRow({ label, value, className = '', children }) { return <di
 export function Progress({ value, tone = 'purple', label }) { return <div className={`progress ${tone}`} role="progressbar" aria-label={label} aria-valuenow={Math.round(value)} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${Math.max(0, Math.min(100, value))}%` }} /></div>; }
 export function Notice({ children, tone = 'neutral', icon: Icon = Info, role }) { return <div className={`notice ${tone}`} role={role}><Icon size={17} /><div>{children}</div></div>; }
 export function Empty({ icon: Icon, title, children, action }) { return <div className="empty">{Icon && <Icon size={26} strokeWidth={1.3} />}<h3>{title}</h3><p>{children}</p>{action}</div>; }
-export function Tabs({ items, value, onChange, className = '' }) { return <div className={`tabs ${className}`} role="tablist">{items.map(item => { const v = typeof item === 'string' ? item : item.value; return <button role="tab" aria-selected={value === v} key={v} className={value === v ? 'active' : ''} onClick={() => onChange(v)}>{typeof item === 'string' ? item : item.label}</button>; })}</div>; }
+/** One Tab stop, the selected tab; the arrow keys, Home and End move to another tab and select it (WAI-ARIA tabs). */
+export function Tabs({ items, value, onChange, className = '' }) {
+  const values = items.map(item => typeof item === 'string' ? item : item.value);
+  const onKeyDown = e => {
+    const i = values.indexOf(value), n = values.length;
+    const next = { ArrowLeft: (i - 1 + n) % n, ArrowRight: (i + 1) % n, Home: 0, End: n - 1 }[e.key];
+    if (next === undefined) return;
+    e.preventDefault(); onChange(values[next]); e.currentTarget.children[next].focus();
+  };
+  return <div className={`tabs ${className}`} role="tablist" onKeyDown={onKeyDown}>{items.map((item, i) => <button role="tab" aria-selected={value === values[i]} tabIndex={value === values[i] ? 0 : -1} key={values[i]} className={value === values[i] ? 'active' : ''} onClick={() => onChange(values[i])}>{typeof item === 'string' ? item : item.label}</button>)}</div>; }
 export function Toggle({ checked, onChange, label }) { return <button type="button" role="switch" aria-checked={checked} aria-label={label} className={`toggle ${checked ? 'checked' : ''}`} onClick={() => onChange(!checked)}><span /></button>; }
-export function Dialog({ title, children, onClose, wide = false }) {
+export function Dialog({ title, children, onClose, wide = false, className = '' }) {
   const ref = useRef(null);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
-  useEffect(() => { const node = ref.current; node.showModal(); const handler = e => { e.preventDefault(); closeRef.current(); }; node.addEventListener('cancel', handler); return () => { node.removeEventListener('cancel', handler); if (node.open) node.close(); }; }, []);
-  return <dialog ref={ref} className={`dialog ${wide ? 'wide' : ''}`} onClick={e => { if (e.target === ref.current) onClose(); }} aria-labelledby="dialog-title"><div className="dialog-head"><h2 id="dialog-title">{title}</h2><IconButton icon={X} label="Close dialog" onClick={onClose} /></div>{children}</dialog>;
+  // A layout effect closes the dialog while it is still in the page, so the browser returns focus to what opened it.
+  useLayoutEffect(() => { const node = ref.current; node.showModal(); const handler = e => { e.preventDefault(); closeRef.current(); }; node.addEventListener('cancel', handler); return () => { node.removeEventListener('cancel', handler); if (node.open) node.close(); }; }, []);
+  return <dialog ref={ref} className={`dialog ${wide ? 'wide' : ''} ${className}`} onClick={e => { if (e.target === ref.current) onClose(); }} aria-labelledby="dialog-title"><div className="dialog-head"><h2 id="dialog-title">{title}</h2><IconButton icon={X} label="Close dialog" onClick={onClose} /></div>{children}</dialog>;
 }
 /** Real series only: `points` are { ts, value } in time order; fewer than two points render nothing. */
 const hourMinute = new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
