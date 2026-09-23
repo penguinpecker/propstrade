@@ -1,6 +1,10 @@
 import { createContext, createElement, lazy, Suspense, useContext, useState, type ReactNode } from 'react';
 import type { VersionedTransaction } from '@solana/web3.js';
 
+const appId = import.meta.env.VITE_PRIVY_APP_ID || null;
+/** A build with a Privy app id signs in with Google only. Builds without one (local tests) use browser wallets. */
+export const GOOGLE_ONLY = appId !== null;
+
 /** How the app names the Privy wallet wherever it names the connected wallet. */
 export const PRIVY_WALLET = 'Google';
 /** Google's "G" mark, for the option that signs in with Google. */
@@ -25,7 +29,6 @@ const Context = createContext<PrivyWallet | null>(null);
 /** null until the Privy SDK has loaded, and always in a build without VITE_PRIVY_APP_ID (browser wallets only). */
 export const usePrivyWallet = () => useContext(Context);
 
-const appId = import.meta.env.VITE_PRIVY_APP_ID || null;
 // The Privy SDK is large, so it loads after the app has rendered. It sits beside the app, not around it, so nothing remounts.
 const Bridge = lazy(() => import('./privy-bridge'));
 

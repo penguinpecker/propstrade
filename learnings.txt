@@ -848,3 +848,26 @@ Market picker categories (2026-09-23, branch r4-picker):
              Google sign-in -> wallet -> automatic sign-in -> silent payment is still unverified.
            - Google's consent screen names auth.privy.io (Privy's shared Google client). Own branding needs the owner's
              Google OAuth client entered in the Privy dashboard.
+
+Self-healing market data + chart (2026-09-23, branch r6-robust):
+- Incident: GMTrade's candle + market-info services stalled 11:03-11:24 UTC (and again ~12:00 UTC). The server's calls
+  timed out at 15 s with no fallback: charts stayed blank and "Recent trades" spun. It recovered by itself when GMTrade
+  did. Proven not ours: a fresh process inside the Railway container (railway ssh) reached the same hosts in 0.3 s while
+  the outage ran, and every GMTrade host is the same Cloudflare IPs.
+- Now: candles/trades are served cache-first (an expired copy answers at once while one shared refresh runs); a request
+  waits at most 4 s (candles) / 5 s (trades) for GMTrade, then candles come from the last copy completed from
+  price_bars, Props.trade's own 1-minute OHLC of GMTrade's live keeper price (30 days kept, merged on conflict after a
+  restart). Background refreshes retry (3x, backoff, never overlapping); market-info waits up to 45 s.
+- Startup no longer waits for GMTrade's stats: marketdata is ready once prices flow (the allowlist still loads first).
+  Before, a GMTrade stall held every practice order until the 24h-change refresh gave up (found by the full-stack test
+  during a real outage).
+- /v1/health: `upstreams` per source (checking/ok/degraded/down, why, since, fallback in use) and eventLoopDelayMs;
+  status 'degraded' (HTTP 200) when a source is down. The log gets one line per outage and one per recovery.
+- Verified end to end with a test-only fetch preload that makes the candle service hang: charts answered in 4 s from the
+  record, health went down -> ok, logs "candles is down (no answer in time)" then "candles recovered".
+- Chart: brighter candles; opens on the latest 120 bars; drag in any direction (auto-scale off on press, back on if the
+  press did not move vertically; "Auto" or a price-axis double-click fits again); older candles load as you drag back;
+  indicators MA 20/50, EMA 20, Bollinger, RSI 14 (pane), MACD (pane), saved per browser. No volume indicators: GMTrade
+  candles carry no volume.
+- Google only: a build with VITE_PRIVY_APP_ID offers only Google (browser wallets hidden, adapter autoConnect off).
+  Builds without it (local tests, e2e) keep browser wallets, which is what every e2e drives.

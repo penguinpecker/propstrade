@@ -257,10 +257,14 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
     }
     if (ctx.signal.aborted) return feed.stop();
     started = true;
-    const initial = [refreshPairs(), refreshOpens24h(), ...(programId ? [refreshAllowlist()] : [])];
-    for (const r of await Promise.allSettled(initial)) {
-      if (r.status === 'rejected') ctx.log.warn({ err: r.reason }, 'marketdata: initial refresh failed');
-    }
+    // Ready once prices flow: 24h change and volume fill in when GMTrade's stats answer (they can take many seconds,
+    // or fail), and nothing waits for them. The allowlist, which decides what can be traded, is read first.
+    const initialFailed = (err: unknown) => ctx.log.warn({ err }, 'marketdata: initial refresh failed');
+    void Promise.allSettled([refreshPairs(), refreshOpens24h()]).then((results) => {
+      for (const r of results) if (r.status === 'rejected') initialFailed(r.reason);
+      publishChangedMarkets();
+    });
+    if (programId) await refreshAllowlist().catch(initialFailed);
     publishChangedMarkets();
     every(PRICE_FLUSH_MS, 'price publish', () => {
       if (!pendingTicks.size) return;
