@@ -3,7 +3,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  KeeperFeed, NAMES, buildCatalog, decodePosition, fetchCandles, fetchPairs, fetchTradeEvents, fetchUser, positionAddress,
+  KeeperFeed, NAMES, buildCatalog, decodePosition, fetchCandles, fetchOrderRemovals, fetchPairs, fetchTradeEvents, fetchTxSignatures,
+  fetchUser, positionAddress,
 } from '../src/index.ts';
 
 const skip = process.env.PROPS_OFFLINE === '1';
@@ -107,6 +108,19 @@ test('live subsquid + keeper: an owner\'s fills, positions and Position accounts
     }
   }
   assert.ok(checked > 0, 'no open position found among recent traders');
+});
+
+test('live subsquid: incremental fills, their transactions and why their orders were removed', { skip, timeout: 60_000 }, async () => {
+  const [newest, older] = await fetchTradeEvents({ marketTokens: [SOL_POOL] }, 2);
+  const after = await fetchTradeEvents({ marketTokens: [SOL_POOL], afterId: older!.id }, 50);
+  assert.ok(after.some((e) => e.id === newest!.id) && after.every((e) => e.id > older!.id));
+
+  const signatures = await fetchTxSignatures([newest!.id, older!.id]);
+  for (const id of [newest!.id, older!.id]) assert.match(signatures.get(id) ?? '', /^[1-9A-HJ-NP-Za-km-z]{64,88}$/);
+
+  const removals = await fetchOrderRemovals([newest!.order]);
+  assert.equal(removals.length, 1);
+  assert.deepEqual([removals[0]!.order, removals[0]!.state], [newest!.order, 'Completed']);
 });
 
 test('live market-info: one row per pool', { skip, timeout: 30_000 }, async () => {

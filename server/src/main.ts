@@ -12,12 +12,12 @@ const { sql, db } = createDb(config.DATABASE_URL);
 const hub = createStreamHub();
 const modules: ModuleStatus = new Map();
 const rpc = createConnection(config);
+const services: Services = {};
 const app = await buildApp({
-  config, db, sql, hub, modules, rpc, logger: loggerOptions(config.LOG_LEVEL),
+  config, db, sql, hub, modules, services, rpc, logger: loggerOptions(config.LOG_LEVEL),
 });
 
 const shutdown = new AbortController();
-const services: Services = {};
 await registerModules({
   app, log: app.log, env: process.env, publish: hub.publish, services, signal: shutdown.signal, config, db, sql, rpc,
   async notify(wallet, n) {

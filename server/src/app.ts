@@ -9,6 +9,7 @@ import type { Config } from './config.js';
 import type { Db, Sql } from './db/client.js';
 import { errorHandler, notFoundHandler } from './errors.js';
 import type { ModuleStatus } from './modules/index.js';
+import type { Services } from './modules/types.js';
 import { type BalanceRpc, registerAccountRoutes } from './routes/account.js';
 import { registerAdminRoutes } from './routes/admin.js';
 import { registerStream, type StreamHub } from './stream.js';
@@ -20,6 +21,8 @@ export interface AppDeps {
   rpc: BalanceRpc;
   hub: StreamHub;
   modules: ModuleStatus;
+  /** Module services, filled as modules register (health reads the keeper's status). */
+  services?: Services;
   logger: FastifyServerOptions['logger'];
 }
 
@@ -71,6 +74,7 @@ export async function buildApp(deps: AppDeps) {
       db: dbOk ? 'ok' : 'down',
       modules: Object.fromEntries(deps.modules),
       time: Date.now(),
+      keeper: deps.services?.keeper?.status(),
     });
   });
 

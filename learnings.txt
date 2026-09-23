@@ -567,3 +567,42 @@ Round-1 learnings (non-obvious):
   advisory locks; set null). postgres-js sql.reserve() crashes after pg_terminate_backend.
 - The API must be same-site with the app (api.props.trade) for the SameSite=Lax session cookie.
 2026-09-23 Build round 2 started (sim engine; chain indexer + funded/payout/verify/vault APIs + keeper; full app wiring).
+2026-09-23 Round 2 chain module: indexer + projections, funded valuation, payouts/verify/vault/config APIs, chain-job
+           executor; end to end on solana-test-validator (real GMTrade CPI, real jobs, restart backfill) in ~36 s.
+- Subsquid TradeEvent has no transaction signature: instructionRelations(innerId = TradeEvent id) → txHash. orderRemoveds
+  gives each order's end: state Completed/Cancelled/Pending + reason ("executed", "cancel", "position cut").
+- GMTrade decrease `pnl` excludes price impact: realized = pnl + priceImpactValue − (order + borrowing + funding) fees;
+  verified on a real 6-fill SOL round trip against the owner's USDC flows (±$0.006).
+- Traders may send u128::MAX as an acceptable price ("no limit"): it does not fit numeric(38,18); store null.
+- Anchor 0.31 BorshAccountsCoder.encode() writes into a fixed 1,000-byte buffer (FundedAccount is ~1.5 KB): encode with
+  the coder's layout directly in tests.
+- web3.js closes an idle RPC websocket 500 ms after the last unsubscribe; stop a local validator before that and the
+  client reconnects forever (a test process never exits).
+2026-09-23 Round 2 keeper module: sync/stop-out/session-guard/cleanup/top-up loop, payout review, GMTrade upgrade watch,
+           alerts; on solana-test-validator (top-up, cancel + risk close, sync, payout approve and hold, restrict, and a
+           send refused after the leader lock's session was killed) in ~47 s.
+- solana-test-validator cannot write accounts at runtime: a GMTrade Position "as a fill would leave it" is placed at genesis
+  (--account-dir) at its PDA (owner PDA is derivable from the trader key before the validator starts). prepare_position
+  and create_order accept it; gmsol-wasm simulateIncrease produces a valid Position image (patch owner @56, bump @9).
+- An upgradeable program's last-deploy slot: ProgramData = PDA([program], BPFLoaderUpgradeable), bytes 4..12 (u64) after
+  the u32 variant 3; read it with a 12-byte dataSlice instead of the whole binary.
+- NYSE 2026–2027 early closes (nyse.com): 2026-11-27, 2026-12-24, 2027-11-26 only (no July early close either year).
+- Check the owner on every GMTrade Position/Order address read: anyone can send lamports to a closed one, leaving a system
+  account with empty data that the venue read took for a pending order (and a Position decode threw, stalling that
+  account's refresh). Found by reading the code; fixed and covered by a venue test.
+2026-09-23 Round 2 review fixes (chain + keeper): events as self-CPIs, job retries, one-slot reads, exposure linking,
+           acknowledged GMTrade upgrades, batched Telegram alerts.
+- Solana keeps only the first 10,000 bytes of a transaction's logs (solana-log-collector LOG_MESSAGES_BYTES_LIMIT) and then
+  writes "Log truncated". 50 one-byte SPL Memo instructions (~200 bytes of transaction) push a following instruction's
+  `emit!` event past it: the transaction succeeds, the event is gone. Anchor `emit_cpi!` records the event as an inner
+  instruction (data = EVENT_IX_TAG_LE e4 45 a5 2e 51 cb 9a 1d + discriminator + borsh), which is never cut off; only a
+  CPI signed by the program's `["__event_authority"]` PDA is accepted (a direct call fails ConstraintSigner).
+- A transaction holds at most 64 instructions including every CPI (MaxInstructionTraceLengthExceeded): 60 memos + an
+  activation did not fit, 50 did. Open + TP + SL uses 40.
+- getMultipleAccounts reads every account at one slot; two calls do not. USDC GMTrade pays out as it closes an order lands in
+  the slot the order account disappears, so reading the order list and the USDC balance in separate calls can see neither
+  (an order holding the whole allowance then reads as zero equity). Pass minContextSlot on the second call.
+- A signature status of `processed` means the transaction is in a block: a new plan read at `confirmed` does not see it
+  yet, so re-planning then sends the work twice. Wait for `confirmed` (or for the status to disappear).
+- Telegram bots may post 20 messages a minute to a group (core.telegram.org/bots/faq); a 429 carries
+  `parameters.retry_after` (seconds).

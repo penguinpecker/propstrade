@@ -46,7 +46,7 @@ export const payoutStatus = pgEnum('payout_status', ['requested', 'reviewing', '
 export const ledgerDirection = pgEnum('ledger_direction', ['in', 'out', 'internal']);
 export const notificationKind = pgEnum('notification_kind', ['fill', 'risk', 'payout', 'account']);
 export const kycStatus = pgEnum('kyc_status', ['pending', 'approved', 'rejected']);
-export const chainJobKind = pgEnum('chain_job_kind', ['set_identity']);
+export const chainJobKind = pgEnum('chain_job_kind', ['set_identity', 'record_evaluation_result', 'approve_payout', 'reject_payout', 'lift_restriction']);
 export const chainJobStatus = pgEnum('chain_job_status', ['queued', 'sent', 'confirmed', 'failed']);
 
 // ---------- identity + auth ----------
@@ -232,6 +232,14 @@ export const accountEvents = pgTable('account_events', {
 
 // ---------- chain-indexed (props_vault + GMTrade) ----------
 
+/** Newest props_vault transaction the indexer has fully processed, per program id (backfill resumes after it). */
+export const indexerCursors = pgTable('indexer_cursors', {
+  program: pubkey('program').primaryKey(),
+  signature: signature('signature').notNull(),
+  slot: slot('slot').notNull(),
+  updatedAt: now('updated_at'),
+});
+
 /** Every decoded props_vault event, exactly once per (signature, event index). */
 export const programEvents = pgTable('program_events', {
   signature: signature('signature').notNull(),
@@ -328,6 +336,8 @@ export const gmPositionSnapshots = pgTable('gm_position_snapshots', {
 export const venueFills = pgTable('venue_fills', {
   signature: signature('signature').notNull(),
   eventIndex: integer('event_index').notNull(),
+  /** GMTrade indexer (subsquid) TradeEvent id; chain-ordered, so the newest id is the per-account sync cursor. */
+  venueId: text('venue_id').notNull().unique(),
   slot: slot('slot').notNull(),
   fundedAccount: pubkey('funded_account').notNull().references(() => fundedAccounts.address),
   position: pubkey('position'),
@@ -336,6 +346,8 @@ export const venueFills = pgTable('venue_fills', {
   side: side('side').notNull(),
   isIncrease: boolean('is_increase').notNull(),
   sizeUsd: usd('size_usd').notNull(),
+  /** Position size after the fill; 0 ends a round trip (closed_trades). */
+  sizeAfterUsd: usd('size_after_usd').notNull(),
   price: price('price').notNull(),
   feeUsd: usd('fee_usd').notNull(),
   priceImpactUsd: usd('price_impact_usd').notNull(),
@@ -364,6 +376,8 @@ export const payouts = pgTable('payouts', {
   paySignature: signature('pay_signature'),
   requestedAt: at('requested_at').notNull(),
   resolvedAt: at('resolved_at'),
+  /** Why the keeper held the request for manual review (status 'reviewing'); operators only, never shown to the trader. */
+  reviewNote: text('review_note'),
 }, (t) => [uniqueIndex('payouts_funded_seq_uq').on(t.fundedAccount, t.seq)]);
 
 /** Every USDC movement touching the capital vault, fee vault or funded principal. */
@@ -381,6 +395,20 @@ export const vaultLedger = pgTable('vault_ledger', {
   index('vault_ledger_ts_idx').on(t.ts),
 ]);
 
+/**
+ * GMTrade program deploys the keeper has seen (the program data's last-deploy slot). acknowledged_at is when the deploy
+ * was accepted as reviewed: GMTRADE_DEPLOY_SLOT on first sight (or, without it, the first deploy seen), else an operator
+ * through the admin API. Until then it is an upgrade: detected_at is when it was noticed, handled_at when every active
+ * funded account had been restricted because of it.
+ */
+export const gmtradeDeploys = pgTable('gmtrade_deploys', {
+  slot: slot('slot').primaryKey(),
+  detectedAt: at('detected_at'),
+  handledAt: at('handled_at'),
+  acknowledgedAt: at('acknowledged_at'),
+  createdAt: now('created_at'),
+});
+
 // ---------- notifications, KYC, operations ----------
 
 export const notifications = pgTable('notifications', {
@@ -394,18 +422,34 @@ export const notifications = pgTable('notifications', {
   readAt: at('read_at'),
 }, (t) => [index('notifications_wallet_created_idx').on(t.wallet, t.createdAt)]);
 
-/** Onchain writes the chain module must send (e.g. set_identity after a KYC approval). */
+/**
+ * Onchain writes the chain module sends with the risk / KYC authority keys. Payloads by kind:
+ *   set_identity             { wallet, identityHash (64 hex) }
+ *   record_evaluation_result { evaluation, wallet, passed, finalEquityUsd, tradesRoot (64 hex), resolvedAt }
+ *   approve_payout           { payout }
+ *   reject_payout            { payout, reasonCode }
+ *   lift_restriction         { funded }
+ * `subject` (the evaluation or payout PDA, `lift:<funded>`) makes enqueueing idempotent: one job per evaluation result
+ * and one decision per payout, whoever (keeper or admin) asks first.
+ */
 export const chainJobs = pgTable('chain_jobs', {
   id: uuid('id').primaryKey().defaultRandom(),
   kind: chainJobKind('kind').notNull(),
   payload: jsonb('payload').notNull(),
+  subject: text('subject'),
   status: chainJobStatus('status').notNull().default('queued'),
+  /** Every failed attempt (drives the retry backoff). */
   attempts: integer('attempts').notNull().default(0),
+  /** Attempts the chain itself refused (simulation or onchain failure, missing account): 10 fail the job for good. */
+  rejections: integer('rejections').notNull().default(0),
   lastError: text('last_error'),
   signature: signature('signature'),
   createdAt: now('created_at'),
   updatedAt: now('updated_at'),
-}, (t) => [index('chain_jobs_status_created_idx').on(t.status, t.createdAt)]);
+}, (t) => [
+  index('chain_jobs_status_created_idx').on(t.status, t.createdAt),
+  uniqueIndex('chain_jobs_subject_uq').on(t.subject),
+]);
 
 /**
  * Manual identity review (v1). identity_hash is the reviewer's salted hash of the person, never raw identity data;

@@ -1,0 +1,296 @@
+[
+ {
+  "id": "000449474290-DnUCQ-000059-000003-000006",
+  "ts": 1790105663000,
+  "slot": 449474290,
+  "marketToken": "6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc",
+  "user": "9g5koybL2YEYYC9JkvQLEvfio5GXhPfKJmP35mb9hcqK",
+  "position": "FaBPHp3nsrYnxephzgujkztD3vifL3WAYEkdqCczGW44",
+  "order": "2QgaN5qEZRYaJBwTRWvs6qZGFcmVrufZpdxLAThu85SE",
+  "isLong": false,
+  "isCollateralLong": true,
+  "isIncrease": true,
+  "isLiquidation": false,
+  "executionPrice": "11853212960401n",
+  "priceImpactValue": "1579506823466423786336n",
+  "before": {
+   "sizeInUsd": "0n",
+   "sizeInTokens": "0n",
+   "collateralAmount": "0n"
+  },
+  "after": {
+   "sizeInUsd": "4200000000000000251658240n",
+   "sizeInTokens": "354334306996n",
+   "collateralAmount": "763782793n"
+  },
+  "pnl": "0n",
+  "fees": {
+   "order": "3704851n",
+   "liquidation": "0n",
+   "borrowing": "0n",
+   "funding": "0n"
+  },
+  "prices": {
+   "index": {
+    "min": "11848756000000n",
+    "max": "11850653000000n"
+   },
+   "long": {
+    "min": "99987800000000n",
+    "max": "99994100000000n"
+   },
+   "short": {
+    "min": "99987800000000n",
+    "max": "99994100000000n"
+   }
+  },
+  "outputAmount": "0n",
+  "secondaryOutputAmount": "0n",
+  "signature": "2RBn33eGNYj1rKSwpJN6ymnLi2wBNH3J7zsCk2Zia8Ghkd4UM6iF7LW3Wmq9KmFdsMyFBBHByTfAkKETZAmMuGkA"
+ },
+ {
+  "id": "000449475123-JAJVR-000505-000003-000004",
+  "ts": 1790105887000,
+  "slot": 449475123,
+  "marketToken": "6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc",
+  "user": "9g5koybL2YEYYC9JkvQLEvfio5GXhPfKJmP35mb9hcqK",
+  "position": "FaBPHp3nsrYnxephzgujkztD3vifL3WAYEkdqCczGW44",
+  "order": "BeNfFgzeY9bcSQo1pnkvjUcUovMV9VW1TzGT9qmtpDAJ",
+  "isLong": false,
+  "isCollateralLong": true,
+  "isIncrease": true,
+  "isLiquidation": false,
+  "executionPrice": "11815344689902n",
+  "priceImpactValue": "22067354086296913661n",
+  "before": {
+   "sizeInUsd": "4200000000000000251658240n",
+   "sizeInTokens": "354334306996n",
+   "collateralAmount": "763782793n"
+  },
+  "after": {
+   "sizeInUsd": "5200000000000000234881024n",
+   "sizeInTokens": "438970009656n",
+   "collateralAmount": "762897708n"
+  },
+  "pnl": "0n",
+  "fees": {
+   "order": "882101n",
+   "liquidation": "0n",
+   "borrowing": "0n",
+   "funding": "2984n"
+  },
+  "prices": {
+   "index": {
+    "min": "11815084000000n",
+    "max": "11817052000000n"
+   },
+   "long": {
+    "min": "99988500000000n",
+    "max": "99995100000000n"
+   },
+   "short": {
+    "min": "99988500000000n",
+    "max": "99995100000000n"
+   }
+  },
+  "outputAmount": "0n",
+  "secondaryOutputAmount": "0n",
+  "signature": "LqhC74VEEbpeBPVTah2qz7acEUgVq97xjFMKPeQ45Hd7jQVsMvyhxZkZ3VqZKp2nhc5xHorsPYQThdWPMJNAJ6g"
+ },
+ {
+  "id": "000449522058-9ECDD-000511-000003-000004",
+  "ts": 1790118435000,
+  "slot": 449522058,
+  "marketToken": "6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc",
+  "user": "9g5koybL2YEYYC9JkvQLEvfio5GXhPfKJmP35mb9hcqK",
+  "position": "FaBPHp3nsrYnxephzgujkztD3vifL3WAYEkdqCczGW44",
+  "order": "9JyiFE385kLE5Egs14nYTaPhPbKCpDcrmxaEo91B6brq",
+  "isLong": false,
+  "isCollateralLong": true,
+  "isIncrease": true,
+  "isLiquidation": false,
+  "executionPrice": "11895805564796n",
+  "priceImpactValue": "111189843412388722642n",
+  "before": {
+   "sizeInUsd": "5200000000000000234881024n",
+   "sizeInTokens": "438970009656n",
+   "collateralAmount": "762897708n"
+  },
+  "after": {
+   "sizeInUsd": "6103000000000000262144000n",
+   "sizeInTokens": "514879118550n",
+   "collateralAmount": "757834242n"
+  },
+  "pnl": "0n",
+  "fees": {
+   "order": "796551n",
+   "liquidation": "0n",
+   "borrowing": "4060001n",
+   "funding": "206914n"
+  },
+  "prices": {
+   "index": {
+    "min": "11894341000000n",
+    "max": "11896056000000n"
+   },
+   "long": {
+    "min": "99986700000000n",
+    "max": "99994200000000n"
+   },
+   "short": {
+    "min": "99986700000000n",
+    "max": "99994200000000n"
+   }
+  },
+  "outputAmount": "0n",
+  "secondaryOutputAmount": "0n",
+  "signature": "7eZATBtXbjVHxAYjG3PMDKE1PHQNR4FPJ4fByCyaaZ3VCJBLK3SQV7VTYgY9SzZCFhwNQz8syWnPZy8shyHY1hf"
+ },
+ {
+  "id": "000449522859-FnFgb-000502-000005-000008",
+  "ts": 1790118650000,
+  "slot": 449522859,
+  "marketToken": "6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc",
+  "user": "9g5koybL2YEYYC9JkvQLEvfio5GXhPfKJmP35mb9hcqK",
+  "position": "FaBPHp3nsrYnxephzgujkztD3vifL3WAYEkdqCczGW44",
+  "order": "7xghuWx3VPyvHKQRnw9V3EKeTAuieWFCw4oL1DDM6cFq",
+  "isLong": false,
+  "isCollateralLong": true,
+  "isIncrease": false,
+  "isLiquidation": false,
+  "executionPrice": "11918054695274n",
+  "priceImpactValue": "-1283524540631097733400n",
+  "before": {
+   "sizeInUsd": "6103000000000000262144000n",
+   "sizeInTokens": "514879118550n",
+   "collateralAmount": "757834242n"
+  },
+  "after": {
+   "sizeInUsd": "3250041198730468646715392n",
+   "sizeInTokens": "274189472007n",
+   "collateralAmount": "598855234n"
+  },
+  "pnl": "-14310046285572343165311n",
+  "fees": {
+   "order": "3019952n",
+   "liquidation": "0n",
+   "borrowing": "0n",
+   "funding": "3697n"
+  },
+  "prices": {
+   "index": {
+    "min": "11910905000000n",
+    "max": "11912722000000n"
+   },
+   "long": {
+    "min": "99987400000000n",
+    "max": "99994800000000n"
+   },
+   "short": {
+    "min": "99987400000000n",
+    "max": "99994800000000n"
+   }
+  },
+  "outputAmount": "0n",
+  "secondaryOutputAmount": "0n",
+  "signature": "3oCWBvoWzVuTRh8i85noWL8j7D2fXkPBtRTjwsqKgDkah4xLAAwi1fnH9nAfB4wCfVxuscFxvkR4baCrp5aiAo7W"
+ },
+ {
+  "id": "000449523507-BjdGh-000095-000003-000008",
+  "ts": 1790118822000,
+  "slot": 449523507,
+  "marketToken": "6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc",
+  "user": "9g5koybL2YEYYC9JkvQLEvfio5GXhPfKJmP35mb9hcqK",
+  "position": "FaBPHp3nsrYnxephzgujkztD3vifL3WAYEkdqCczGW44",
+  "order": "GHCFSTB9PmqtzTFjHHsALbjjjDLKrJcgiLSQsUVFGb9N",
+  "isLong": false,
+  "isCollateralLong": true,
+  "isIncrease": true,
+  "isLiquidation": false,
+  "executionPrice": "11898288988992n",
+  "priceImpactValue": "337667827688900673390n",
+  "before": {
+   "sizeInUsd": "3250041198730468646715392n",
+   "sizeInTokens": "274189472007n",
+   "collateralAmount": "598855234n"
+  },
+  "after": {
+   "sizeInUsd": "4750041198730468621549568n",
+   "sizeInTokens": "400258018618n",
+   "collateralAmount": "597532069n"
+  },
+  "pnl": "0n",
+  "fees": {
+   "order": "1323165n",
+   "liquidation": "0n",
+   "borrowing": "0n",
+   "funding": "0n"
+  },
+  "prices": {
+   "index": {
+    "min": "11895611000000n",
+    "max": "11897642000000n"
+   },
+   "long": {
+    "min": "99987500000000n",
+    "max": "99995600000000n"
+   },
+   "short": {
+    "min": "99987500000000n",
+    "max": "99995600000000n"
+   }
+  },
+  "outputAmount": "0n",
+  "secondaryOutputAmount": "0n",
+  "signature": "3VbUZBXGb7bdaqNJ4bLkSdxHUTofn7PgVqvhVKEMnXBCn7zshmbiZFq6PcPrjHGMecqmrDqyf6uK8BRwXD4JzYpo"
+ },
+ {
+  "id": "000449550609-25wrz-000178-000005-000010",
+  "ts": 1790126020000,
+  "slot": 449550609,
+  "marketToken": "6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc",
+  "user": "9g5koybL2YEYYC9JkvQLEvfio5GXhPfKJmP35mb9hcqK",
+  "position": "FaBPHp3nsrYnxephzgujkztD3vifL3WAYEkdqCczGW44",
+  "order": "2WJ6jPn3xWhAN3fdjm3wfrporr4n1fzEWdTpShYCJ8PG",
+  "isLong": false,
+  "isCollateralLong": true,
+  "isIncrease": false,
+  "isLiquidation": false,
+  "executionPrice": "11921271667035n",
+  "priceImpactValue": "-53501302660148848441n",
+  "before": {
+   "sizeInUsd": "4750041198730468621549568n",
+   "sizeInTokens": "400258018618n",
+   "collateralAmount": "597532069n"
+  },
+  "after": {
+   "sizeInUsd": "0n",
+   "sizeInTokens": "0n",
+   "collateralAmount": "0n"
+  },
+  "pnl": "-21489876821278662450432n",
+  "fees": {
+   "order": "5028001n",
+   "liquidation": "0n",
+   "borrowing": "874644n",
+   "funding": "0n"
+  },
+  "prices": {
+   "index": {
+    "min": "11919063000000n",
+    "max": "11921138000000n"
+   },
+   "long": {
+    "min": "99988900000000n",
+    "max": "99996100000000n"
+   },
+   "short": {
+    "min": "99988900000000n",
+    "max": "99996100000000n"
+   }
+  },
+  "outputAmount": "376171726n",
+  "secondaryOutputAmount": "0n",
+  "signature": "Qv3NU1tiNcXSseAT2DHD58qrJHNFD67Dn9PUWtQfQbdJNG3NuSPHcA6ektMZRYD36JTdcnhgky8HdSHkSqN94Ut"
+ }
+]

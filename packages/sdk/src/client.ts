@@ -1,4 +1,4 @@
-import { EventParser, Program } from '@coral-xyz/anchor';
+import { Program } from '@coral-xyz/anchor';
 import type { IdlAccounts, IdlTypes } from '@coral-xyz/anchor';
 import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { PublicKey, SystemProgram } from '@solana/web3.js';
@@ -23,6 +23,7 @@ import {
   capitalVaultAddress,
   configPda,
   evaluationPda,
+  eventAuthorityPda,
   feeVaultPda,
   fundedPda,
   identityLockPda,
@@ -67,6 +68,10 @@ const bytes32 = (b: Uint8Array): number[] => {
   return Array.from(b);
 };
 const writable = (pubkey: PublicKey): AccountMeta => ({ pubkey, isSigner: false, isWritable: true });
+/** The accounts every event-emitting instruction takes for its event self-CPI. */
+const eventCpi = () => ({ eventAuthority: eventAuthorityPda(), program: PROPS_VAULT_PROGRAM_ID });
+/** Anchor's tag on the data of an event self-CPI (`EVENT_IX_TAG_LE`), ahead of the event discriminator and body. */
+const EVENT_IX_TAG = Buffer.from([0xe4, 0x45, 0xa5, 0x2e, 0x51, 0xcb, 0x9a, 0x1d]);
 const readonly = (pubkey: PublicKey): AccountMeta => ({ pubkey, isSigner: false, isWritable: false });
 
 export interface VaultEvent {
@@ -74,6 +79,12 @@ export interface VaultEvent {
   name: string;
   /** Decoded fields: u64/u128/i64 as BN, pubkeys as PublicKey. */
   data: Record<string, unknown>;
+}
+
+/** An instruction as a confirmed transaction records it: the program it invoked and its data. */
+export interface InvokedInstruction {
+  programId: PublicKey;
+  data: Uint8Array;
 }
 
 /** A funded account address with its decoded state (needed by builders that act on tracked orders). */
@@ -137,10 +148,20 @@ export class PropsVaultClient {
     return this.program.coder.accounts.decode(name, Buffer.from(data));
   }
 
-  /** props_vault events in a transaction's log messages (camelCase names and fields). */
-  parseEvents(logs: string[]): VaultEvent[] {
-    const parser = new EventParser(this.program.programId, this.program.coder);
-    return [...parser.parseLogs(logs)].map((e) => ({ name: e.name, data: e.data as Record<string, unknown> }));
+  /**
+   * props_vault events in emission order (camelCase names and fields), from a successful transaction's inner
+   * instructions (`innerInstructionsOf`). The program emits every event as a self-CPI (Anchor `emit_cpi!`), which the
+   * runtime records in full; log lines would be cut off once a transaction's logs pass 10 KB.
+   */
+  parseEvents(inner: Iterable<InvokedInstruction>): VaultEvent[] {
+    const events: VaultEvent[] = [];
+    for (const ix of inner) {
+      const data = Buffer.from(ix.data);
+      if (!ix.programId.equals(this.program.programId) || !data.subarray(0, 8).equals(EVENT_IX_TAG)) continue;
+      const event = this.program.coder.events.decode(data.subarray(8).toString('base64'));
+      if (event) events.push({ name: event.name, data: event.data as Record<string, unknown> });
+    }
+    return events;
   }
 
   async fetch<N extends AccountName>(name: N, address: PublicKey): Promise<IdlAccounts<PropsVault>[N] | null> {
@@ -191,37 +212,38 @@ export class PropsVaultClient {
         tokenProgram: TOKEN_PROGRAM_ID,
         associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
+        eventAuthority: eventAuthorityPda(),
       })
       .instruction();
   }
 
   proposeAdmin(p: { admin: PublicKey; newAdmin: PublicKey }): Promise<TransactionInstruction> {
-    return this.program.methods.proposeAdmin(p.newAdmin).accountsStrict({ admin: p.admin, config: configPda() }).instruction();
+    return this.program.methods.proposeAdmin(p.newAdmin).accountsStrict({ ...eventCpi(), admin: p.admin, config: configPda() }).instruction();
   }
 
   acceptAdmin(p: { newAdmin: PublicKey }): Promise<TransactionInstruction> {
-    return this.program.methods.acceptAdmin().accountsStrict({ newAdmin: p.newAdmin, config: configPda() }).instruction();
+    return this.program.methods.acceptAdmin().accountsStrict({ ...eventCpi(), newAdmin: p.newAdmin, config: configPda() }).instruction();
   }
 
   setAuthorities(p: { admin: PublicKey; riskAuthorities: PublicKey[]; kycAuthority: PublicKey }): Promise<TransactionInstruction> {
     return this.program.methods
       .setAuthorities(p.riskAuthorities, p.kycAuthority)
-      .accountsStrict({ admin: p.admin, config: configPda() })
+      .accountsStrict({ ...eventCpi(), admin: p.admin, config: configPda() })
       .instruction();
   }
 
   setParams(p: { admin: PublicKey; params: ConfigParams }): Promise<TransactionInstruction> {
-    return this.program.methods.setParams(p.params).accountsStrict({ admin: p.admin, config: configPda() }).instruction();
+    return this.program.methods.setParams(p.params).accountsStrict({ ...eventCpi(), admin: p.admin, config: configPda() }).instruction();
   }
 
   setPauses(p: { admin: PublicKey; paused: Pauses }): Promise<TransactionInstruction> {
-    return this.program.methods.setPauses(p.paused).accountsStrict({ admin: p.admin, config: configPda() }).instruction();
+    return this.program.methods.setPauses(p.paused).accountsStrict({ ...eventCpi(), admin: p.admin, config: configPda() }).instruction();
   }
 
   upsertTier(p: { admin: PublicKey; id: number; params: TierParams }): Promise<TransactionInstruction> {
     return this.program.methods
       .upsertTier(p.id, p.params)
-      .accountsStrict({ admin: p.admin, config: configPda(), tier: tierPda(p.id), systemProgram: SystemProgram.programId })
+      .accountsStrict({ ...eventCpi(), admin: p.admin, config: configPda(), tier: tierPda(p.id), systemProgram: SystemProgram.programId })
       .instruction();
   }
 
@@ -229,6 +251,7 @@ export class PropsVaultClient {
     return this.program.methods
       .upsertMarket(p.marketToken, p.params)
       .accountsStrict({
+        ...eventCpi(),
         admin: p.admin,
         config: configPda(),
         marketConfig: marketConfigPda(p.marketToken),
@@ -252,17 +275,18 @@ export class PropsVaultClient {
 
   /** `amount` in USDC base units, from the admin's USDC account (default: its ATA). */
   depositCapital(p: { admin: PublicKey; amount: bigint; adminUsdc?: PublicKey }): Promise<TransactionInstruction> {
-    return this.program.methods.depositCapital(bn(p.amount)).accountsStrict(this.moveCapitalAccounts(p.admin, p.adminUsdc)).instruction();
+    return this.program.methods.depositCapital(bn(p.amount)).accountsStrict({ ...eventCpi(), ...this.moveCapitalAccounts(p.admin, p.adminUsdc) }).instruction();
   }
 
   withdrawCapital(p: { admin: PublicKey; amount: bigint; adminUsdc?: PublicKey }): Promise<TransactionInstruction> {
-    return this.program.methods.withdrawCapital(bn(p.amount)).accountsStrict(this.moveCapitalAccounts(p.admin, p.adminUsdc)).instruction();
+    return this.program.methods.withdrawCapital(bn(p.amount)).accountsStrict({ ...eventCpi(), ...this.moveCapitalAccounts(p.admin, p.adminUsdc) }).instruction();
   }
 
   sweepFees(p: { admin: PublicKey }): Promise<TransactionInstruction> {
     return this.program.methods
       .sweepFees()
       .accountsStrict({
+        ...eventCpi(),
         admin: p.admin,
         config: configPda(),
         vault: vaultAuthorityPda(),
@@ -277,7 +301,7 @@ export class PropsVaultClient {
   withdrawSolTreasury(p: { admin: PublicKey; lamports: bigint }): Promise<TransactionInstruction> {
     return this.program.methods
       .withdrawSolTreasury(bn(p.lamports))
-      .accountsStrict({ admin: p.admin, config: configPda(), solTreasury: solTreasuryPda(), systemProgram: SystemProgram.programId })
+      .accountsStrict({ ...eventCpi(), admin: p.admin, config: configPda(), solTreasury: solTreasuryPda(), systemProgram: SystemProgram.programId })
       .instruction();
   }
 
@@ -288,6 +312,7 @@ export class PropsVaultClient {
     return this.program.methods
       .buyEvaluation(p.tierId, p.index)
       .accountsStrict({
+        ...eventCpi(),
         trader: p.trader,
         config: configPda(),
         tier: tierPda(p.tierId),
@@ -307,6 +332,7 @@ export class PropsVaultClient {
     return this.program.methods
       .activateFunded()
       .accountsStrict({
+        ...eventCpi(),
         trader: p.trader,
         config: configPda(),
         profile: traderProfilePda(p.trader),
@@ -353,7 +379,7 @@ export class PropsVaultClient {
         triggerPrice: bn(p.triggerPrice ?? 0n),
         acceptablePrice: bn(p.acceptablePrice),
       })
-      .accountsStrict({ trader: p.trader, config: configPda(), funded: p.funded.address, ownerUsdc: ownerUsdcAddress(p.funded.address), ...accounts })
+      .accountsStrict({ ...eventCpi(), trader: p.trader, config: configPda(), funded: p.funded.address, ownerUsdc: ownerUsdcAddress(p.funded.address), ...accounts })
       .instruction();
     return { instruction, order: accounts.gmOrder };
   }
@@ -374,7 +400,7 @@ export class PropsVaultClient {
     const accounts = gmOrderAccounts(p.funded, p.marketToken, p.isLong, p.ordersBefore);
     const instruction = await this.program.methods
       .closePosition({ isLong: p.isLong, sizeDeltaUsd: bn(p.sizeDeltaUsd), acceptablePrice: bn(p.acceptablePrice) })
-      .accountsStrict({ authority: p.authority, config: configPda(), funded: p.funded.address, ...accounts })
+      .accountsStrict({ ...eventCpi(), authority: p.authority, config: configPda(), funded: p.funded.address, ...accounts })
       .instruction();
     return { instruction, order: accounts.gmOrder };
   }
@@ -398,7 +424,7 @@ export class PropsVaultClient {
         triggerPrice: bn(p.triggerPrice),
         sizeDeltaUsd: bn(p.sizeDeltaUsd),
       })
-      .accountsStrict({ authority: p.trader, config: configPda(), funded: p.funded.address, ...accounts })
+      .accountsStrict({ ...eventCpi(), authority: p.trader, config: configPda(), funded: p.funded.address, ...accounts })
       .instruction();
     return { instruction, order: accounts.gmOrder };
   }
@@ -425,6 +451,7 @@ export class PropsVaultClient {
     return this.program.methods
       .updateOrder({ triggerPrice: opt(p.triggerPrice), acceptablePrice: opt(p.acceptablePrice), sizeDeltaUsd: opt(p.sizeDeltaUsd) })
       .accountsStrict({
+        ...eventCpi(),
         trader: p.trader,
         config: configPda(),
         funded: p.funded.address,
@@ -465,7 +492,7 @@ export class PropsVaultClient {
     const marketToken = this.trackedOrderMarket(p.funded, p.order);
     return this.program.methods
       .cancelOrder()
-      .accountsStrict({ authority: p.authority, marketConfig: marketConfigPda(marketToken), ...this.closeOrderAccounts(p.funded.address, p.order) })
+      .accountsStrict({ ...eventCpi(), authority: p.authority, marketConfig: marketConfigPda(marketToken), ...this.closeOrderAccounts(p.funded.address, p.order) })
       .instruction();
   }
 
@@ -475,6 +502,7 @@ export class PropsVaultClient {
     return this.program.methods
       .requestPayout()
       .accountsStrict({
+        ...eventCpi(),
         trader: p.trader,
         config: configPda(),
         funded: p.funded,
@@ -490,7 +518,7 @@ export class PropsVaultClient {
   cancelPayout(p: { trader: PublicKey; funded: PublicKey; payout: PublicKey }): Promise<TransactionInstruction> {
     return this.program.methods
       .cancelPayout()
-      .accountsStrict({ trader: p.trader, funded: p.funded, payout: p.payout })
+      .accountsStrict({ ...eventCpi(), trader: p.trader, funded: p.funded, payout: p.payout })
       .instruction();
   }
 
@@ -500,6 +528,7 @@ export class PropsVaultClient {
     return this.program.methods
       .setIdentity(p.wallet, bytes32(p.identityHash))
       .accountsStrict({
+        ...eventCpi(),
         kycAuthority: p.kycAuthority,
         config: configPda(),
         profile: traderProfilePda(p.wallet),
@@ -519,7 +548,7 @@ export class PropsVaultClient {
   }): Promise<TransactionInstruction> {
     return this.program.methods
       .recordEvaluationResult(p.passed, bn(p.finalEquity), bytes32(p.tradesRoot))
-      .accountsStrict({ riskAuthority: p.riskAuthority, config: configPda(), evaluation: p.evaluation })
+      .accountsStrict({ ...eventCpi(), riskAuthority: p.riskAuthority, config: configPda(), evaluation: p.evaluation })
       .instruction();
   }
 
@@ -532,6 +561,7 @@ export class PropsVaultClient {
     return this.program.methods
       .approvePayout()
       .accountsStrict({
+        ...eventCpi(),
         riskAuthority: p.riskAuthority,
         config: configPda(),
         funded: p.funded.address,
@@ -554,21 +584,21 @@ export class PropsVaultClient {
   rejectPayout(p: { riskAuthority: PublicKey; funded: PublicKey; payout: PublicKey; reasonCode: number }): Promise<TransactionInstruction> {
     return this.program.methods
       .rejectPayout(p.reasonCode)
-      .accountsStrict({ riskAuthority: p.riskAuthority, config: configPda(), funded: p.funded, payout: p.payout })
+      .accountsStrict({ ...eventCpi(), riskAuthority: p.riskAuthority, config: configPda(), funded: p.funded, payout: p.payout })
       .instruction();
   }
 
   restrict(p: { riskAuthority: PublicKey; funded: PublicKey; restricted: boolean }): Promise<TransactionInstruction> {
     return this.program.methods
       .restrict(p.restricted)
-      .accountsStrict({ riskAuthority: p.riskAuthority, config: configPda(), funded: p.funded })
+      .accountsStrict({ ...eventCpi(), riskAuthority: p.riskAuthority, config: configPda(), funded: p.funded })
       .instruction();
   }
 
   markBreached(p: { riskAuthority: PublicKey; funded: PublicKey }): Promise<TransactionInstruction> {
     return this.program.methods
       .markBreached()
-      .accountsStrict({ riskAuthority: p.riskAuthority, config: configPda(), funded: p.funded })
+      .accountsStrict({ ...eventCpi(), riskAuthority: p.riskAuthority, config: configPda(), funded: p.funded })
       .instruction();
   }
 
@@ -577,6 +607,7 @@ export class PropsVaultClient {
     return this.program.methods
       .closeFunded()
       .accountsStrict({
+        ...eventCpi(),
         riskAuthority: p.riskAuthority,
         config: configPda(),
         funded: p.funded.address,
@@ -608,7 +639,7 @@ export class PropsVaultClient {
     ];
     return this.program.methods
       .sync()
-      .accountsStrict({ config: configPda(), funded: p.funded.address })
+      .accountsStrict({ ...eventCpi(), config: configPda(), funded: p.funded.address })
       .remainingAccounts(remaining)
       .instruction();
   }
@@ -617,6 +648,7 @@ export class PropsVaultClient {
     return this.program.methods
       .topUpOwner()
       .accountsStrict({
+        ...eventCpi(),
         config: configPda(),
         funded: p.funded,
         owner: ownerPda(p.funded),
@@ -627,6 +659,6 @@ export class PropsVaultClient {
   }
 
   closeCompletedOrder(p: { funded: PublicKey; order: PublicKey }): Promise<TransactionInstruction> {
-    return this.program.methods.closeCompletedOrder().accountsStrict(this.closeOrderAccounts(p.funded, p.order)).instruction();
+    return this.program.methods.closeCompletedOrder().accountsStrict({ ...eventCpi(), ...this.closeOrderAccounts(p.funded, p.order) }).instruction();
   }
 }

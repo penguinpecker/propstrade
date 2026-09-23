@@ -1,5 +1,5 @@
 {
-  "id": "6dd6c060-23f6-4a5e-b276-16b31ed5af11",
+  "id": "f18d06c8-0303-4959-91f5-ec7f8cea7329",
   "prevId": "48d8d27a-bf95-4d3f-866f-593f6791c166",
   "version": "7",
   "dialect": "postgresql",
@@ -429,6 +429,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "subject": {
+          "name": "subject",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "status": {
           "name": "status",
           "type": "chain_job_status",
@@ -439,6 +445,13 @@
         },
         "attempts": {
           "name": "attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "rejections": {
+          "name": "rejections",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
@@ -489,6 +502,21 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "chain_jobs_subject_uq": {
+          "name": "chain_jobs_subject_uq",
+          "columns": [
+            {
+              "expression": "subject",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
           "concurrently": false,
           "method": "btree",
           "with": {}
@@ -1265,6 +1293,88 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.gmtrade_deploys": {
+      "name": "gmtrade_deploys",
+      "schema": "",
+      "columns": {
+        "slot": {
+          "name": "slot",
+          "type": "bigint",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "detected_at": {
+          "name": "detected_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "handled_at": {
+          "name": "handled_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "acknowledged_at": {
+          "name": "acknowledged_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.indexer_cursors": {
+      "name": "indexer_cursors",
+      "schema": "",
+      "columns": {
+        "program": {
+          "name": "program",
+          "type": "varchar(44)",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "signature": {
+          "name": "signature",
+          "type": "varchar(88)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "slot": {
+          "name": "slot",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.kyc_requests": {
       "name": "kyc_requests",
       "schema": "",
@@ -1616,6 +1726,12 @@
         "resolved_at": {
           "name": "resolved_at",
           "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "review_note": {
+          "name": "review_note",
+          "type": "text",
           "primaryKey": false,
           "notNull": false
         }
@@ -2145,6 +2261,13 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": false
+        },
+        "close_all": {
+          "name": "close_all",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
         }
       },
       "indexes": {
@@ -2602,6 +2725,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "venue_id": {
+          "name": "venue_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "slot": {
           "name": "slot",
           "type": "bigint",
@@ -2647,6 +2776,12 @@
         },
         "size_usd": {
           "name": "size_usd",
+          "type": "numeric(38, 6)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "size_after_usd": {
+          "name": "size_after_usd",
           "type": "numeric(38, 6)",
           "primaryKey": false,
           "notNull": true
@@ -2741,7 +2876,15 @@
           ]
         }
       },
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "venue_fills_venue_id_unique": {
+          "name": "venue_fills_venue_id_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "venue_id"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -2795,7 +2938,11 @@
       "name": "chain_job_kind",
       "schema": "public",
       "values": [
-        "set_identity"
+        "set_identity",
+        "record_evaluation_result",
+        "approve_payout",
+        "reject_payout",
+        "lift_restriction"
       ]
     },
     "public.chain_job_status": {

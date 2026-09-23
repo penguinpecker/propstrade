@@ -109,9 +109,9 @@ describe('sync', () => {
     const sol = await openOrder(env, f, 'SOL', true, 100n, '10');
     const btc = await openOrder(env, f, 'BTC', true, 100n, '10');
     const ix = await env.vault.sync({ funded: env.funded(f.funded) });
-    const [config, funded, ...remaining] = ix.keys;
+    const [config, funded, eventAuthority, program, ...remaining] = ix.keys;
     const withRemaining = (keys: typeof remaining) =>
-      new TransactionInstruction({ programId: ix.programId, data: ix.data, keys: [config!, funded!, ...keys] });
+      new TransactionInstruction({ programId: ix.programId, data: ix.data, keys: [config!, funded!, eventAuthority!, program!, ...keys] });
     const [solPos, btcPos, solOrder, btcOrder, solMarket, btcMarket] = remaining;
     assert.ok(solPos!.pubkey.equals(sol.position) && btcOrder!.pubkey.equals(btc.order));
 

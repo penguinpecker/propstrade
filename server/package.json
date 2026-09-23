@@ -13,7 +13,7 @@
     "db:generate": "drizzle-kit generate",
     "typecheck": "tsc --noEmit",
     "test": "vitest run && npm run test:modules",
-    "test:modules": "node --import tsx --test 'src/modules/**/*.test.ts'"
+    "test:modules": "node --import tsx --test --test-concurrency=1 'src/modules/**/*.test.ts'"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.2",
@@ -26,6 +26,7 @@
     "@props/sdk": "*",
     "@props/shared": "*",
     "@solana/web3.js": "^1.98.4",
+    "bn.js": "^5.2.5",
     "bs58": "^6.0.0",
     "drizzle-orm": "^0.45.3",
     "fastify": "^5.12.5",
@@ -34,6 +35,8 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@solana/spl-token": "^0.4.14",
+    "@types/bn.js": "^5.2.0",
     "@types/node": "^22.19.0",
     "drizzle-kit": "^0.31.11",
     "typescript": "^5.9.3",

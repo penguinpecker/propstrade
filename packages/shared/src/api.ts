@@ -90,7 +90,15 @@ export interface AppConfig {
 }
 
 // ---------- auth / me ----------
-export interface Health { status: 'ok' | 'degraded'; db: 'ok' | 'down'; modules: Record<string, 'running' | 'absent'>; time: Millis }
+export interface Health {
+  status: 'ok' | 'degraded'; db: 'ok' | 'down'; modules: Record<string, 'running' | 'absent'>; time: Millis;
+  /** Present when the keeper module runs: whether this replica leads it, its last completed tick, and the last GMTrade
+   *  program upgrade it saw (after which every active funded account is restricted until an operator acknowledges it). */
+  keeper?: {
+    leader: boolean; lastTickAt: Millis | null;
+    gmtradeUpgrade: { slot: number; detectedAt: Millis; restrictedAt: Millis | null; acknowledgedAt: Millis | null } | null;
+  };
+}
 export interface NonceRequest { wallet: Pubkey }
 export interface VerifyResponse { wallet: Pubkey; expiresAt: Millis }
 export interface KycStartRequest { country: string /* ISO 3166-1 alpha-2 */ }

@@ -7,6 +7,7 @@ import type {
   Market, PriceTick, CandleInterval, CandlesResponse, MarketTrade, PriceImpactQuote, StreamEvent, Notification,
   AccountSummary, AccountDetail, Position, Order, ClosedTrade, ActivityItem, Performance, AppConfig,
 } from '@props/shared';
+import type { Prices } from '@props/gmsol-wasm';
 import type { Config } from '../config.js';
 import type { Db, Sql } from '../db/client.js';
 
@@ -29,7 +30,18 @@ export interface Services {
   marketdata?: MarketDataService;
   sim?: SimService;
   chain?: ChainService;
-  keeper?: { status(): { leader: boolean; lastTickAt: number | null } };
+  keeper?: { status(): KeeperStatus };
+}
+
+/** Risk keeper state for /v1/health (server/src/modules/keeper). */
+export interface KeeperStatus {
+  leader: boolean;
+  lastTickAt: number | null;
+  /**
+   * The last GMTrade program upgrade seen: deploy slot, when noticed, when every active account had been restricted,
+   * and when an operator acknowledged the new release as reviewed (until then accounts stay restricted).
+   */
+  gmtradeUpgrade: { slot: number; detectedAt: number; restrictedAt: number | null; acknowledgedAt: number | null } | null;
 }
 
 /** Read side of one stage family. The accounts router (chain module) merges providers and dispatches by stage. */
@@ -77,8 +89,8 @@ export interface MarketState {
   isClosed: boolean;
   /** { market: base64 Market account, virtualInventories: { address: base64 }, slot } — raw images the WASM model reads. */
   raw: unknown;
-  /** Oracle unit prices (USD × 10^(20 − token decimals)) at fetchedAt: the WASM model's `prices` input. */
-  prices: Record<'index' | 'long' | 'short', { min: bigint; max: bigint }>;
+  /** Oracle unit prices (USD × 10^(20 − token decimals)) of the index, long and short tokens, as the WASM model takes them. */
+  prices: Prices;
   /** Index token decimals: a PriceTick's USD price × 10^(20 − indexDecimals) is its unit price. */
   indexDecimals: number;
   fetchedAt: number;

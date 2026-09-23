@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
-import { Keypair, PublicKey } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey, TransactionMessage } from '@solana/web3.js';
+import BN from 'bn.js';
+import { utils } from '@coral-xyz/anchor';
 import {
   CLOSE_ALL,
   PROPS_VAULT_IDL,
+  PROPS_VAULT_PROGRAM_ID,
+  PropsVaultClient,
   acceptablePrice,
   buildTransaction,
   formatUnits,
@@ -12,12 +16,15 @@ import {
   gmEventAuthority,
   gmStoreWallet,
   gmToUsd,
+  innerInstructionsOf,
   orderNonce,
   parseUnits,
   toMicro,
   toUnitPrice,
   usdToGm,
 } from '../src/index.ts';
+
+const bs58 = (b: Buffer) => utils.bytes.bs58.encode(b);
 
 describe('units', () => {
   it('parses and formats exact decimals', () => {
@@ -78,6 +85,34 @@ describe('addresses and transactions', () => {
     assert.equal(tx.version, 0);
     assert.equal(tx.message.compiledInstructions.length, 2);
     assert.equal(tx.message.staticAccountKeys[0]!.toBase58(), payer.toBase58());
+  });
+
+  it('reads events from the self-CPIs the program records as inner instructions, and only from the program', () => {
+    const vault = new PropsVaultClient(new Connection('http://127.0.0.1:1'));
+    const funded = Keypair.generate().publicKey;
+    const body = vault.program.coder.types.encode('ownerToppedUp', { funded, lamports: new BN(250_000_000), ts: new BN(1_790_000_000) });
+    const discriminator = PROPS_VAULT_IDL.events.find((e) => e.name === 'OwnerToppedUp')!.discriminator;
+    const eventData = Buffer.concat([Buffer.from([0xe4, 0x45, 0xa5, 0x2e, 0x51, 0xcb, 0x9a, 0x1d]), Buffer.from(discriminator), body]);
+    const impostor = Keypair.generate().publicKey;
+    const message = new TransactionMessage({ payerKey: funded, recentBlockhash: PublicKey.default.toBase58(), instructions: [
+      { programId: PROPS_VAULT_PROGRAM_ID, keys: [], data: Buffer.alloc(8) },
+      { programId: impostor, keys: [], data: Buffer.alloc(8) },
+    ] }).compileToV0Message();
+    const index = (key: PublicKey) => message.staticAccountKeys.findIndex((k) => k.equals(key));
+    const tx = {
+      transaction: { message, signatures: [] },
+      meta: {
+        innerInstructions: [
+          { index: 1, instructions: [{ programIdIndex: index(impostor), accounts: [], data: bs58(eventData) }] }, // same bytes, another program
+          { index: 0, instructions: [{ programIdIndex: index(PROPS_VAULT_PROGRAM_ID), accounts: [], data: bs58(eventData) }] },
+        ],
+        loadedAddresses: { writable: [], readonly: [] },
+      },
+    } as unknown as Parameters<typeof innerInstructionsOf>[0];
+    const inner = innerInstructionsOf(tx);
+    assert.deepEqual(inner.map((i) => i.programId.toBase58()), [PROPS_VAULT_PROGRAM_ID.toBase58(), impostor.toBase58()], 'execution order');
+    const events = vault.parseEvents(inner);
+    assert.deepEqual(events.map((e) => [e.name, String(e.data.funded), String(e.data.lamports)]), [['ownerToppedUp', funded.toBase58(), '250000000']]);
   });
 
   it('ships the IDL of the program built in this repo', () => {
