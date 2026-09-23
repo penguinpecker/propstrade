@@ -46,7 +46,7 @@ export function registerRoutes(app: FastifyInstance, d: {
     try {
       return await read();
     } catch (err) {
-      if (err instanceof ProgramNotInitialized) throw new ApiError(503, 'unavailable', 'The Props.trade program is not initialized yet');
+      if (err instanceof ProgramNotInitialized) throw new ApiError(503, 'not_initialized', 'The Props.trade program is not live on Solana yet');
       throw new ApiError(502, 'upstream_unavailable', 'Solana is not reachable right now, try again shortly');
     }
   }

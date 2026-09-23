@@ -14,6 +14,8 @@ export class ApiRequestError extends Error {
 }
 
 export const isUnauthorized = (error: unknown) => error instanceof ApiRequestError && error.status === 401;
+/** The props_vault program is not deployed and initialized yet: a lasting state, not an outage (no retries). */
+export const isNotLive = (error: unknown) => error instanceof ApiRequestError && error.code === 'not_initialized';
 
 async function request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T> {
   let response: Response;

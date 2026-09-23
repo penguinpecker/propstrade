@@ -3,7 +3,7 @@ import type {
   AccountDetail, AccountSummary, CandleInterval, Market, Me, Notification, Order, Performance, Position, SimCloseRequest,
   SimOrderRequest, SimOrderResponse, SimProtectionRequest, StreamEvent,
 } from '@props/shared';
-import { api, ApiRequestError, isUnauthorized } from './api';
+import { api, ApiRequestError, isNotLive, isUnauthorized } from './api';
 
 export const keys = {
   config: ['config'] as const,
@@ -42,7 +42,7 @@ export function createQueryClient() {
     defaultOptions: {
       queries: {
         staleTime: 10_000,
-        retry: (failures, error) => !(error instanceof ApiRequestError && error.status >= 400 && error.status < 500) && failures < 3,
+        retry: (failures, error) => !(error instanceof ApiRequestError && error.status >= 400 && error.status < 500) && !isNotLive(error) && failures < 3,
       },
     },
   });

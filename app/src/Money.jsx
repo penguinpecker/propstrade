@@ -6,7 +6,7 @@ import { bpsPercent, date, dateTime, explorerAddress, explorerTx, number, shortA
 import { Badge, Button, UsdcIcon, DataRow, Empty, Field, IconButton, InlineLink, LineGraph, Notice, PageHeading, Pending, Progress, SectionHeading, SessionNotice, Stat, Tabs, Toggle, Unavailable } from './ui.jsx';
 import { accountHref } from './Workspace.jsx';
 import { tradesRoot } from '@props/shared/merkle';
-import { api } from './lib/api';
+import { api, isNotLive } from './lib/api';
 import { env } from './lib/env';
 import { usePayout, usePayoutEligibility, usePayouts, useVault, useVerify } from './lib/queries';
 import { useTxCost, useWalletTransaction } from './lib/transactions';
@@ -123,7 +123,7 @@ export function VaultPage() {
   const vault = useVault();
   const [period, setPeriod] = useState('30 days');
   const v = vault.data;
-  if (!v) return <div className="page"><PageHeading title="A clear view of the capital." description="The Props.trade capital vault supplies margin to funded trading accounts." back={{ label: 'Verification', href: '#/verify' }} />{vault.isError ? <Unavailable title="Vault data is unavailable" error={vault.error} retry={vault.refetch} /> : <Pending>Reading the vault…</Pending>}</div>;
+  if (!v) return <div className="page"><PageHeading title="A clear view of the capital." description="The Props.trade capital vault supplies margin to funded trading accounts." back={{ label: 'Verification', href: '#/verify' }} />{isNotLive(vault.error) ? <Empty icon={Info} title="The vault is not live yet">The Props.trade vault program is not live on Solana yet. Its capital and records appear here once it is.</Empty> : vault.isError ? <Unavailable title="Vault data is unavailable" error={vault.error} retry={vault.refetch} /> : <Pending>Reading the vault…</Pending>}</div>;
   const allocated = Number(v.allocatedPrincipal);
   const total = allocated + Number(v.unallocated);
   const allocatedPct = total ? allocated / total * 100 : 0;
