@@ -191,10 +191,14 @@ export function applyStreamEvent(client: QueryClient, event: StreamEvent) {
     case 'account':
       patchAccount(client, event.account);
       return;
-    case 'positions':
+    case 'positions': {
+      const before = client.getQueryData<Position[]>(keys.positions(event.accountId));
       client.setQueryData<Position[]>(keys.positions(event.accountId), event.positions);
       client.setQueryData<AccountDetail>(keys.account(event.accountId), detail => detail && { ...detail, positions: event.positions });
+      // A position that left the list was closed or liquidated: its round trip is new trade history.
+      if (before?.some(p => !event.positions.some(next => next.id === p.id))) void client.invalidateQueries({ queryKey: keys.history(event.accountId) });
       return;
+    }
     case 'orders':
       client.setQueryData<Order[]>(keys.orders(event.accountId), event.orders);
       client.setQueryData<AccountDetail>(keys.account(event.accountId), detail => detail && { ...detail, orders: event.orders });
@@ -203,6 +207,8 @@ export function applyStreamEvent(client: QueryClient, event: StreamEvent) {
       // Without a loaded list there is nothing to patch: the first fetch returns this notification too.
       client.setQueryData<Notification[]>(keys.notifications, list =>
         list && [event.notification, ...list.filter(n => n.id !== event.notification.id)].slice(0, 100));
+      // Account and payout notices follow changes /v1/me reports: identity review, wallet balances.
+      if (event.notification.kind === 'account' || event.notification.kind === 'payout') void client.invalidateQueries({ queryKey: keys.me });
       return;
     case 'heartbeat':
       return;

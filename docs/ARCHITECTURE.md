@@ -43,7 +43,7 @@ If implementation proves a statement here wrong, fix the code to the facts AND u
 | Sessions | stock/ETF and FX markets close outside hours; risk service closes positions above the closed-market leverage cap before the close; decreases are impossible while closed | |
 | Practice | free, 25K virtual, same engine and rules, reset anytime, never paid out | |
 | Acceptable price | every order carries one; default slippage 0.5% (user-editable ≤ 5%) | protects against GMTrade's scheduled price-impact windows |
-| Geo | block US persons and sanctioned regions (edge middleware + KYC country) | GMTrade terms bar US persons |
+| Geo | block US persons and sanctioned regions (edge middleware + KYC country and region) | GMTrade terms bar US persons |
 
 Evaluation and funded use **identical** risk semantics so passing an evaluation predicts funded behaviour.
 
@@ -99,7 +99,7 @@ checks the offsets against cloned mainnet Position accounts.
 
 | Account | Seeds | Key fields |
 |---|---|---|
-| `Config` | `["config"]` | admin, pending_admin, risk_authorities (≤4), kyc_authority, usdc_mint, gmtrade_program, gmtrade_store (pinned at init), trader_share_bps, min_payout, owner_sol_target, owner_sol_min, pause flags (new_evaluations, trading, payouts), totals (fees_collected, allocated_principal, payouts_paid, profit_to_vault), counters, bumps |
+| `Config` | `["config"]` | admin, pending_admin, risk_authorities (≤4), kyc_authority, usdc_mint, gmtrade_program, gmtrade_store (pinned at init), trader_share_bps, min_payout, owner_sol_target, owner_sol_min, max_daily_principal (+ the current activation window's start and total), pause flags (new_evaluations, trading, payouts), totals (fees_collected, allocated_principal, payouts_paid, profit_to_vault), counters, bumps |
 | vault authority | `["vault"]` | data-less signer that owns the three USDC token accounts below |
 | `capital_vault` | ATA(vault authority, USDC) | seed capital; source of principal |
 | `fee_vault` | `["fee_vault"]` token account (owner = vault authority) | evaluation fees |
@@ -122,9 +122,12 @@ Admin (signer = `Config.admin`):
 posted), `sweep_fees` (fee_vault → capital_vault), `withdraw_sol_treasury`.
 
 Trader (signer = trader wallet):
-- `buy_evaluation(tier_id)` — tier enabled, not paused; `transfer_checked` fee USDC trader → fee_vault; init-if-needed
-  `TraderProfile`; init `Evaluation` with terms snapshot. One atomic tx = payment + entitlement.
-- `activate_funded(evaluation)` — evaluation `Passed`, profile verified, `active_funded == 0`, capital available;
+- `buy_evaluation(tier_id, index, expected_fee_usdc, expected_tier_version)` — tier enabled, not paused, fee and tier
+  version equal to what the trader reviewed (every `upsert_tier` bumps the version; else `TierChanged`);
+  `transfer_checked` fee USDC trader → fee_vault; init-if-needed `TraderProfile`; init `Evaluation` with terms snapshot.
+  One atomic tx = payment + entitlement.
+- `activate_funded(evaluation)` — evaluation `Passed`, profile verified, `active_funded == 0`, capital available, and
+  at most `max_daily_principal` posted per day (a window opened by the first activation after the last one ended);
   creates `FundedAccount`, owner PDA ATA, moves principal `L = size × dd_bps` capital_vault → owner ATA, tops the owner
   PDA up to `owner_sol_target` from `sol_treasury`, `Evaluation.status = Funded`.
 - `open_position(market_token, is_long, kind: Market|Limit, collateral, size_delta_usd, trigger_price, acceptable_price)`
@@ -224,7 +227,9 @@ produce funded positions, fills, fees and realized P&L.
 ### 4.5 keeper (leader only)
 Per funded account, every tick (≤ 5 s) and on account change:
 1. `sync` when GMTrade state differs from the last synced state.
-2. Equity with live prices via the model; if equity ≤ floor → `restrict` + `close_position` on every slot; alert.
+2. Equity with live prices via the model; if equity ≤ floor → `mark_breached` + `close_position` on every slot; alert;
+   once the breached account is flat → `close_funded` (USDC and SOL back to the vault, principal and the trader's funded
+   slot released).
 3. Session guard: for session-restricted markets, 10 min before close, close positions whose leverage exceeds the
    closed-market cap.
 4. Cancel TP/SL orders whose position is gone; `close_completed_order` for stuck orders; `top_up_owner`.
@@ -258,7 +263,8 @@ browser with `packages/sdk`**; the server never holds user keys.
 - **local**: `solana-test-validator` with the mainnet GMTrade binary (dumped by `scripts/fixtures.sh`), cloned
   mainnet accounts (Store patched: `last_restarted_slot = 0` at byte 4800), props_vault deployed; server against local
   Postgres; app against local server. GMTrade keepers do not run locally: fills cannot happen; sync/payout paths are
-  tested with patched Position/USDC fixture accounts.
+  tested with patched Position/USDC fixture accounts. `scripts/local-stack.ts` starts all of it (server/README.md), and
+  `app/tests/fullstack.e2e.mjs` rehearses the whole trader journey through it in Chrome.
 - **mainnet**: program deployed by the operator keypair (upgrade authority → Squads multisig at handover), server on
   Railway, app on Vercel, RPC = Helius (`RPC_URL`, `RPC_WS_URL`). Secrets: `RISK_AUTHORITY_KEYPAIR`,
   `KYC_AUTHORITY_KEYPAIR`, `SESSION_SECRET`, `DATABASE_URL`, `ADMIN_API_TOKEN`, alert vars above.
@@ -338,7 +344,8 @@ Sim engine (round 2, `server/src/modules/sim`):
 - Gap: the closed-session leverage guard (§1, §4.5.3) does not yet run for evaluations: it needs the keeper's session
   schedule (keeper/sessions.ts in the keeper track) to know when a session closes. Until then an evaluation can hold a
   position above `closedMaxLeverage` through a close.
-- trades_root encoding: `server/src/modules/sim/merkle.ts`, leaves from `GET /v1/sim/:id/fills`. Results go through the
+- trades_root encoding: `packages/shared/src/merkle.ts` (Web Crypto; the server commits with it, the Verify page recomputes
+  with it), leaves from `GET /v1/sim/:id/fills`, public once the result is onchain. Results go through the
   `sim_results` outbox: `onResolved` fires when decided and again every 5 min / at leadership start until
   `markRecorded`, so the chain module's handler must be idempotent.
 App (round 2): `Market.indexTokenDecimals` (additive) lets the browser convert prices to GMTrade unit prices for
@@ -384,7 +391,8 @@ Chain module (round 2):
   shows done is confirmed with the signature of the indexed event that did it, never with a failed transaction of the
   job's. RPC and indexer trouble is retried for as long as it lasts (backoff capped at 5 min); a job fails for good only
   after 10 refusals by the chain itself (simulation or onchain failure, missing account). Operators:
-  `POST /v1/admin/jobs/:id/retry` (a failed job), `POST /v1/admin/funded/:id/lift-restriction` (`restrict(false)`).
+  `POST /v1/admin/jobs/:id/retry` (a failed job), `POST /v1/admin/funded/:id/lift-restriction` (`restrict(false)`),
+  `POST /v1/admin/funded/:id/close` (`close_funded` of a flat account).
 - `/v1/vault` reads Config with the three vault accounts in one call (one slot). `/v1/config` caches Config and the
   tiers for 30 s; an indexed `configChanged` drops the Config (and the tiers when it names a tier).
 - `syncOrders` also resolves orders the indexed `sync` marked finished before the venue tick saw them; an order GMTrade
@@ -396,11 +404,14 @@ Keeper module (round 2):
 - Each tick (≤ 5 s) the leader reads every open funded account fresh (FundedAccount, owner USDC + lamports, its GMTrade
   Position and Order accounts in ONE `getMultipleAccounts` call, i.e. one slot, re-read if the FundedAccount changed
   since it listed them; model valuation), plans ONE transaction (most urgent first: owner top-up, equity breach,
-  session guard, upgrade restrict, cleanup, sync), sends it, reads again and re-plans until nothing is left. Every send
+  session guard, upgrade restrict, cleanup, sync, closure of a flat breached account), sends it, reads again and re-plans until nothing is left. Every send
   first asks Postgres whether this session still holds `LOCK_KEYS.keeper`; if not, nothing is sent and the term ends.
 - Breach = equity ≤ floor, i.e. V ≤ 0 (V as in the chain notes), decided only on `live`/`delayed` valuations and only
-  when a second fresh read agrees: `restrict` (if active) + a CLOSE_ALL `close_position` per open slot in an open
-  market, in one transaction when it fits. With all 8 tracked-order slots used it first recovers finished orders
+  when a second fresh read agrees: `mark_breached` (if active or restricted; terminal, so the restriction lift cannot
+  reopen it) + a CLOSE_ALL `close_position` per open slot in an open market, in one transaction when it fits. A breached
+  account keeps getting its remaining positions closed whatever they are worth now (liquidations can leave collateral),
+  and once flat (cleanup and sync done) is closed with `close_funded` (positions = `fetchOwnerPositions()`), so the
+  trader can activate the next evaluation they pass. The trader hears of it from the indexed `AccountBreached` event. With all 8 tracked-order slots used it first recovers finished orders
   (`close_completed_order`), then cancels the trader's own pending orders: those on the slots being closed (TP/SL
   first), then increases elsewhere, another position's TP/SL last; the trader is told which. A slot with a pending risk
   close gets no second one.
@@ -434,3 +445,33 @@ Keeper module (round 2):
   jobs failed for good, an account the keeper cannot read or value, and an indexer more than 5 min behind.
 - The venue loop keeps reading an account's GMTrade fills for 3 min after it goes flat (subsquid lags ~35 s), so the
   closing fills a payout review reconciles against are indexed.
+
+Full-stack rehearsal (round 3, `scripts/local-stack.ts` + `app/tests/fullstack.e2e.mjs`):
+- marketdata decodes `MarketConfig` with the program IDL bundled in `@props/sdk` (the build the chain module pins
+  `PROGRAM_ID` to); no IDL account has to be published onchain (`anchor idl init` is not a deploy step).
+- `/v1/me` reports `kyc: verified` as soon as the onchain `TraderProfile` carries an identity hash (what activation checks),
+  and the indexed `identitySet` notifies the trader ("Identity verified", `/activate`). The app re-reads `/v1/me` on
+  account and payout notifications, and refetches trade history when a position leaves the positions stream.
+- Notification links are app routes that name their account: `/account/<stage>?id=<id>`, `/result?id=<id>`
+  (`/activate`, `/payouts` otherwise); simulated notices start with the account's label and short id. Account pages
+  (`/account/<stage>`, `/performance`, `/activity`) show the account `?id=` names, current or past; a current one also
+  becomes the stage's selected account.
+- A trader's cancel of the order the order ticket is following ends that follow; it is not reported as a venue failure.
+- `NODE_ENV=test` on `SOLANA_CLUSTER=localnet` only: `PUT /v1/test/prices/:symbol` (admin token) pins a market's price in every tick marketdata
+  serves, so an evaluation is decided through the sim engine's own rules on a known price path.
+
+Round 4 (review fixes):
+- Trust boundary. The server's database decides what the risk and KYC keys sign (chain jobs, evaluation results), so
+  those rows carry an HMAC keyed from `SESSION_SECRET` (`server/src/lib/integrity.ts`): the job executor refuses an
+  unsealed or altered job (it fails for good, nothing is signed, the keeper alerts) and the sim engine never redelivers
+  an unsealed result. Write access to Postgres alone cannot mint identities or passes that way. What the seal cannot
+  cover is the simulated evaluation state itself (fills, positions): someone who can rewrite it can steer the engine to
+  a pass. That, and a compromise of the keys or the server, is bounded onchain by `Config.max_daily_principal`: at most
+  that much principal reaches new funded accounts per day. Evaluation fill lists are public once recorded, so a changed
+  list no longer matches its onchain trades root.
+- The app signs only the sign-in message the server builds for its own origin and cluster (`@props/shared/siws`,
+  rebuilt and compared before the wallet is asked), and builds funded orders only for a market whose `MarketConfig`
+  names the symbol shown, with index-token decimals read from the mint (not from the API).
+- KYC: residence is a country plus, for Ukraine (partly sanctioned), an ISO 3166-2 region; Crimea, Sevastopol, Donetsk
+  and Luhansk are refused at the start and again at approval, where the reviewer states the residence from the
+  documents. Evaluations can still be bought from anywhere; the program copy says so.

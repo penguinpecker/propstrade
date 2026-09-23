@@ -1,5 +1,5 @@
 import type {
-  AccountDetail, AccountSummary, ActivityItem, ApiError, AppConfig, CandleInterval, CandlesResponse, ClosedTrade, Market,
+  AccountDetail, AccountSummary, ActivityItem, ApiError, AppConfig, CandleInterval, CandlesResponse, ClosedTrade, Fill, KycStartRequest, Market,
   MarketTrade, Me, NonceResponse, Notification, Order, Payout, PayoutEligibility, Performance, Position, PriceImpactQuote, Pubkey,
   SimCloseRequest, SimOrderRequest, SimOrderResponse, SimProtectionRequest, VaultStats, VerifyRequest, VerifyResult,
 } from '@props/shared';
@@ -94,8 +94,10 @@ export const api = {
   verifyRecord: (q: string) => request<VerifyResult>('GET', `/v1/verify${query({ q })}`),
   vault: () => request<VaultStats>('GET', '/v1/vault'),
 
-  /** `country`: ISO 3166-1 alpha-2 code of the trader's residence. */
-  startKyc: (country: string) => request<{ kyc: Me['kyc'] }>('POST', '/v1/kyc/start', { country }),
+  /** The trader's residence (KycStartRequest): ISO 3166-1 alpha-2 country and, for Ukraine, the ISO 3166-2 region. */
+  startKyc: (body: KycStartRequest) => request<{ kyc: Me['kyc'] }>('POST', '/v1/kyc/start', body),
+  /** Every fill of a simulated account in trades-root order: the owner's, or anyone's once an evaluation's result is onchain. */
+  fills: (accountId: string) => request<Fill[]>('GET', `/v1/sim/${id(accountId)}/fills`),
 
   notifications: () => request<Notification[]>('GET', '/v1/notifications'),
   /** Marks the given notifications read, or all of them when `ids` is omitted. */

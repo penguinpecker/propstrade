@@ -1,18 +1,21 @@
 // marketdata module through Fastify inject against live GMTrade services (PROPS_OFFLINE=1 skips the
-// live tests). The Props allowlist is served by a local JSON-RPC stub holding a test IDL and
-// MarketConfig accounts, since props_vault is not deployed yet.
+// live tests). The Props allowlist is served by a local JSON-RPC stub holding MarketConfig accounts encoded by the
+// props_vault client in @props/sdk.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
-import { deflateSync } from 'node:zlib';
+import { inflateSync } from 'node:zlib';
+import BN from 'bn.js';
 import Fastify from 'fastify';
+import { Connection, PublicKey } from '@solana/web3.js';
 import type { ApiError, CandlesResponse, Market, MarketTrade, PriceImpactQuote, StreamEvent } from '@props/shared';
-import { IdlCoder, base58Encode, decodeMarket, findProgramAddress, pubkeyBytes, type Idl } from '@props/gmtrade';
+import { IdlCoder, base58Encode, decodeMarket, findProgramAddress, getMultipleAccounts, pubkeyBytes, type Idl } from '@props/gmtrade';
+import { PropsVaultClient } from '@props/sdk';
 import type { ModuleContext } from '../types.ts';
 import register, { candleCacheTtl } from './index.ts';
-import { fetchAllowlist, fetchAnchorIdl, marketConfigAddress } from './allowlist.ts';
+import { fetchAllowlist, marketConfigAddress } from './allowlist.ts';
 
 const skip = process.env.PROPS_OFFLINE === '1';
 const PROGRAM_ID = base58Encode(createHash('sha256').update('props-vault-test-program').digest());
@@ -20,39 +23,28 @@ const SOL_POOL = '6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc';
 const BTC_POOL = 'Dqq58gS1TgRMDouUbdvhhzc51XXTNHG921WLxH9X2eB8';
 const DECIMAL = /^-?\d+(\.\d+)?$/;
 
-// ---- local RPC stub with an Anchor IDL account and MarketConfig accounts ----
-const disc = (name: string) => [...createHash('sha256').update(`account:${name}`).digest().subarray(0, 8)];
-const TEST_IDL: Idl = {
-  accounts: [{ name: 'MarketConfig', discriminator: disc('MarketConfig') }],
-  types: [{
-    name: 'MarketConfig',
-    type: {
-      kind: 'struct',
-      fields: [
-        { name: 'enabled', type: 'bool' }, { name: 'index_symbol', type: { array: ['u8', 16] } },
-        { name: 'max_leverage_bps', type: 'u32' }, { name: 'closed_max_leverage_bps', type: 'u32' }, { name: 'bump', type: 'u8' },
-      ],
-    },
-  }],
-};
+// ---- local RPC stub with MarketConfig accounts ----
+const vaultCoder = new PropsVaultClient(new Connection('http://127.0.0.1:1')).program.coder.accounts;
 
-function marketConfig(enabled: boolean, symbol: string, maxBps: number, closedBps: number): Buffer {
-  const b = Buffer.alloc(8 + 1 + 16 + 4 + 4 + 1);
-  Buffer.from(disc('MarketConfig')).copy(b);
-  b.writeUInt8(enabled ? 1 : 0, 8);
-  b.write(symbol, 9);
-  b.writeUInt32LE(maxBps, 25);
-  b.writeUInt32LE(closedBps, 29);
-  return b;
+/** A MarketConfig account image exactly as props_vault writes it (Anchor's coder over the bundled IDL). */
+async function marketConfig(marketToken: string, enabled: boolean, symbol: string, maxBps: number, closedBps: number): Promise<Buffer> {
+  const indexSymbol = Buffer.alloc(16);
+  indexSymbol.write(symbol);
+  return vaultCoder.encode('marketConfig', {
+    marketToken: new PublicKey(marketToken), gmMarket: PublicKey.default, enabled, indexSymbol: [...indexSymbol], maxLeverageBps: maxBps,
+    closedMaxLeverageBps: closedBps, maxPositionUsd: new BN(10_000_000_000), maxTotalOiUsd: new BN(50_000_000_000), oiLongUsd: new BN(0),
+    oiShortUsd: new BN(0), sessionRestricted: false, bump: 255,
+  });
 }
 
-function idlAccount(idl: Idl): { address: string; data: Buffer } {
-  const base = pubkeyBytes(findProgramAddress([], PROGRAM_ID));
-  const address = base58Encode(createHash('sha256').update(base).update('anchor:idl').update(pubkeyBytes(PROGRAM_ID)).digest());
-  const json = deflateSync(JSON.stringify(idl));
-  const header = Buffer.alloc(44);
-  header.writeUInt32LE(json.length, 40);
-  return { address, data: Buffer.concat([header, json]) };
+/** Anchor's IDL account: createWithSeed(PDA([], program), "anchor:idl", program); data = disc, authority, u32 len, zlib JSON. */
+async function fetchAnchorIdl(rpcUrl: string, programId: string): Promise<Idl> {
+  const base = pubkeyBytes(findProgramAddress([], programId));
+  const address = base58Encode(createHash('sha256').update(base).update('anchor:idl').update(pubkeyBytes(programId)).digest());
+  const [data] = (await getMultipleAccounts(rpcUrl, [address])).accounts;
+  if (!data) throw new Error(`program ${programId} has no Anchor IDL account (${address})`);
+  const buf = Buffer.from(data, 'base64');
+  return JSON.parse(inflateSync(buf.subarray(44, 44 + buf.readUInt32LE(40))).toString('utf8')) as Idl;
 }
 
 async function rpcStub(accounts: Map<string, Buffer>): Promise<{ url: string; server: Server }> {
@@ -75,12 +67,12 @@ async function rpcStub(accounts: Map<string, Buffer>): Promise<{ url: string; se
   return { url: `http://127.0.0.1:${port}`, server };
 }
 
-function allowlistAccounts(): Map<string, Buffer> {
-  const idl = idlAccount(TEST_IDL);
+async function allowlistAccounts(): Promise<Map<string, Buffer>> {
   return new Map([
-    [idl.address, idl.data],
-    [marketConfigAddress(PROGRAM_ID, SOL_POOL), marketConfig(true, 'SOL', 200_000, 80_000)],
-    [marketConfigAddress(PROGRAM_ID, BTC_POOL), marketConfig(false, 'BTC', 250_000, 80_000)],
+    [marketConfigAddress(PROGRAM_ID, SOL_POOL), await marketConfig(SOL_POOL, true, 'SOL', 200_000, 80_000)],
+    [marketConfigAddress(PROGRAM_ID, BTC_POOL), await marketConfig(BTC_POOL, false, 'BTC', 250_000, 80_000)],
+    // Lamports sent to an unused MarketConfig address leave a data-less system account there.
+    [marketConfigAddress(PROGRAM_ID, 'DAY6Qr1FKgJQFvjJAhFUZUWHzx8UbbbkRmt6G6AYswWG'), Buffer.alloc(0)],
   ]);
 }
 
@@ -104,18 +96,32 @@ async function start(env: Record<string, string>) {
   return { app, service, events, get, beforeReady, stop: async () => (abort.abort(), app.close()) };
 }
 
-test('allowlist: Anchor IDL account and MarketConfig PDAs are read and decoded', async () => {
-  const { url, server } = await rpcStub(allowlistAccounts());
+test('allowlist: MarketConfig PDAs are read and decoded with the IDL bundled in @props/sdk', async () => {
+  const { url, server } = await rpcStub(await allowlistAccounts());
   try {
-    const idl = await fetchAnchorIdl(url, PROGRAM_ID);
-    assert.deepEqual(idl, TEST_IDL);
-    const list = await fetchAllowlist(url, PROGRAM_ID, idl, [SOL_POOL, BTC_POOL, '11111111111111111111111111111111']);
+    const list = await fetchAllowlist(url, PROGRAM_ID, [SOL_POOL, BTC_POOL, 'DAY6Qr1FKgJQFvjJAhFUZUWHzx8UbbbkRmt6G6AYswWG', '11111111111111111111111111111111']);
     assert.deepEqual(Object.fromEntries(list), {
       [SOL_POOL]: { enabled: true, maxLeverage: 20, closedMaxLeverage: 8 },
       [BTC_POOL]: { enabled: false, maxLeverage: 25, closedMaxLeverage: 8 },
     });
   } finally {
     server.close();
+  }
+});
+
+test('price pin hook: registered only under NODE_ENV=test on localnet, and only for the admin token', async () => {
+  for (const [env, cluster, status] of [[{}, 'localnet', 404], [{ NODE_ENV: 'test' }, 'mainnet-beta', 404], [{ NODE_ENV: 'test' }, 'localnet', 401]] as const) {
+    const app = Fastify({ logger: false });
+    const abort = new AbortController();
+    await register({
+      app, log: app.log, env, services: {}, signal: abort.signal, publish: () => {}, notify: async () => {},
+      config: { ADMIN_API_TOKEN: 'a'.repeat(32), SOLANA_CLUSTER: cluster } as never, db: {} as never, sql: {} as never, rpc: {} as never,
+    });
+    await app.ready();
+    const res = await app.inject({ method: 'PUT', url: '/v1/test/prices/SOL', payload: { price: '1' } });
+    abort.abort();
+    await app.close();
+    assert.equal(res.statusCode, status, `${JSON.stringify(env)} ${cluster}`);
   }
 });
 
@@ -220,7 +226,7 @@ test('live: routes, stream events and service API without a deployed program', {
 });
 
 test('live: allowlisted markets become tradable with MarketConfig leverage', { skip, timeout: 60_000 }, async () => {
-  const { url, server } = await rpcStub(allowlistAccounts());
+  const { url, server } = await rpcStub(await allowlistAccounts());
   const { get, stop } = await start({ PROGRAM_ID, RPC_URL: url });
   try {
     const by = Object.fromEntries((await get<Market[]>('/v1/markets')).body.map((r) => [r.symbol, r]));

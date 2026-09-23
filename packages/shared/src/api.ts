@@ -16,7 +16,8 @@
 //   POST /sim/:id/orders SimOrderRequest -> SimOrderResponse  DELETE /sim/:id/orders/:orderId -> SimOrderResponse
 //   POST /sim/:id/positions/:positionId/close SimCloseRequest -> SimOrderResponse
 //   PUT  /sim/:id/positions/:positionId/protection SimProtectionRequest -> Position
-//   POST /practice/reset -> AccountSummary                     GET  /sim/:id/fills -> Fill[] (every fill, trades-root order)
+//   POST /practice/reset -> AccountSummary                     GET  /sim/:id/fills -> Fill[] (every fill, trades-root order;
+//        the owner's, or anyone's once the evaluation result is onchain: see ./merkle.ts)
 //   GET  /payouts -> Payout[]                                 GET  /payouts/:id -> Payout
 //   GET  /verify?q -> VerifyResult                            GET  /vault -> VaultStats
 // Wallet-signed transactions (evaluation purchase, funded activation/trading, payout requests) are built in the
@@ -102,7 +103,8 @@ export interface Health {
 }
 export interface NonceRequest { wallet: Pubkey }
 export interface VerifyResponse { wallet: Pubkey; expiresAt: Millis }
-export interface KycStartRequest { country: string /* ISO 3166-1 alpha-2 */ }
+/** Residence: `country` ISO 3166-1 alpha-2; `region` ISO 3166-2 (e.g. "UA-30"), required where only part of a country is sanctioned (UA). */
+export interface KycStartRequest { country: string; region?: string }
 export interface KycStartResponse { kyc: 'pending' }
 export interface NotificationsReadRequest { ids?: string[] /* omit = all */ }
 export interface NonceResponse { message: string; nonce: string; expiresAt: Millis }
@@ -137,7 +139,8 @@ export interface AccountSummary {
   targetProgressPct: number | null;
   eligiblePayout: Decimal | null;          // funded: trader share of realized profit now
   createdAt: Millis; activatedAt: Millis | null; resolvedAt: Millis | null;
-  evidence: { evaluation?: Pubkey; funded?: Pubkey; owner?: Pubkey; purchaseSignature?: string; activationSignature?: string };
+  /** `resultSignature`: the confirmed record_evaluation_result transaction; absent until the result is onchain. */
+  evidence: { evaluation?: Pubkey; funded?: Pubkey; owner?: Pubkey; purchaseSignature?: string; resultSignature?: string; activationSignature?: string };
   freshness: DataFreshness;
 }
 
@@ -221,6 +224,8 @@ export interface EvidenceItem {
   title: string; description: string; state: EvidenceState;
   address?: Pubkey; signature?: string; slot?: number; ts?: Millis;
   explorerUrl?: string; establishes: string;   // plain English: what this record proves, and its limits
+  /** A recorded evaluation result: the trades root (hex) it committed to, recomputable from GET /sim/:evaluation/fills. */
+  tradesRoot?: { root: string; evaluation: Pubkey };
 }
 export interface VerifyResult {
   query: string; kind: 'evaluation' | 'funded' | 'payout' | 'transaction' | 'wallet' | 'not_found' | 'unsupported';

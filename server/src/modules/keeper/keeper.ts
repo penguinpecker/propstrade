@@ -11,9 +11,11 @@ import {
   type PropsVaultClient,
 } from '@props/sdk';
 import type { Db } from '../../db/client.ts';
+import type { Sealer } from '../../lib/integrity.ts';
 import { chainJobs, fundedAccounts, gmOrders, gmtradeDeploys, indexerCursors, payouts, venueFills } from '../../db/schema.ts';
 import type { KeeperStatus, MarketDataService } from '../types.ts';
 import { money } from '../chain/funded.ts';
+import { fundedHref } from '../chain/projector.ts';
 import { enqueue } from '../chain/jobs.ts';
 import { dec, toMicro6, type ChainReader } from '../chain/reader.ts';
 import { fitsInTransaction, sendTransaction, type SendRpc } from '../chain/send.ts';
@@ -52,6 +54,8 @@ export interface KeeperDeps {
   marketdata?: Pick<MarketDataService, 'market' | 'marketState'>;
   /** Signs every keeper transaction; without it the keeper only watches and alerts. */
   risk?: Keypair;
+  /** Seals the payout approvals the keeper queues for the chain-job executor. */
+  sealer: Sealer;
   /** GMTrade's reviewed deploy slot (GMTRADE_DEPLOY_SLOT): on first sight any other deploy is an unreviewed upgrade. */
   reviewedDeploySlot?: number;
   log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>;
@@ -67,7 +71,6 @@ export function createKeeper(d: KeeperDeps) {
   const { db, rpc, client } = d;
   const clock = d.now ?? Date.now;
   const status: KeeperStatus = { leader: false, lastTickAt: null, gmtradeUpgrade: null };
-  const notifiedBreach = new Set<string>();
   let indexerCheckedAt = 0;
 
   // ---------- reading an account ----------
@@ -130,6 +133,9 @@ export function createKeeper(d: KeeperDeps) {
     switch (a.type) {
       case 'topUp': return client.topUpOwner({ funded: address });
       case 'restrict': return client.restrict({ riskAuthority: risk.publicKey, funded: address, restricted: true });
+      case 'markBreached': return client.markBreached({ riskAuthority: risk.publicKey, funded: address });
+      // The program re-checks every existing GMTrade position of the owner PDA as flat.
+      case 'closeFunded': return client.closeFunded({ riskAuthority: risk.publicKey, funded: ref, positions: await client.fetchOwnerPositions(address) });
       case 'closeCompleted': return client.closeCompletedOrder({ funded: address, order: new PublicKey(a.order) });
       case 'cancel': return client.cancelOrder({ authority: risk.publicKey, funded: ref, order: new PublicKey(a.order) });
       case 'sync': {
@@ -176,7 +182,7 @@ export function createKeeper(d: KeeperDeps) {
   async function reportSent(step: Step, sent: Action[], read: Read, trader: string, signature: string) {
     const { funded } = read.view;
     d.log.info({ funded, kind: step.kind, actions: sent.map((a) => a.type), signature }, `keeper: ${step.detail}`);
-    const href = `/account/${funded}`;
+    const href = fundedHref(funded);
     const cancelled = sent.flatMap((a) => {
       const o = a.type === 'cancel' ? read.view.orders.find((x) => x.order === a.order) : undefined;
       const slot = o && read.view.slots.find((s) => s.index === o.slot);
@@ -188,15 +194,12 @@ export function createKeeper(d: KeeperDeps) {
         body: `An account holds at most 8 GMTrade orders, so to place its closing order the risk service cancelled your ${cancelled.join(', ')}.`,
       });
     }
+    // The trader hears of a breach from the indexed AccountBreached event (chain projector).
     if (step.kind === 'breach') {
-      d.alerts.send(`breach:${funded}`, 'critical', `Funded account ${funded} reached its equity floor: restricted and closing every open position (last transaction ${signature})`);
-      if (!notifiedBreach.has(funded)) {
-        notifiedBreach.add(funded);
-        await d.notify(trader, {
-          kind: 'risk', title: 'Loss limit reached', href,
-          body: 'Your funded account\'s equity reached its floor. New positions are blocked and the risk service is closing your open positions.',
-        });
-      }
+      d.alerts.send(`breach:${funded}`, 'critical', `Funded account ${funded} reached its equity floor: marked breached and closing every open position; it is closed once flat (last transaction ${signature})`);
+    }
+    if (step.kind === 'closure') {
+      d.alerts.send(`closed:${funded}`, 'info', `Breached funded account ${funded} closed: its USDC and SOL are back in the vault and its principal is released (${signature})`);
     }
     if (step.kind === 'session') {
       for (const a of sent) {
@@ -222,8 +225,8 @@ export function createKeeper(d: KeeperDeps) {
     for (let i = 0; read && i < MAX_STEPS; i++) {
       const step = planStep(read.view, { now: clock(), ownerSolMin: big(ctx.config.ownerSolMin), upgradePending: ctx.upgradePending, skip });
       if (!step) break;
-      if (step.kind === 'breach' && !breachSeen) {
-        // A breach restricts the account until an operator lifts it: act only when a second, fresh read agrees.
+      if (step.actions.some((a) => a.type === 'markBreached') && !breachSeen) {
+        // Marking an account breached ends it for good: act only when a second, fresh read agrees.
         breachSeen = true;
         read = await readAccount(row.address, ctx.market);
         continue;
@@ -312,7 +315,7 @@ export function createKeeper(d: KeeperDeps) {
       fills, links: linkedPositions(ours, exposuresOf(others), clock()), now: clock(),
     });
     if (r.decision === 'approve') {
-      if (await enqueue(db, 'approve_payout', p.address, { payout: p.address })) d.log.info({ payout: p.address }, 'keeper: payout approved for payment');
+      if (await enqueue(db, d.sealer, 'approve_payout', p.address, { payout: p.address })) d.log.info({ payout: p.address }, 'keeper: payout approved for payment');
     } else if (r.decision === 'hold') {
       const reviewNote = r.reasons.join('; ');
       const [held] = await db.update(payouts).set({ status: 'reviewing', reviewNote })

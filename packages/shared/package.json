@@ -5,5 +5,5 @@
   "type": "module",
   "main": "src/api.ts",
   "types": "src/api.ts",
-  "exports": { ".": "./src/api.ts" }
+  "exports": { ".": "./src/api.ts", "./merkle": "./src/merkle.ts", "./siws": "./src/siws.ts" }
 }

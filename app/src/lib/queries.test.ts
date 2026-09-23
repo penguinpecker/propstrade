@@ -41,6 +41,17 @@ describe('applyStreamEvent', () => {
     expect(client.getQueryData(keys.account('acc'))).toBeUndefined();
   });
 
+  it('refetches trade history when a position leaves the list, not on every valuation', () => {
+    const client = createQueryClient();
+    client.setQueryData(keys.positions('acc'), [{ id: 'p1' }, { id: 'p2' }]);
+    client.setQueryData(keys.history('acc'), []);
+    const stale = () => client.getQueryState(keys.history('acc'))!.isInvalidated;
+    applyStreamEvent(client, { type: 'positions', accountId: 'acc', positions: [{ id: 'p1' }, { id: 'p2' }, { id: 'p3' }] as Position[] });
+    expect(stale()).toBe(false);
+    applyStreamEvent(client, { type: 'positions', accountId: 'acc', positions: [{ id: 'p1' }, { id: 'p3' }] as Position[] });
+    expect(stale()).toBe(true);
+  });
+
   it('prepends notifications to the loaded list, newest 100, without duplicates', () => {
     const client = createQueryClient();
     client.setQueryData<Notification[]>(keys.notifications, [notification('old')]);
@@ -50,6 +61,16 @@ describe('applyStreamEvent', () => {
     expect(list).toHaveLength(100);
     expect(list[0]!.id).toBe('n109');
     expect(new Set(list.map(n => n.id)).size).toBe(100);
+  });
+
+  it('re-reads /v1/me on account and payout notices, not on fills', () => {
+    const client = createQueryClient();
+    client.setQueryData(keys.me, { wallet: 'w', kyc: 'pending' });
+    const stale = () => client.getQueryState(keys.me)!.isInvalidated;
+    applyStreamEvent(client, { type: 'notification', notification: notification('fill') });
+    expect(stale()).toBe(false);
+    applyStreamEvent(client, { type: 'notification', notification: { ...notification('kyc'), kind: 'account', title: 'Identity verified' } });
+    expect(stale()).toBe(true);
   });
 
   it('leaves an unloaded notification list for its first fetch', () => {

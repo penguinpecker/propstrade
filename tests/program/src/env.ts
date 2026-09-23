@@ -30,6 +30,7 @@ import {
   ownerPda,
   ownerUsdcAddress,
   solTreasuryPda,
+  tierPda,
   toMicro,
   traderProfilePda,
 } from '@props/sdk';
@@ -69,6 +70,7 @@ export const CONFIG_PARAMS = {
   minPayout: bn(usdc('50')),
   ownerSolTarget: bn(0.25 * LAMPORTS_PER_SOL),
   ownerSolMin: bn(0.1 * LAMPORTS_PER_SOL),
+  maxDailyPrincipal: bn(usdc('100000')),
 };
 /** Spec §1 defaults. */
 export const TIERS = {
@@ -202,6 +204,12 @@ export class Env {
     return gmCoder.decode(name, Buffer.from(info.data));
   }
 
+  /** The fee and version of the tier as it is onchain now: what a trader reviewing it would sign for. */
+  reviewed(tierId: number): { feeUsdc: bigint; tierVersion: number } {
+    const t = this.account('tier', tierPda(tierId));
+    return { feeUsdc: BigInt(t.feeUsdc.toString()), tierVersion: t.version };
+  }
+
   funded(address: PublicKey): FundedRef {
     return { address, account: this.account('fundedAccount', address) as FundedAccount };
   }
@@ -307,7 +315,7 @@ export class Env {
     const profile = this.svm.getAccount(traderProfilePda(trader.publicKey));
     const index = profile ? this.account('traderProfile', traderProfilePda(trader.publicKey)).evaluationCount : 0;
     if (this.usdcBalance(getAssociatedTokenAddressSync(USDC_MINT, trader.publicKey)) < usdc('1000')) this.setUsdc(trader.publicKey, usdc('1000'));
-    this.ok(await this.vault.buyEvaluation({ trader: trader.publicKey, tierId, index }), [trader]);
+    this.ok(await this.vault.buyEvaluation({ trader: trader.publicKey, tierId, index, ...this.reviewed(tierId) }), [trader]);
     const evaluation = evaluationPda(trader.publicKey, index);
     if (!profile || !this.account('traderProfile', traderProfilePda(trader.publicKey)).identityHash.some((b) => b !== 0)) {
       this.ok(await this.vault.setIdentity({ kycAuthority: this.kyc.publicKey, wallet: trader.publicKey, identityHash: hash32(trader.publicKey.toBase58()) }), [this.kyc]);

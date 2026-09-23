@@ -6,6 +6,7 @@ import { PROPS_VAULT_IDL, PROPS_VAULT_PROGRAM_ID, PropsVaultClient } from '@prop
 import type { AccountDetail, AccountSummary, Performance } from '@props/shared';
 import { createDb } from '../../../db/client.ts';
 import { runMigrations } from '../../../db/migrate.ts';
+import { createSealer } from '../../../lib/integrity.ts';
 import { recreateDatabase, testDatabaseUrl } from '../../../../test/db.ts';
 import type { EvaluationResult, SimService } from '../../types.ts';
 
@@ -20,6 +21,10 @@ export async function freshDb(suffix: string) {
 
 /** Builders never touch the network; the connection only satisfies Anchor's provider type. */
 export const offlineClient = () => new PropsVaultClient(new Connection('http://127.0.0.1:1'));
+
+/** SESSION_SECRET of the servers these tests start, and the row sealer it gives (server/src/lib/integrity.ts). */
+export const TEST_SESSION_SECRET = 's'.repeat(64);
+export const sealer = createSealer(TEST_SESSION_SECRET);
 
 /**
  * A props_vault account's data as the program stores it. Anchor's own encode() writes into a fixed 1,000-byte buffer,

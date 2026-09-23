@@ -19,6 +19,7 @@ pub const MAX_RISK_AUTHORITIES: usize = 4;
 pub const MAX_SLOTS: usize = 8;
 pub const MAX_ORDERS: usize = 8;
 pub const BPS: u64 = 10_000;
+pub const DAY_SECONDS: i64 = 86_400;
 /// USD amounts stored as u64 are micro-USD (6 dp, like USDC). GMTrade sizes are u128 with 1 USD = 10^20.
 /// Multiply micro-USD by this to get GMTrade USD.
 pub const MICRO_USD_TO_GM: u128 = 100_000_000_000_000;
@@ -51,6 +52,9 @@ pub struct ConfigParams {
     /// Owner PDA SOL float, lamports: topped up to `owner_sol_target` whenever it drops below `owner_sol_min`.
     pub owner_sol_target: u64,
     pub owner_sol_min: u64,
+    /// Principal `activate_funded` may post per day, USDC base units. Bounds what a compromised risk or KYC key, or a
+    /// tampered server database (evaluation results and identities are decided off-chain), can put at risk.
+    pub max_daily_principal: u64,
 }
 
 impl ConfigParams {
@@ -59,6 +63,7 @@ impl ConfigParams {
         require!(self.min_payout > 0, VaultError::InvalidParams);
         require!(self.owner_sol_min >= rent_exempt_min, VaultError::InvalidParams);
         require!(self.owner_sol_target >= self.owner_sol_min, VaultError::InvalidParams);
+        require!(self.max_daily_principal > 0, VaultError::InvalidParams);
         Ok(())
     }
 }
@@ -81,6 +86,11 @@ pub struct Config {
     pub min_payout: u64,
     pub owner_sol_target: u64,
     pub owner_sol_min: u64,
+    pub max_daily_principal: u64,
+    /// The current activation window: it opens with the first activation after the previous one ended, lasts a day,
+    /// and `principal_in_window` counts what was posted in it.
+    pub principal_window_start: i64,
+    pub principal_in_window: u64,
     pub paused: Pauses,
     /// Totals, USDC base units.
     pub fees_collected: u64,
@@ -106,6 +116,21 @@ impl Config {
         self.min_payout = p.min_payout;
         self.owner_sol_target = p.owner_sol_target;
         self.owner_sol_min = p.owner_sol_min;
+        self.max_daily_principal = p.max_daily_principal;
+    }
+
+    /// Counts `principal` against the day's activation limit.
+    // ponytail: a window anchored at its first activation lets up to 2× the limit through across a window edge; keep
+    // per-activation timestamps for a true rolling day if that matters.
+    pub fn allocate_daily_principal(&mut self, principal: u64, now: i64) -> Result<()> {
+        if now >= self.principal_window_start.saturating_add(DAY_SECONDS) {
+            self.principal_window_start = now;
+            self.principal_in_window = 0;
+        }
+        let used = self.principal_in_window.checked_add(principal).ok_or(VaultError::MathOverflow)?;
+        require!(used <= self.max_daily_principal, VaultError::DailyPrincipalLimit);
+        self.principal_in_window = used;
+        Ok(())
     }
 }
 

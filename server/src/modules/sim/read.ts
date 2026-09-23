@@ -6,7 +6,7 @@ import type { Db } from '../../db/client.ts';
 import { accountEvents, accounts, closedTrades, equitySnapshots, simFills } from '../../db/schema.ts';
 import type { AccountsProvider, MarketDataService } from '../types.ts';
 import { loadAccount, orderList, practiceId, snapshot, toFill, visibleTo, type AccountRow } from './book.ts';
-import { canonicalOrder } from './merkle.ts';
+import { canonicalOrder } from '@props/shared/merkle';
 import { micro, microText, trim, usd, usdText } from './model.ts';
 
 const PERIOD_MS: Record<Performance['period'], number | null> = { '1W': 7 * 86_400_000, '1M': 30 * 86_400_000, All: null };
@@ -61,7 +61,7 @@ export function createReader(db: Db, md: MarketDataService, ensurePractice: (wal
     };
   }
 
-  const reader: AccountsProvider & { fills(wallet: string, id: string): Promise<Fill[] | undefined> } = {
+  const reader: AccountsProvider & { fills(wallet: string | null, id: string): Promise<Fill[] | undefined> } = {
     async list(wallet) {
       await find(wallet, practiceId(wallet)); // opens the practice account on first use
       const rows = await db.select({ id: accounts.id }).from(accounts).where(visibleTo(wallet)).orderBy(asc(accounts.createdAt));
@@ -100,9 +100,14 @@ export function createReader(db: Db, md: MarketDataService, ensurePractice: (wal
       const account = await find(wallet, id);
       return account && performance(account, period);
     },
-    /** Every fill of the account in the canonical trades-root order (merkle.ts). */
+    /**
+     * Every fill of the account in the canonical trades-root order (@props/shared/merkle): for its wallet, and for anyone
+     * once the evaluation's result, and with it the trades root, is recorded onchain (markRecorded).
+     */
     async fills(wallet, id) {
-      if (!(await find(wallet, id))) return undefined;
+      const own = wallet ? await find(wallet, id) : undefined;
+      const account = own ?? (await loadAccount(db, id));
+      if (!account || (account !== own && !(account.stage === 'evaluation' && account.resultSignature))) return undefined;
       return (await db.select().from(simFills).where(eq(simFills.accountId, id))).map(toFill).sort(canonicalOrder);
     },
   };

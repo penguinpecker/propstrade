@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compactUsd, freshnessLabel, isCurrent, marginFor, marketPrice, percent, signedUsd, tierRules, usd, usdBase } from './data.js';
+import { compactUsd, freshnessLabel, isCurrent, marginFor, marketPrice, percent, signedUsd, stageRestriction, tierRules, usd, usdBase } from './data.js';
 
 describe('formatters', () => {
   it('show a dash for values the API reports as unavailable', () => {
@@ -51,5 +51,22 @@ describe('marginFor', () => {
   it('rounds up to the micro-USD so size ÷ margin stays within the leverage, without float noise', () => {
     expect([marginFor(1001, 15), marginFor(1000.5, 5), marginFor(1000, 10)]).toEqual(['66.733334', '200.100000', '100.000000']);
     expect(1001 / Number(marginFor(1001, 15))).toBeLessThanOrEqual(15);
+  });
+});
+
+describe('stageRestriction', () => {
+  const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  const market = (symbol, tradable, pool) => ({ symbol, tradable, marketToken: 'm', pools: [{ marketToken: 'm', ...pool }], ...(tradable ? {} : { unavailableReason: 'Not available for funded trading' }) });
+  const usdcPool = { pure: true, longToken: USDC, shortToken: USDC };
+  const doge = market('DOGE', false, usdcPool);
+  const aave = market('AAVE', false, { pure: false, longToken: 'aave', shortToken: USDC });
+  const btc = market('BTC', true, usdcPool);
+
+  it('lets each stage trade what its engine or program accepts, with copy for that stage', () => {
+    expect([btc, doge, aave].map(m => stageRestriction(m, 'funded', USDC)?.label ?? null)).toEqual([null, 'Not available for funded trading', 'Not available for funded trading']);
+    expect(stageRestriction(doge, 'evaluation', USDC)).toEqual({ label: 'Not available in evaluations', reason: 'DOGE is not available in evaluations: they trade only the markets funded accounts can.' });
+    expect(stageRestriction(btc, 'evaluation', USDC)).toBeNull();
+    expect(stageRestriction(doge, 'practice', USDC)).toBeNull();
+    expect(stageRestriction(aave, 'practice', USDC)).toEqual({ label: 'Not available in practice', reason: 'AAVE has no USDC-only pool on GMTrade, so it cannot be traded here.' });
   });
 });

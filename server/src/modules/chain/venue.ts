@@ -18,7 +18,7 @@ import type { Db } from '../../db/client.ts';
 import { accountEvents, closedTrades, fundedAccounts, gmOrders, gmPositionSnapshots, venueFills } from '../../db/schema.ts';
 import { tokenAccountAmount } from '../../lib/solana.ts';
 import type { MarketDataService } from '../types.ts';
-import type { Notice } from './projector.ts';
+import { fundedHref, type Notice } from './projector.ts';
 import { gmUsd, micro, tokenAmount, unitPrice, type ChainReader, type MarketInfo } from './reader.ts';
 
 /** GMTrade's indexer (subsquid): fills and order removals of an owner. Injectable for tests. */
@@ -289,7 +289,7 @@ export function createVenue(d: VenueDeps) {
     });
     const [row] = await d.db.select({ trader: fundedAccounts.trader }).from(fundedAccounts).where(eq(fundedAccounts.address, funded));
     if (row && Date.now() - endedAt < NOTIFY_WITHIN_MS) {
-      await d.notify({ wallet: row.trader, kind: 'fill', title, body: detail, href: `/account/${funded}` })
+      await d.notify({ wallet: row.trader, kind: 'fill', title, body: detail, href: fundedHref(funded) })
         .catch((err: unknown) => d.log.warn({ err }, 'notification failed'));
     }
   }
@@ -355,7 +355,7 @@ export function createVenue(d: VenueDeps) {
           )).orderBy(venueFills.venueId);
           await tx.insert(closedTrades).values(roundTrip(funded, fills)).onConflictDoNothing();
         }
-        return { wallet: trader, kind: 'fill' as const, title: a.title, body: a.detail, href: `/account/${funded}` };
+        return { wallet: trader, kind: 'fill' as const, title: a.title, body: a.detail, href: fundedHref(funded) };
       });
       if (notice) {
         added++;

@@ -1,7 +1,7 @@
 import React, { createContext, lazy, Suspense, useContext, useEffect, useState, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { ArrowRight, ArrowUpRight, Bell, BookOpen, Check, ChevronDown, ExternalLink, HelpCircle, LayoutGrid, Menu, Moon, Search, ShieldCheck, Sun, Wallet, X } from 'lucide-react';
-import { dateTime, explorerAddress, explorerTx, freshnessLabel, isCurrent, marketPrice, percent, shortAddress, tierRules, usd } from './data.js';
+import { dateTime, explorerAddress, explorerTx, freshnessLabel, isCurrent, marketPrice, percent, shortAddress, stageRestriction, tierRules, usd } from './data.js';
 import { Badge, Brand, Button, DataRow, Dialog, Empty, FreshnessBadge, IconButton, InlineLink, MarketIcon, Notice, Pending, RuleList, SessionNotice, Unavailable, WalletOptions } from './ui.jsx';
 import Trading from './Trading.jsx';
 import { AccountsPage, AccountPage, PerformancePage, ActivityPage, MarketsPage } from './Workspace.jsx';
@@ -23,7 +23,12 @@ const AppContext = createContext(null);
 export const useApp = () => useContext(AppContext);
 const read = (key, fallback) => { try { const value = localStorage.getItem('props.' + key); return value ? JSON.parse(value) : fallback; } catch { return fallback; } };
 export function useSaved(key, fallback) { const [value, setValue] = useState(() => read(key, fallback)); useEffect(() => { try { localStorage.setItem('props.' + key, JSON.stringify(value)); } catch { /* private mode: keep it for this visit */ } }, [key, value]); return [value, setValue]; }
-const parseHash = () => { const [path, search = ''] = location.hash.slice(1).split('?'); return { path: path || '/trade/funded', query: new URLSearchParams(search) }; };
+/** An empty hash opens the terminal of the stage the trader last worked in. */
+const parseHash = () => { const [path, search = ''] = location.hash.slice(1).split('?'); return { path: path && path !== '/' ? path : `/trade/${read('stage', 'funded')}`, query: new URLSearchParams(search) }; };
+/** Pages that show one account: `?id=` names it (notification, past-account and result links), else the stage's account. */
+const ACCOUNT_PAGE = /^\/(account\/|performance$|activity$)/;
+/** Onboarding pages review a tier, not an account. */
+const ONBOARDING = ['/get-funded', '/program', '/connect', '/checkout'];
 const newestFirst = (a, b) => b.createdAt - a.createdAt;
 
 export default function App() {
@@ -54,11 +59,16 @@ export default function App() {
   const marketsQuery = useMarkets();
   const markets = marketsQuery.data ?? [];
   const accountsQuery = useAccounts(signedIn);
+  const notificationsQuery = useNotifications(signedIn);
   const accounts = signedIn ? accountsQuery.data ?? [] : [];
   const closeModal = useCallback(() => { setModal(null); setSearch(''); }, []);
   const navigate = useCallback((to) => { location.hash = to; setModal(null); setMobileNav(false); window.scrollTo(0, 0); }, []);
   useEffect(() => { const handler = () => setRoute(parseHash()); window.addEventListener('hashchange', handler); return () => window.removeEventListener('hashchange', handler); }, []);
-  useEffect(() => { const match = path.match(/\/(trade|account)\/(funded|evaluation|practice)/); if (match) setStage(match[2]); }, [path]);
+  const routeId = ACCOUNT_PAGE.test(path) ? query.get('id') : null;
+  const routed = routeId ? accounts.find(a => a.id === routeId) ?? null : null;
+  useEffect(() => { const next = routed?.stage ?? path.match(/\/(trade|account)\/(funded|evaluation|practice)/)?.[2]; if (next) setStage(next); }, [path, routed?.stage]);
+  // A link to a current account also makes it the stage's selected account (switcher, terminal); a past one is only shown.
+  useEffect(() => { if (routed && isCurrent(routed, accounts)) setSelected(prev => prev[routed.stage] === routed.id ? prev : { ...prev, [routed.stage]: routed.id }); }, [routed?.id]);
   useEffect(() => { if (!toast) return; const id = setTimeout(() => setToast(null), 4800); return () => clearTimeout(id); }, [toast]);
   useEffect(() => { const handler = e => { if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); setModal('markets'); } }; window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler); }, []);
   useEffect(() => { document.documentElement.dataset.density = prefs.density.toLowerCase(); document.documentElement.dataset.motion = prefs.motion ? 'reduced' : 'normal'; }, [prefs]);
@@ -66,14 +76,14 @@ export default function App() {
   const market = markets.find(m => m.symbol === marketSymbol) ?? markets.find(m => m.symbol === 'BTC') ?? markets[0];
   /** The account a stage works with: the one chosen in the switcher, else the newest current one, else the newest. */
   const accountFor = s => { const list = accounts.filter(a => a.stage === s).sort(newestFirst); return list.find(a => a.id === selected[s]) ?? list.find(a => isCurrent(a, accounts)) ?? list[0] ?? null; };
-  const account = accountFor(stage);
+  const account = routeId ? routed : accountFor(stage);
   const tiers = config.data?.tiers ?? [];
   const tier = tiers.find(t => t.id === tierId && t.enabled) ?? tiers.find(t => t.enabled) ?? null;
   const selectMarket = (symbol) => { setMarketSymbol(symbol); closeModal(); navigate(`/trade/${stage}`); };
   const selectAccount = (next, to = path.startsWith('/trade') ? 'trade' : 'account') => { setSelected(prev => ({ ...prev, [next.stage]: next.id })); setStage(next.stage); navigate(`/${to}/${next.stage}`); };
   const copy = async (value) => { try { await navigator.clipboard.writeText(value); notify('Copied to clipboard'); } catch { notify('Copy unavailable', 'Select the address and copy it manually.'); } };
   const openRecord = record => setModal({ type: 'record', record });
-  const value = { path, query, navigate, stage, setStage, config, tiers, tier, setTierId, markets, marketsQuery, market, marketSymbol, selectMarket, accounts, accountsQuery, account, accountFor, selectAccount, session, signedIn, favorites, setFavorites, prefs, setPrefs, theme, setTheme, modal, setModal, closeModal, notify, streamStatus, live, openRecord, copy, showsNotification };
+  const value = { path, query, navigate, stage, setStage, config, tiers, tier, setTierId, markets, marketsQuery, market, marketSymbol, selectMarket, accounts, accountsQuery, account, accountFor, selectAccount, session, signedIn, favorites, setFavorites, prefs, setPrefs, theme, setTheme, modal, setModal, closeModal, notify, streamStatus, live, openRecord, copy, showsNotification, notificationsQuery };
   const currentSection = path.startsWith('/trade') || path === '/markets' ? 'Trade' : ['/payouts', '/payout/review', '/payout/receipt'].includes(path) ? 'Payouts' : ['/verify', '/vault'].includes(path) ? 'Verify' : path.includes('account') || ['/performance', '/activity', '/result', '/activate'].includes(path) ? 'Accounts' : '';
   const navItems = [['Trade', `/trade/${stage}`], ['Accounts', '/accounts'], ['Payouts', '/payouts'], ['Verify', '/verify']];
   let page;
@@ -97,17 +107,19 @@ export default function App() {
   else if (path === '/vault') page = <VaultPage />;
   else if (path === '/settings') page = <SettingsPage />;
   else if (ScreenIndex && path === '/screens') page = <Suspense fallback={null}><ScreenIndex /></Suspense>;
-  else page = <div className="page"><h1>This page has moved.</h1><Button onClick={() => navigate('/trade/funded')}>Open workspace</Button></div>;
+  else page = <div className="page"><h1>This page has moved.</h1><Button onClick={() => navigate(`/trade/${stage}`)}>Open workspace</Button></div>;
   const pickerRows = markets.filter(m => `${m.symbol} ${m.pair} ${m.name} ${m.category}`.toLowerCase().includes(search.toLowerCase()));
+  const unread = (notificationsQuery.data ?? []).filter(n => !n.read && showsNotification(n)).length;
+  const bellLabel = unread ? `Notifications, ${unread} unread` : 'Notifications';
 
   return <AppContext.Provider value={value}><div className="app-shell">
     <a className="skip-link" href="#main" onClick={e => { e.preventDefault(); document.getElementById("main").focus(); }}>Skip to content</a>
-    <header className="app-header"><Brand /><nav className={mobileNav ? 'main-nav mobile-open' : 'main-nav'} aria-label="Main navigation">{navItems.map(([label, href]) => <a key={label} href={`#${href}`} className={currentSection === label ? 'active' : ''} onClick={() => setMobileNav(false)}>{label}</a>)}</nav><div className="header-end"><button className="search-trigger" onClick={() => setModal('markets')}><Search size={15} /><span>Search markets</span><kbd>⌘ K</kbd></button><a className="funding-link" href="#/get-funded">Get funded <ArrowUpRight size={14} /></a><span className="header-rule" /><IconButton className="theme-toggle" icon={theme === 'dark' ? Sun : Moon} label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} /><IconButton icon={Bell} label="Notifications" onClick={() => setModal('notifications')} /><button className="wallet-button" onClick={() => setModal('wallet')}><span className="wallet-avatar"><Wallet size={13} /></span><span>{signedIn ? shortAddress(session.me.wallet) : session.status === 'connecting' ? 'Connecting…' : session.address ? 'Sign in' : 'Connect wallet'}</span><ChevronDown size={13} /></button><IconButton className="mobile-menu" icon={mobileNav ? X : Menu} label="Toggle navigation" onClick={() => setMobileNav(!mobileNav)} /></div></header>
+    <header className="app-header"><Brand /><nav className={mobileNav ? 'main-nav mobile-open' : 'main-nav'} aria-label="Main navigation">{navItems.map(([label, href]) => <a key={label} href={`#${href}`} className={currentSection === label ? 'active' : ''} onClick={() => setMobileNav(false)}>{label}</a>)}<button className="nav-extra" onClick={() => { setMobileNav(false); setModal('markets'); }}><Search size={14} /> Search markets</button></nav><div className="header-end"><button className="search-trigger" onClick={() => setModal('markets')}><Search size={15} /><span>Search markets</span><kbd>⌘ K</kbd></button><a className="funding-link" href="#/get-funded">Get funded <ArrowUpRight size={14} /></a><span className="header-rule" /><IconButton className="theme-toggle" icon={theme === 'dark' ? Sun : Moon} label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} /><span className="notifications-bell"><IconButton icon={Bell} label={bellLabel} onClick={() => setModal('notifications')} />{unread > 0 && <span className="unread-count" aria-hidden="true">{unread > 99 ? '99+' : unread}</span>}</span><button className="wallet-button" onClick={() => setModal('wallet')}><span className="wallet-avatar"><Wallet size={13} /></span><span>{signedIn ? shortAddress(session.me.wallet) : session.status === 'connecting' ? 'Connecting…' : session.address ? 'Sign in' : 'Connect wallet'}</span><ChevronDown size={13} /></button><IconButton className="mobile-menu" icon={mobileNav ? X : Menu} label="Toggle navigation" onClick={() => setMobileNav(!mobileNav)} /></div></header>
     <main id="main" tabIndex="-1" className={path.startsWith('/trade') ? 'terminal-main' : ''}>{page}</main>
     <footer className="app-footer"><div><span className={`connection-dot ${live ? '' : 'offline'}`} /><span role="status">{STREAM_LABELS[streamStatus]}</span></div><div>{ScreenIndex && <a href="#/screens"><LayoutGrid size={12} /> Screen index</a>}<button onClick={() => setModal('rules')}>Rules</button><button onClick={() => setModal('help')}><HelpCircle size={13} /> Help</button><span className="network-label">{NETWORK_LABEL} <span className="solana-lines" aria-hidden="true"><i /><i /><i /></span></span></div></footer>
   </div>
   {toast && <div className="toast" role="status" key={toast.key}><span className="toast-check"><Check size={16} /></span><div><strong>{toast.message}</strong>{toast.detail && <p>{toast.detail}</p>}</div><IconButton icon={X} label="Dismiss notification" onClick={() => setToast(null)} /></div>}
-  {modal === 'markets' && <Dialog title="Find a market" onClose={closeModal}><div className="search-field"><Search size={17} /><input autoFocus placeholder="Search markets, symbols or asset classes" aria-label="Search markets" value={search} onChange={e => setSearch(e.target.value)} /><kbd>ESC</kbd></div><div className="market-picker-list">{marketsQuery.isPending ? <Pending>Loading GMTrade markets…</Pending> : marketsQuery.isError ? <Unavailable title="Markets are unavailable" error={marketsQuery.error} retry={marketsQuery.refetch} /> : pickerRows.map(m => <button key={m.symbol} onClick={() => selectMarket(m.symbol)}><MarketIcon market={m} /><span><strong>{m.pair}</strong><small>{m.name} · {m.tradable ? 'Perpetual' : 'Not available for funded trading'}</small></span><span className="picker-price"><strong>{marketPrice(m.price, m)}</strong>{freshnessLabel(m) ? <FreshnessBadge market={m} /> : <small className={m.change24h > 0 ? 'positive' : 'negative'}>{percent(m.change24h)}</small>}</span><ArrowUpRight size={15} /></button>)}{marketsQuery.isSuccess && !pickerRows.length && <div className="empty"><h3>No matching market</h3><p>Try a symbol such as BTC or an asset class.</p></div>}</div><p className="dialog-note">{markets.length ? `${markets.length} GMTrade perpetual markets. Prices update live.` : 'Markets come from GMTrade.'}</p></Dialog>}
+  {modal === 'markets' && <Dialog title="Find a market" onClose={closeModal}><div className="search-field"><Search size={17} /><input autoFocus placeholder="Search markets, symbols or asset classes" aria-label="Search markets" value={search} onChange={e => setSearch(e.target.value)} /><kbd>ESC</kbd></div><div className="market-picker-list">{marketsQuery.isPending ? <Pending>Loading GMTrade markets…</Pending> : marketsQuery.isError ? <Unavailable title="Markets are unavailable" error={marketsQuery.error} retry={marketsQuery.refetch} /> : pickerRows.map(m => <button key={m.symbol} onClick={() => selectMarket(m.symbol)}><MarketIcon market={m} /><span><strong>{m.pair}</strong><small>{m.name} · {stageRestriction(m, stage, config.data?.usdcMint)?.label ?? 'Perpetual'}</small></span><span className="picker-price"><strong>{marketPrice(m.price, m)}</strong>{freshnessLabel(m) ? <FreshnessBadge market={m} /> : <small className={m.change24h > 0 ? 'positive' : 'negative'}>{percent(m.change24h)}</small>}</span><ArrowUpRight size={15} /></button>)}{marketsQuery.isSuccess && !pickerRows.length && <div className="empty"><h3>No matching market</h3><p>Try a symbol such as BTC or an asset class.</p></div>}</div><p className="dialog-note">{markets.length ? `${markets.length} GMTrade perpetual markets. Prices update live.` : 'Markets come from GMTrade.'}</p></Dialog>}
   {modal === 'accounts' && <AccountSwitcher onClose={closeModal} />}
   {modal === 'wallet' && <WalletDialog session={session} onClose={closeModal} navigate={navigate} notify={notify} />}
   {modal === 'rules' && <RulesDialog onClose={closeModal} />}
@@ -125,14 +137,15 @@ function AccountSwitcher({ onClose }) {
 }
 
 function RulesDialog({ onClose }) {
-  const { account, tier, config, navigate } = useApp();
+  const { account: stageAccount, tier, config, navigate, path } = useApp();
+  // While a tier is being reviewed for purchase, its rules are the ones that matter, not the open account's.
+  const account = ONBOARDING.includes(path) ? null : stageAccount;
   const rules = account?.rules ?? (tier && tierRules(tier));
-  return <Dialog title={account ? `Rules for ${account.label}` : tier ? `Rules for the ${tier.name} evaluation` : 'Account rules'} onClose={onClose}>{rules ? <><RuleList rules={rules} /><DataRow label="Equity floor" value={usd(rules.floorUsd)} /><DataRow label="Maximum total exposure" value={usd(rules.maxExposureUsd, 0)} />{rules.version != null && <DataRow label="Terms version" value={`v${rules.version}${rules.termsHash ? ` · ${rules.termsHash.slice(0, 8)}` : ''}`} />}<Notice tone="purple">Each position is backed only by its own collateral, so GMTrade can liquidate one position while your account equity is still above its floor. The floor includes open P&L and trading costs across all positions.</Notice></> : config.isError ? <Unavailable title="Rules are unavailable" error={config.error} retry={config.refetch} /> : <Pending>Loading the program rules…</Pending>}<Button className="full-width" onClick={() => navigate('/program')}>View program details</Button></Dialog>;
+  return <Dialog title={account ? `Rules for ${account.label}` : tier ? `Rules for the ${tier.name} evaluation` : 'Account rules'} onClose={onClose}>{rules ? <><RuleList rules={rules} /><DataRow label="Equity floor" value={usd(rules.floorUsd)} /><DataRow label="Maximum total exposure" value={usd(rules.maxExposureUsd, 0)} />{rules.version != null && <DataRow label="Terms version" value={`v${rules.version}${rules.termsHash ? ` · ${rules.termsHash.slice(0, 8)}` : ''}`} />}<Notice tone="purple">Each position is backed only by its own collateral, so GMTrade can liquidate one position while your account equity is still above its floor. The floor includes open P&L and trading costs across all positions.</Notice></> : config.isError ? <Unavailable title="Rules are unavailable" error={config.error} retry={config.refetch} /> : <Pending>Loading the program rules…</Pending>}{path === '/program' ? <Button className="full-width" onClick={onClose}>Back to program details</Button> : <Button className="full-width" onClick={() => navigate('/program')}>View program details</Button>}</Dialog>;
 }
 
 function NotificationsDialog({ onClose }) {
-  const { signedIn, navigate, setModal, showsNotification } = useApp();
-  const list = useNotifications(signedIn);
+  const { signedIn, navigate, setModal, showsNotification, notificationsQuery: list } = useApp();
   const markRead = useReadNotifications();
   const shown = (list.data ?? []).filter(showsNotification);
   const open = n => { if (!n.read) markRead.mutate([n.id]); if (n.href.startsWith('/')) navigate(n.href); else window.open(n.href, '_blank', 'noreferrer'); };

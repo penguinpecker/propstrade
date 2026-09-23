@@ -23,12 +23,13 @@ import { acceptablePrice } from '@props/sdk';
 import type { Db } from '../../db/client.ts';
 import { accountEvents, accounts, closedTrades, equitySnapshots, simFills, simOrders, simPositions, simResults } from '../../db/schema.ts';
 import { ApiError } from '../../errors.ts';
+import type { Sealer } from '../../lib/integrity.ts';
 import type { EvaluationResult, EvaluationTerms, MarketDataService, MarketState, ModuleContext } from '../types.ts';
 import {
-  PENDING, STALE_MS, TRADING, loadAccount, loadAccounts, loadBook, markPositions, modelAccount, orderList, practiceId, snapshot,
+  PENDING, STALE_MS, TRADING, loadAccount, loadAccounts, loadBook, markPositions, modelAccount, orderList, practiceId, shortIdOf, snapshot,
   toFill, toOrder, value, type AccountRow, type Book, type Mark, type OrderRow, type PositionRow, type Valuation,
 } from './book.ts';
-import { tradesRoot } from './merkle.ts';
+import { tradesRoot } from '@props/shared/merkle';
 import {
   MICRO_PER_USD, micro, microText, modelInput, priceText, quoteFor, stampPosition, tickUnits, triggered, trim, unitOf, usd,
   usdText, withinAcceptable,
@@ -69,6 +70,8 @@ export interface EngineDeps {
   publish: ModuleContext['publish'];
   notify: ModuleContext['notify'];
   fillDelayMs: number;
+  /** Seals each result row; a row without a valid seal (not written by this server) is never redelivered for signing. */
+  sealer: Sealer;
 }
 
 export type Engine = ReturnType<typeof createEngine>;
@@ -79,11 +82,20 @@ const stamped = () => {
   const now = new Date();
   return { createdAt: now, updatedAt: now };
 };
-const money = (s: string) => `$${Number(s).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const hrefOf = (a: Pick<AccountRow, 'stage'>) => `#/account/${a.stage}`;
+const fixed = (n: number, digits: number) => n.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+/** "$1,234.50", "−$0.29" (the sign ahead of the currency, as the app shows money). */
+const money = (s: string) => `${Number(s) < 0 ? '−' : ''}$${fixed(Math.abs(Number(s)), 2)}`;
+/** P&L: "+$1.20", "−$0.29". */
+const signedMoney = (s: string) => `${Number(s) < 0 ? '' : '+'}${money(s)}`;
+/** App route of one account: a wallet can hold several accounts of a stage, so every link names its account. */
+const hrefOf = (a: Pick<AccountRow, 'id' | 'stage'>) => `/account/${a.stage}?id=${encodeURIComponent(a.id)}`;
+/** "Evaluation 10K PT-9Kq3…": tells a wallet's same-size accounts apart in notifications. */
+const nameOf = (a: Pick<AccountRow, 'id' | 'stage' | 'label'>) => (a.stage === 'practice' ? a.label : `${a.label} ${shortIdOf(a)}`);
 const sizeLabel = (sizeUsd: string) => `${Number(sizeUsd) / 1000}K`;
 
-export function createEngine({ db, log, marketdata: md, publish, notify, fillDelayMs }: EngineDeps) {
+export function createEngine({ db, log, marketdata: md, publish, notify, fillDelayMs, sealer }: EngineDeps) {
+  /** A unit price at the market's display precision ("86,734.78"); fills and orders keep every digit. */
+  const shownPrice = (unit: bigint, decimals: number, symbol: string) => fixed(Number(priceText(unit, decimals)), md.market(symbol)?.priceDecimals ?? 2);
   const queues = new Map<string, Promise<unknown>>();
   const inflight = new Set<Promise<unknown>>();
   /**
@@ -288,7 +300,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       throw new ApiError(422, 'market_unavailable', `${market.symbol} has no USDC-only pool on GMTrade, so it cannot be traded here`);
     }
     if (account.stage === 'evaluation' && !market.tradable) {
-      throw new ApiError(422, 'market_unavailable', market.unavailableReason ?? `${market.symbol} is not available for evaluation trading`);
+      throw new ApiError(422, 'market_unavailable', `${market.symbol} is not available in evaluations: they trade only the markets funded accounts can`);
     }
     return { market, ...(await liveSession(market)) };
   }
@@ -421,7 +433,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
         });
       }
       await event(tx, accountId, 'order', `${req.kind} ${req.side.toLowerCase()} ${market.symbol}`,
-        `${money(usdText(size))} with ${money(microText(collateral))} margin${trigger === null ? '' : ` at ${priceText(trigger, dec)}`}`,
+        `${money(usdText(size))} with ${money(microText(collateral))} margin${trigger === null ? '' : ` at ${shownPrice(trigger, dec, market.symbol)}`}`,
         { amountUsd: usdText(size), symbol: market.symbol });
       fx.changed = true;
       fx.watch.push(row!);
@@ -515,7 +527,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
         }).returning();
         fx.watch.push(row!);
       }
-      const text = (p: bigint | null) => (p === null ? 'none' : priceText(p, dec));
+      const text = (p: bigint | null) => (p === null ? 'none' : shownPrice(p, dec, position.symbol));
       await event(tx, accountId, 'protection', `Protection on ${position.side.toLowerCase()} ${position.symbol}`,
         `Take profit ${text(want.TakeProfit)}, stop loss ${text(want.StopLoss)}`, { symbol: position.symbol });
       fx.changed = true;
@@ -579,7 +591,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       return event(tx, account.id, 'cancel', `${order.kind} order cancelled`, failure(err), { symbol: order.symbol, status: 'failed' });
     }
     if (order.acceptablePrice && !withinAcceptable(result.executionPrice, unitOf(order.acceptablePrice, dec), isLong, order.isIncrease)) {
-      const detail = `Price moved past your slippage limit: it would fill at ${priceText(result.executionPrice, dec)}, worse than your acceptable price ${trim(order.acceptablePrice)}`;
+      const detail = `Price moved past your slippage limit: it would fill at ${shownPrice(result.executionPrice, dec, order.symbol)}, worse than your acceptable price ${shownPrice(unitOf(order.acceptablePrice, dec), dec, order.symbol)}`;
       await cancel(tx, order, detail);
       return event(tx, account.id, 'cancel', `${order.kind} order cancelled`, detail, { symbol: order.symbol, status: 'failed' });
     }
@@ -648,7 +660,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     fx.filled = true;
 
     if (order) {
-      await tx.update(simOrders).set({ status: 'executed', statusDetail: `Filled at ${priceText(result.executionPrice, dec)}`, positionId: p.id, updatedAt: now })
+      await tx.update(simOrders).set({ status: 'executed', statusDetail: `Filled at ${shownPrice(result.executionPrice, dec, p.symbol)}`, positionId: p.id, updatedAt: now })
         .where(eq(simOrders.id, order.id));
       const armed = await tx.update(simOrders).set({ positionId: p.id, updatedAt: now })
         .where(and(eq(simOrders.parentOrderId, order.id), inArray(simOrders.status, PENDING))).returning();
@@ -664,9 +676,9 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     }
     const verb = !order ? 'liquidated' : isIncrease ? (f.position ? 'increased' : 'opened') : after ? 'reduced' : 'closed';
     const title = `${p.side} ${p.symbol} ${verb}`;
-    const detail = `${money(usdText(sizeDelta))} at ${priceText(result.executionPrice, dec)}, P&L ${money(microText(realized))}`;
+    const detail = `${money(usdText(sizeDelta))} at ${shownPrice(result.executionPrice, dec, p.symbol)}, P&L ${signedMoney(microText(realized))}`;
     await event(tx, account.id, order ? 'fill' : 'liquidation', title, detail, { amountUsd: usdText(sizeDelta), symbol: p.symbol, ts: now });
-    fx.notices.push({ kind: order ? 'fill' : 'risk', title, body: `${detail} (simulated)`, href: hrefOf(account) });
+    fx.notices.push({ kind: order ? 'fill' : 'risk', title, body: `${nameOf(account)}: ${detail} (simulated)`, href: hrefOf(account) });
 
     if (!after) {
       await tx.update(simOrders).set({ status: 'canceled', statusDetail: 'Position closed', updatedAt: now })
@@ -770,20 +782,20 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       const title = status === 'failed' ? 'Evaluation failed' : 'Practice account reached its loss limit';
       const body = `Equity ${equity} reached the ${money(microText(micro(account.sizeUsd) - micro(account.lossAllowanceUsd)))} floor`;
       await event(tx, account.id, 'risk', title, body, { ts: now });
-      fx.notices.push({ kind: 'risk', title, body, href });
+      fx.notices.push({ kind: 'risk', title, body: `${nameOf(account)}: ${body}`, href });
     } else if (status === 'passed') {
       await tx.update(simOrders).set({ status: 'canceled', statusDetail: 'Evaluation passed', updatedAt: now })
         .where(and(eq(simOrders.accountId, account.id), inArray(simOrders.status, PENDING)));
       const body = `Realized profit ${money(microText(v.realized))} reached the ${money(account.profitTargetUsd!)} target with every position closed`;
       await event(tx, account.id, 'account', 'Evaluation passed', body, { ts: now });
-      fx.notices.push({ kind: 'account', title: 'Evaluation passed', body, href: '#/result' });
+      fx.notices.push({ kind: 'account', title: 'Evaluation passed', body: `${nameOf(account)}: ${body}`, href: `/result?id=${encodeURIComponent(account.id)}` });
     } else if (status === 'checking') {
       await event(tx, account.id, 'account', 'Profit target reached', 'Close your positions to lock in the result', { ts: now });
     } else if (status === 'near_limit' && now.getTime() - (nearLimitNoticeAt.get(account.id) ?? 0) >= NEAR_LIMIT_NOTICE_MS) {
       fx.onCommit.push(() => nearLimitNoticeAt.set(account.id, now.getTime()));
       const body = `Equity ${equity}: less than a quarter of the loss allowance is left`;
       await event(tx, account.id, 'risk', 'Close to the loss limit', body, { ts: now });
-      fx.notices.push({ kind: 'risk', title: 'Close to the loss limit', body, href });
+      fx.notices.push({ kind: 'risk', title: 'Close to the loss limit', body: `${nameOf(account)}: ${body}`, href });
     }
   }
 
@@ -792,12 +804,12 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     const fills = await tx.select().from(simFills).where(eq(simFills.accountId, account.id));
     const result: EvaluationResult = {
       evaluation: account.id, wallet: account.wallet, passed: account.status === 'passed',
-      finalEquityUsd: microText(micro(account.sizeUsd) + v.realized), tradesRoot: tradesRoot(fills.map(toFill)),
+      finalEquityUsd: microText(micro(account.sizeUsd) + v.realized), tradesRoot: await tradesRoot(fills.map(toFill)),
       resolvedAt: (account.resolvedAt ?? new Date()).getTime(),
     };
     const [written] = await tx.insert(simResults).values({
       evaluation: result.evaluation, wallet: result.wallet, passed: result.passed, finalEquity: result.finalEquityUsd,
-      tradesRoot: result.tradesRoot, resolvedAt: new Date(result.resolvedAt),
+      tradesRoot: result.tradesRoot, resolvedAt: new Date(result.resolvedAt), mac: sealer.seal('sim_result', result),
     }).onConflictDoNothing().returning({ evaluation: simResults.evaluation });
     if (written) fx.resolved.push(result);
   }
@@ -805,7 +817,11 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
   async function emitUnrecorded() {
     const rows = await db.select().from(simResults).where(isNull(simResults.recordedSignature));
     for (const r of rows) {
-      emit({ evaluation: r.evaluation, wallet: r.wallet, passed: r.passed, finalEquityUsd: trim(r.finalEquity), tradesRoot: r.tradesRoot, resolvedAt: r.resolvedAt.getTime() });
+      const result: EvaluationResult = {
+        evaluation: r.evaluation, wallet: r.wallet, passed: r.passed, finalEquityUsd: trim(r.finalEquity), tradesRoot: r.tradesRoot, resolvedAt: r.resolvedAt.getTime(),
+      };
+      if (sealer.verify('sim_result', result, r.mac)) emit(result);
+      else log.error({ evaluation: r.evaluation }, 'evaluation result failed its integrity check (not written by this server): not recorded onchain');
     }
   }
 
@@ -817,6 +833,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       accountId: evaluation, type: 'account', title: 'Result recorded onchain', detail: row.passed ? 'Passed' : 'Failed',
       status: 'confirmed', simulated: false, signature, ts: new Date(),
     });
+    await publishAccount(evaluation); // the result page shows the record, and activation opens, without a reload
   }
 
   // ---------- leader ----------

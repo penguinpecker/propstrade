@@ -307,10 +307,13 @@ export class PropsVaultClient {
 
   // ---------- trader ----------
 
-  /** `index` = the trader profile's evaluation count (0 when the profile does not exist yet). */
-  buyEvaluation(p: { trader: PublicKey; tierId: number; index: number; traderUsdc?: PublicKey }): Promise<TransactionInstruction> {
+  /**
+   * `index` = the trader profile's evaluation count (0 when the profile does not exist yet). `feeUsdc` (base units) and
+   * `tierVersion` are the tier's fee and version the trader reviewed; the program refuses the purchase if they changed.
+   */
+  buyEvaluation(p: { trader: PublicKey; tierId: number; index: number; feeUsdc: bigint; tierVersion: number; traderUsdc?: PublicKey }): Promise<TransactionInstruction> {
     return this.program.methods
-      .buyEvaluation(p.tierId, p.index)
+      .buyEvaluation(p.tierId, p.index, bn(p.feeUsdc), p.tierVersion)
       .accountsStrict({
         ...eventCpi(),
         trader: p.trader,

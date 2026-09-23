@@ -3,7 +3,7 @@ import BN from 'bn.js';
 import { ComputeBudgetProgram, Connection, Keypair, PublicKey, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
 import { CLOSE_ALL, PROPS_VAULT_PROGRAM_ID, PropsVaultClient, gmOrderPda, gmPositionPda, orderNonce, ownerPda, toUnitPrice, usdToGm } from '@props/sdk';
 // @ts-expect-error test-only JavaScript module
-import { TIERS, startStub } from '../../tests/stub.mjs';
+import { TIERS, marketRef, startStub } from '../../tests/stub.mjs';
 import { TxError, confirm, describeFailure, prepareCancel, prepareClose, prepareEvaluation, prepareOpen, prepareProtection, signAndSend, unitPrice, watchExecution } from './chain';
 
 interface Stub { url: string; close(): void; walletData(wallet: string): { wallet: string; funded: string; orderSeq: number; slots?: unknown[]; tracked?: unknown[] }; state: { sent: { name: string; data: any }[]; blockHeight: number; simulationLogs: string[] | null; statuses: Map<string, unknown> } }
@@ -17,7 +17,7 @@ const coder = new PropsVaultClient(new Connection('http://127.0.0.1:1')).program
 const decode = (tx: VersionedTransaction) => tx.message.compiledInstructions
   .filter(ix => tx.message.staticAccountKeys[ix.programIdIndex]!.equals(PROPS_VAULT_PROGRAM_ID))
   .map(ix => coder.instruction.decode(Buffer.from(ix.data))!);
-const btc = { marketToken: Keypair.generate().publicKey.toBase58(), indexTokenDecimals: 8 };
+const btc = marketRef('BTC'); // index token decimals 8 onchain
 const signer = (key: Keypair) => async (tx: VersionedTransaction) => { tx.sign([key]); return tx; };
 const computeLimit = (tx: VersionedTransaction) => {
   const ix = tx.message.compiledInstructions.find(i => tx.message.staticAccountKeys[i.programIdIndex]!.equals(ComputeBudgetProgram.programId) && i.data[0] === 2)!;
@@ -66,7 +66,7 @@ describe('funded transactions', () => {
   it('follows every close of a transaction, each against its own position', async () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());
-    const eth = { marketToken: Keypair.generate().publicKey.toBase58(), indexTokenDecimals: 8 };
+    const eth = marketRef('ETH');
     const p = await prepareClose(connection, key.publicKey, { funded: w.funded, slippageBps: 50, positions: [btc, eth].map(market => ({ market, isLong: false, markPrice: '100', sizeUsd: 100, percent: 100 })) });
     const owner = ownerPda(new PublicKey(w.funded));
     expect(p.follows.map(f => [f.position, f.increase])).toEqual([btc, eth].map(m => [gmPositionPda(owner, new PublicKey(m.marketToken), false).toBase58(), false]));
@@ -91,7 +91,7 @@ describe('funded transactions', () => {
   it('fits an open with take-profit and stop-loss, and two closes, in one transaction', async () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());
-    const other = { marketToken: Keypair.generate().publicKey.toBase58(), indexTokenDecimals: 9 };
+    const other = marketRef('SOL');
     const open = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, kind: 'Limit', price: '60000', sizeUsd: 1000, collateralUsd: 100, slippageBps: 50, takeProfit: '70000', stopLoss: '58000' });
     const close = await prepareClose(connection, key.publicKey, { funded: w.funded, slippageBps: 50, positions: [btc, other].map(market => ({ market, isLong: true, markPrice: '100', sizeUsd: 100, percent: 100 })) });
     for (const p of [open, close]) expect(p.tx.serialize().length).toBeLessThanOrEqual(1232 - 100); // room for a wallet's own instructions
@@ -132,6 +132,22 @@ describe('funded transactions', () => {
   });
 });
 
+describe('the market an order goes to', () => {
+  it('is checked onchain: the MarketConfig must name the market shown, and prices scale by the index mint\'s decimals', async () => {
+    const key = Keypair.generate();
+    const w = stub.walletData(key.publicKey.toBase58());
+    const order = (market: { marketToken: string; symbol: string }) =>
+      prepareOpen(connection, key.publicKey, { funded: w.funded, market, isLong: true, kind: 'Limit', price: '150', sizeUsd: 100, collateralUsd: 10, slippageBps: 50, stopLoss: '140' });
+    // An API that shows SOL but sends the order to BTC's market, or to a market the program does not know: nothing is built.
+    await expect(order({ ...marketRef('BTC'), symbol: 'SOL' })).rejects.toThrow('The SOL market could not be confirmed onchain');
+    await expect(order({ marketToken: Keypair.generate().publicKey.toBase58(), symbol: 'SOL' })).rejects.toThrow('could not be confirmed onchain');
+    // SOL's index token has 9 decimals onchain, whatever the API says: trigger prices are USD × 10^(20 − 9).
+    const [open, stop] = decode((await order(marketRef('SOL'))).tx) as { data: { args: Record<string, any> } }[];
+    expect(BigInt(open!.data.args.triggerPrice.toString())).toBe(toUnitPrice('150', 9));
+    expect(BigInt(stop!.data.args.triggerPrice.toString())).toBe(toUnitPrice('140', 9));
+  });
+});
+
 describe('evaluation purchase', () => {
   const [tier10k, tier25k] = TIERS;
   it('uses the profile\'s next evaluation index and counts only the new evaluation\'s rent when the profile exists', async () => {
@@ -139,13 +155,14 @@ describe('evaluation purchase', () => {
     stub.walletData(key.publicKey.toBase58()); // fixture profile with evaluationCount 2
     const p = await prepareEvaluation(connection, key.publicKey, tier10k);
     const [buy] = decode(p.tx);
-    expect(buy).toEqual({ name: 'buyEvaluation', data: { tierId: 1, index: 2 } });
+    expect(buy!.name).toBe('buyEvaluation');
+    expect({ ...buy!.data, expectedFeeUsdc: BigInt(buy!.data.expectedFeeUsdc.toString()) }).toEqual({ tierId: 1, index: 2, expectedFeeUsdc: 79_000_000n, expectedTierVersion: 1 });
     expect(p.rentLamports).toBe((128 + 164) * 6960);
   });
 
   it('adds the trader profile\'s rent for a first purchase', async () => {
     const p = await prepareEvaluation(connection, Keypair.generate().publicKey, tier25k);
-    expect(decode(p.tx)[0]!.data).toEqual({ tierId: 2, index: 0 });
+    expect(decode(p.tx)[0]!.data).toMatchObject({ tierId: 2, index: 0, expectedTierVersion: 1 });
     expect(p.rentLamports).toBe((128 + 164) * 6960 + (128 + 86) * 6960);
   });
 
