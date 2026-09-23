@@ -919,3 +919,14 @@ Pinocchio evaluated (2026-09-23; measured in a scratch copy, 59/59 LiteSVM tests
   initialized: the app does not retry it and says so instead of spinning ~8 s into an error.
 - The database was never the cause of "Loading the evaluation programs...": Postgres is its own Railway service; the
   tiers come from the onchain program, which is not deployed yet.
+
+2026-09-24 DEPLOYED e8a6e54 (app only, Vercel): TradingView-style chart. Left drawing toolbar (trend line, ray,
+           horizontal/vertical lines, rectangle, Fibonacci, text, measure, zoom; magnet, stay, lock, hide, remove all;
+           saved per market, anchored to time + price), ƒx Indicators dialog with search and repeatable instances + settings
+           (MA, EMA, WMA, Bollinger, Donchian, RSI, MACD, Stochastic, ATR; no volume-based ones: GMTrade candles carry no
+           volume), legend (OHLC, change, indicator values), chart types, bottom bar (1d-5y ranges, go to date, UTC clock,
+           %/log/auto), bar-close countdown. Three independent reviews found 27 issues (chart overflowing its row below
+           ~519 px of height, a leak keeping every rebuilt chart alive, range buttons overwritten by fast candles, % scale
+           misplacing overlays, far go-to-date landing wrong); 24 fixed, 2 rejected with reasons. Verified live in Chrome.
+- The Vercel REST deployments list answered without `deployments` for ~10 minutes right after a CLI deploy (transient);
+  the CLI deploy itself succeeded. Re-query before concluding anything.
