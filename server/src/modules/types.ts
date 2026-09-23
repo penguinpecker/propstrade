@@ -55,7 +55,8 @@ export interface EvaluationResult { evaluation: string; wallet: string; passed: 
 export interface SimService extends AccountsProvider {
   /** Idempotent: called by the chain indexer for every EvaluationPurchased event (also on backfill). */
   createEvaluation(input: { evaluation: string; wallet: string; terms: EvaluationTerms; purchasedAt: number; signature: string }): Promise<void>;
-  /** Called once per evaluation when the engine decides pass/fail; the chain module sends record_evaluation_result. */
+  /** Called when the engine decides pass/fail, then again (every 5 min, and when a new leader starts) until markRecorded,
+   * so a crash or a late subscriber loses nothing; the chain module sends record_evaluation_result idempotently. */
   onResolved(listener: (result: EvaluationResult) => void): () => void;
   /** Called by the chain module once record_evaluation_result is confirmed onchain (or already resolved). */
   markRecorded(evaluation: string, signature: string): Promise<void>;
@@ -76,6 +77,10 @@ export interface MarketState {
   isClosed: boolean;
   /** { market: base64 Market account, virtualInventories: { address: base64 }, slot } — raw images the WASM model reads. */
   raw: unknown;
+  /** Oracle unit prices (USD × 10^(20 − token decimals)) at fetchedAt: the WASM model's `prices` input. */
+  prices: Record<'index' | 'long' | 'short', { min: bigint; max: bigint }>;
+  /** Index token decimals: a PriceTick's USD price × 10^(20 − indexDecimals) is its unit price. */
+  indexDecimals: number;
   fetchedAt: number;
 }
 

@@ -16,7 +16,7 @@
 //   POST /sim/:id/orders SimOrderRequest -> SimOrderResponse  DELETE /sim/:id/orders/:orderId -> SimOrderResponse
 //   POST /sim/:id/positions/:positionId/close SimCloseRequest -> SimOrderResponse
 //   PUT  /sim/:id/positions/:positionId/protection SimProtectionRequest -> Position
-//   POST /practice/reset -> AccountSummary
+//   POST /practice/reset -> AccountSummary                     GET  /sim/:id/fills -> Fill[] (every fill, trades-root order)
 //   GET  /payouts -> Payout[]                                 GET  /payouts/:id -> Payout
 //   GET  /verify?q -> VerifyResult                            GET  /vault -> VaultStats
 // Wallet-signed transactions (evaluation purchase, funded activation/trading, payout requests) are built in the
@@ -153,7 +153,7 @@ export interface Order {
 export interface Fill {
   id: string; symbol: string; side: 'Long' | 'Short'; isIncrease: boolean;
   sizeUsd: Decimal; price: Decimal; feeUsd: Decimal; priceImpactUsd: Decimal; fundingUsd: Decimal; borrowUsd: Decimal;
-  realizedPnl: Decimal | null;  // on decreases
+  realizedPnl: Decimal | null;  // on decreases; simulated fills also give an increase's costs (≤ 0), so realized P&L = Σ fills
   ts: Millis; venue: 'simulated' | 'gmtrade'; signature?: string;
 }
 export interface ClosedTrade {

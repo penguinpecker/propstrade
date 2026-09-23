@@ -305,7 +305,8 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
     const pool = feed.markets.get(marketToken);
     const input = pool && modelInput(feed, pool);
     const account = pool && feed.accounts.get(pool.pubkey);
-    if (!pool?.meta || !input || !account) throw new Error(`no onchain state for market ${marketToken}`);
+    const indexDecimals = pool?.meta ? feed.tokens.get(pool.meta.indexToken.pubkey)?.meta?.decimals : undefined;
+    if (!pool?.meta || !input || !account || indexDecimals === undefined) throw new Error(`no onchain state for market ${marketToken}`);
     const index = pool.meta.indexToken.pubkey;
     return {
       symbol: symbolByIndexToken.get(index) ?? feed.tokens.get(index)?.meta?.name ?? index,
@@ -314,6 +315,8 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
       pure: pool.meta.isPure,
       isClosed: isMarketClosed(account.data),
       raw: { market: input.market, virtualInventories: input.virtualInventories, slot: account.slot },
+      prices: input.prices,
+      indexDecimals,
       fetchedAt: Date.now(),
     };
   }
