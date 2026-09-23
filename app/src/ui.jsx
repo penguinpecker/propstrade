@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useRef } from 'react';
+import React, { useId, useLayoutEffect, useRef } from 'react';
 import { ArrowUpRight, ArrowRight, ArrowLeft, Bitcoin, CircleDollarSign, Cpu, Euro, PoundSterling, Smartphone, Check, X, ChevronDown, Info, ExternalLink, TriangleAlert, Wallet } from 'lucide-react';
 import { bpsPercent, date, freshnessLabel, usd, utcTime } from './data.js';
 
@@ -52,11 +52,12 @@ export function Tabs({ items, value, onChange, className = '' }) {
 export function Toggle({ checked, onChange, label }) { return <button type="button" role="switch" aria-checked={checked} aria-label={label} className={`toggle ${checked ? 'checked' : ''}`} onClick={() => onChange(!checked)}><span /></button>; }
 export function Dialog({ title, children, onClose, wide = false, className = '' }) {
   const ref = useRef(null);
+  const titleId = useId();
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
   // A layout effect closes the dialog while it is still in the page, so the browser returns focus to what opened it.
   useLayoutEffect(() => { const node = ref.current; node.showModal(); const handler = e => { e.preventDefault(); closeRef.current(); }; node.addEventListener('cancel', handler); return () => { node.removeEventListener('cancel', handler); if (node.open) node.close(); }; }, []);
-  return <dialog ref={ref} className={`dialog ${wide ? 'wide' : ''} ${className}`} onClick={e => { if (e.target === ref.current) onClose(); }} aria-labelledby="dialog-title"><div className="dialog-head"><h2 id="dialog-title">{title}</h2><IconButton icon={X} label="Close dialog" onClick={onClose} /></div>{children}</dialog>;
+  return <dialog ref={ref} className={`dialog ${wide ? 'wide' : ''} ${className}`} onClick={e => { if (e.target === ref.current) onClose(); }} aria-labelledby={titleId}><div className="dialog-head"><h2 id={titleId}>{title}</h2><IconButton icon={X} label="Close dialog" onClick={onClose} /></div>{children}</dialog>;
 }
 /** Real series only: `points` are { ts, value } in time order; fewer than two points render nothing. */
 const hourMinute = new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
