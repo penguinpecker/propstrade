@@ -759,6 +759,7 @@ variable that is not documented there and here):
 | `RPC_URL` | yes | Solana JSON-RPC HTTP endpoint |
 | `RPC_WS_URL` | no | RPC websocket (derived from `RPC_URL` when unset) |
 | `SOLANA_CLUSTER` | no | `mainnet-beta` (default) or `localnet` |
+| `NODE_ENV` | no | leave unset in production; `test` + `SOLANA_CLUSTER=localnet` enables the local rehearsal's price-pin route |
 | `PROGRAM_ID` | no (yes on mainnet) | props_vault program id; must equal the SDK's |
 | `PORT`, `HOST` | no | listen address (8080, 0.0.0.0); Railway sets `PORT` |
 | `LOG_LEVEL` | no | pino level (info) |
