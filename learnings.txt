@@ -871,3 +871,19 @@ Self-healing market data + chart (2026-09-23, branch r6-robust):
   candles carry no volume.
 - Google only: a build with VITE_PRIVY_APP_ID offers only Google (browser wallets hidden, adapter autoConnect off).
   Builds without it (local tests, e2e) keep browser wallets, which is what every e2e drives.
+
+Program deploy cost, rechecked 2026-09-23 (Anvil reviewed):
+- Anvil (github.com/Pratikkale26/Anvil, npm anvil-sol 0.9.1) is an Anchor -> Pinocchio/plain-Rust source translator, not a
+  deploy trick. On props_vault it refused to emit ("emit not deploy-safe": 22 errors, 26 behaviour stubs incl. capital,
+  payouts, positions; dropped payout/funded-account ties; GMTrade CPI "manual port required"; emit_cpi! turned into logs,
+  which reopens the log-truncation attack fixed in round 2). 5 stars, no adopters, no audit. Not usable here.
+- Mainnet rent is 5,080 lamports/byte now (SIMD-0437 step 2; getMinimumBalanceForRentExemption(0) = 650,240 = 128 x
+  5,080). props_vault.so = 981,640 bytes: ProgramData at exact size 4.98761004 SOL, with +10% max-len 5.48628316 SOL,
+  Program account 0.00083312 SOL, on-chain IDL (13,804 bytes) 0.07077456 SOL, ~970 buffer writes ~0.005 SOL.
+- Deploy WITHOUT a max-len margin (the CLI default; upgrades auto-extend): ~5.07 SOL total on hand, not ~10: the first
+  deploy moves the buffer's lamports into ProgramData, so the peak is about 1x rent (only later upgrades need ~1x more
+  temporarily, refunded).
+- Further rent steps (2,575 -> 1,322 -> 696 lamports/byte) are planned but not scheduled on mainnet (feature accounts
+  absent). At 696/byte the program costs ~0.69 SOL; an upgrade after that refunds the surplus (~4.3 SOL) to the payer.
+  Loader-v4 is inactive on mainnet and would not save rent. Leads for a smaller binary (float/format code from a
+  dependency, ~80 KB) were not traced; every 100 KB is ~0.5 SOL. Keep event-cpi and the on-chain IDL.
