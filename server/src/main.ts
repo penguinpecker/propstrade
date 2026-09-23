@@ -5,6 +5,7 @@ import { createConnection } from './lib/solana.js';
 import { registerModules, type ModuleStatus } from './modules/index.js';
 import type { Services } from './modules/types.js';
 import { createStreamHub } from './stream.js';
+import { notifications } from './db/schema.js';
 
 const config = loadConfig();
 const { sql, db } = createDb(config.DATABASE_URL);
@@ -19,6 +20,13 @@ const shutdown = new AbortController();
 const services: Services = {};
 await registerModules({
   app, log: app.log, env: process.env, publish: hub.publish, services, signal: shutdown.signal, config, db, sql, rpc,
+  async notify(wallet, n) {
+    const [row] = await db.insert(notifications).values({ wallet, ...n }).returning();
+    if (!row) return;
+    hub.publish({ type: 'notification', notification: {
+      id: String(row.id), title: row.title, body: row.body, href: row.href, kind: row.kind, ts: row.createdAt.getTime(), read: false,
+    } }, { wallet });
+  },
 }, modules);
 
 let stopping = false;

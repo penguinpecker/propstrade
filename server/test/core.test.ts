@@ -117,7 +117,7 @@ describe('module registry', () => {
     const services: Services = {};
     const ctx: ModuleContext = {
       app, env: {}, services, signal: new AbortController().signal, publish: () => {},
-      config: {} as never, db: {} as never, sql: {} as never, rpc: {} as never, // unused by registry fixtures
+      config: {} as never, db: {} as never, sql: {} as never, rpc: {} as never, notify: async () => {}, // unused by registry fixtures
       log: { ...app.log, warn: (o: { module: string }) => warnings.push(o.module), info: () => {} } as never,
     };
     return { app, ctx, services, warnings };
