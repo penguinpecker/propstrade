@@ -74,6 +74,15 @@ module that throws during registration stops startup. `ctx.signal` aborts on shu
 wallet use `{ preHandler: app.requireWallet }` and read `request.wallet`. Money-moving loops wrap themselves in
 `runAsLeader({ databaseUrl, key: LOCK_KEYS.keeper, signal, log, run })` and must stop when `run`'s signal aborts.
 
+### sim (practice + evaluation engine)
+
+`src/modules/sim`: routes `POST /v1/sim/:id/orders`, `DELETE /v1/sim/:id/orders/:orderId`,
+`POST /v1/sim/:id/positions/:positionId/close`, `PUT /v1/sim/:id/positions/:positionId/protection`,
+`GET /v1/sim/:id/fills`, `POST /v1/practice/reset` (all signed-in, own accounts only, else 404); implements `SimService`.
+Orders are accepted by any process; fills, liquidations and the 1 s rules loop run on the holder of `LOCK_KEYS.sim`.
+`SIM_FILL_DELAY_MS` (default 2000) is the keeper delay before an order may fill. Tests: `test/sim/` (own database
+`<TEST_DATABASE_URL>_engine` / `_restart`, fed with live GMTrade state recorded by `test/sim/capture-fixtures.ts`).
+
 ## Deploy (Railway)
 
 `server/railway.json` is config-as-code: set the service's root directory to the repo root and its config file path

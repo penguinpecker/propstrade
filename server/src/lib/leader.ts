@@ -5,7 +5,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import postgres from 'postgres';
 
 /** Advisory lock keys in use (one namespace for the whole app). */
-export const LOCK_KEYS = { keeper: 0x70726f70 } as const; // "prop"
+export const LOCK_KEYS = { keeper: 0x70726f70, sim: 0x73696d31 } as const; // "prop", "sim1"
 
 export interface LeaderOptions {
   databaseUrl: string;

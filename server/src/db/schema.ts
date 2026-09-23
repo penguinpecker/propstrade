@@ -12,7 +12,7 @@
 import { sql } from 'drizzle-orm';
 import {
   bigint, bigserial, boolean, char, index, integer, jsonb, numeric, pgEnum, pgTable, primaryKey, text,
-  timestamp, uniqueIndex, uuid, varchar,
+  timestamp, uniqueIndex, uuid, varchar, type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
 const usd = (name: string) => numeric(name, { precision: 38, scale: 6 });
@@ -144,15 +144,21 @@ export const simOrders = pgTable('sim_orders', {
   statusDetail: text('status_detail'),
   createdAt: now('created_at'),
   updatedAt: now('updated_at'),
+  /** Take-profit / stop-loss placed with an increase order: armed when that order fills, cancelled with it. */
+  parentOrderId: uuid('parent_order_id').references((): AnyPgColumn => simOrders.id, { onDelete: 'cascade' }),
+  /** Closes the whole position at execution (GMTrade CLOSE_ALL): take profit, stop loss and 100% closes; size_usd is shown only. */
+  closeAll: boolean('close_all').notNull().default(false),
 }, (t) => [
   uniqueIndex('sim_orders_client_uq').on(t.accountId, t.clientId),
   index('sim_orders_account_status_idx').on(t.accountId, t.status),
+  index('sim_orders_pending_idx').on(t.accountId).where(sql`${t.status} in ('awaiting_execution', 'awaiting_price')`),
 ]);
 
 export const simFills = pgTable('sim_fills', {
   id: uuid('id').primaryKey().defaultRandom(),
   accountId: text('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
-  orderId: uuid('order_id').notNull().references(() => simOrders.id, { onDelete: 'cascade' }),
+  /** Null for liquidations, which no order of the account caused. */
+  orderId: uuid('order_id').references(() => simOrders.id, { onDelete: 'cascade' }),
   positionId: uuid('position_id').references(() => simPositions.id, { onDelete: 'set null' }),
   symbol: text('symbol').notNull(),
   side: side('side').notNull(),
@@ -168,6 +174,21 @@ export const simFills = pgTable('sim_fills', {
   tickTs: at('tick_ts').notNull(),
   ts: now('ts'),
 }, (t) => [index('sim_fills_account_ts_idx').on(t.accountId, t.ts)]);
+
+/**
+ * Evaluation outcomes decided by the sim engine: an outbox the chain module drains into record_evaluation_result
+ * (SimService.onResolved / markRecorded). One row per evaluation, written once.
+ */
+export const simResults = pgTable('sim_results', {
+  evaluation: text('evaluation').primaryKey().references(() => accounts.id, { onDelete: 'cascade' }),
+  wallet: pubkey('wallet').notNull(),
+  passed: boolean('passed').notNull(),
+  finalEquity: usd('final_equity').notNull(),
+  tradesRoot: char('trades_root', { length: 64 }).notNull(),
+  resolvedAt: at('resolved_at').notNull(),
+  recordedSignature: signature('recorded_signature'),
+  recordedAt: at('recorded_at'),
+});
 
 /** Round trips for every stage; funded rows come from venue_fills. */
 export const closedTrades = pgTable('closed_trades', {

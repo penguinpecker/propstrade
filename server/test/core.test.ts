@@ -154,7 +154,8 @@ describe('migrations', () => {
       expect(tables.map((t) => t.table_name)).toEqual([
         'account_events', 'accounts', 'admin_audit_log', 'auth_nonces', 'chain_jobs', 'closed_trades', 'equity_snapshots',
         'evaluations', 'funded_accounts', 'gm_orders', 'gm_position_snapshots', 'kyc_requests', 'notifications', 'payouts',
-        'program_events', 'sessions', 'sim_fills', 'sim_orders', 'sim_positions', 'users', 'vault_ledger', 'venue_fills',
+        'program_events', 'sessions', 'sim_fills', 'sim_orders', 'sim_positions', 'sim_results', 'users', 'vault_ledger',
+        'venue_fills',
       ]);
       const committed = JSON.parse(readFileSync(`${migrationsFolder}/meta/_journal.json`, 'utf8')).entries.length;
       const [applied] = await sql`select count(*)::int as n from drizzle.__drizzle_migrations`;

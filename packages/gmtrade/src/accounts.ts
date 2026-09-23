@@ -53,6 +53,8 @@ export interface PositionAccount {
     size_in_usd: bigint;
     borrowing_factor: bigint;
     funding_fee_amount_per_size: bigint;
+    long_token_claimable_funding_amount_per_size: bigint;
+    short_token_claimable_funding_amount_per_size: bigint;
   };
 }
 
