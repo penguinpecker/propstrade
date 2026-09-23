@@ -123,6 +123,9 @@ export async function compare(scenario: (h: Harness) => Promise<void>): Promise<
     } else if (!('accounts' in x) && !('accounts' in y)) {
       console.log(`${x.label.padEnd(40)} ${x.ok ? 'ok  ' : 'fail'} ${String(x.code ?? '').padEnd(32)} CU ${x.cu} -> ${y.cu}`);
       for (const k of ['ok', 'err', 'code', 'inner'] as const) if (JSON.stringify(x[k]) !== JSON.stringify(y[k])) show(k, x[k], y[k]);
+      // Error lines too, minus the origin ("caused by account: x" / "thrown in f:l") the Pinocchio build omits.
+      const plain = (e: string[]) => e.map((l) => l.replace(/^(Program log: (?:Anchor|Program)Error) (?:caused by account: \w+|thrown in \S+:\d+)\./, '$1 occurred.'));
+      if (JSON.stringify(plain(x.errors)) !== JSON.stringify(plain(y.errors))) show('errors', x.errors, y.errors);
     }
   }
   rmSync(dir, { recursive: true, force: true });

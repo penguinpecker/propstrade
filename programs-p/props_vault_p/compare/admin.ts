@@ -44,7 +44,7 @@ await compare(async ({ env: { CONFIG_PARAMS, Env, LEVERAGE, MARKETS, NON_PURE_MA
   send(env, 'pauses', await v.setPauses({ admin, paused: { newEvaluations: true, trading: false, payouts: true } }), [env.admin]);
 
   // Pre-funded tier PDAs, below and above the rent-exempt minimum.
-  env.svm.airdrop(tierPda(1), 1n);
+  env.svm.airdrop(tierPda(1), 1_000_000n);
   env.svm.airdrop(tierPda(2), 5_000_000n);
   for (const t of Object.values(TIERS)) send(env, `tier ${t.id}`, await v.upsertTier({ admin, id: t.id, params: tierParams(t) }), [env.admin]);
   send(env, 'tier update', await v.upsertTier({ admin, id: 1, params: { ...tierParams(TIERS.t10k), feeUsdc: bn(usdc('89')) } }), [env.admin]);
@@ -88,6 +88,11 @@ await compare(async ({ env: { CONFIG_PARAMS, Env, LEVERAGE, MARKETS, NON_PURE_MA
   snap(env, 'after propose', [configPda()]);
   send(env, 'propose other', await v.proposeAdmin({ admin, newAdmin: other.publicKey }), [env.admin]);
   send(env, 'propose next', await v.proposeAdmin({ admin, newAdmin: next.publicKey }), [env.admin]);
+  const propose = await v.proposeAdmin({ admin, newAdmin: stranger.publicKey });
+  send(env, 'propose stranger', await v.proposeAdmin({ admin: stranger.publicKey, newAdmin: stranger.publicKey }), [stranger]);
+  send(env, 'propose unsigned', raw(propose, (k, d) => [k.map((x, i) => (i === 0 ? { ...x, isSigner: false } : x)), d]), [stranger]);
+  send(env, 'propose config readonly', raw(propose, (k, d) => [k.map((x, i) => (i === 1 ? { ...x, isWritable: false } : x)), d]), [env.admin]);
+  send(env, 'propose short data', raw(propose, (k, d) => [k, d.subarray(0, 8 + 16)]), [env.admin]);
   send(env, 'accept stranger', await v.acceptAdmin({ newAdmin: stranger.publicKey }), [stranger]);
   send(env, 'accept', await v.acceptAdmin({ newAdmin: next.publicKey }), [next]);
   snap(env, 'after accept', [configPda()]);
@@ -111,7 +116,7 @@ await compare(async ({ env: { CONFIG_PARAMS, Env, LEVERAGE, MARKETS, NON_PURE_MA
   // A second vault: pre-funded config and fee vault, capital vault ATA created by a stranger first.
   const env2 = new Env();
   env2.svm.airdrop(configPda(), 10_000_000n);
-  env2.svm.airdrop(feeVaultPda(), 1n);
+  env2.svm.airdrop(feeVaultPda(), 1_000_000n);
   const griefer = env2.wallet();
   send(env2, 'grief ata', createAssociatedTokenAccountIdempotentInstruction(griefer.publicKey, capitalVaultAddress(), vaultAuthorityPda(), USDC_MINT), [griefer]);
   send(env2, 'init prefunded', await env2.vault.initialize({ admin: env2.admin.publicKey, params: CONFIG_PARAMS }), [env2.admin]);
