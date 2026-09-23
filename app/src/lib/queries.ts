@@ -12,6 +12,7 @@ export const keys = {
   market: (symbol: string) => ['market', symbol] as const,
   marketTrades: (symbol: string) => ['market', symbol, 'trades'] as const,
   candles: (symbol: string, interval: CandleInterval) => ['candles', symbol, interval] as const,
+  quote: (symbol: string, side: 'Long' | 'Short', sizeUsd: string) => ['quote', symbol, side, sizeUsd] as const,
   accounts: ['accounts'] as const,
   account: (id: string) => ['account', id] as const,
   positions: (id: string) => ['account', id, 'positions'] as const,
@@ -19,6 +20,7 @@ export const keys = {
   history: (id: string) => ['account', id, 'history'] as const,
   activity: (id: string) => ['account', id, 'activity'] as const,
   performance: (id: string, period: Performance['period']) => ['account', id, 'performance', period] as const,
+  eligibility: (id: string) => ['account', id, 'payout-eligibility'] as const,
   payouts: ['payouts'] as const,
   payout: (id: string) => ['payout', id] as const,
   verify: (q: string) => ['verify', q] as const,
@@ -61,9 +63,22 @@ export const useMe = () => useQuery(meOptions);
 
 export const useMarkets = () => useQuery({ queryKey: keys.markets, queryFn: api.markets });
 export const useMarket = (symbol: string) => useQuery({ queryKey: keys.market(symbol), queryFn: () => api.market(symbol) });
-export const useMarketTrades = (symbol: string) => useQuery({ queryKey: keys.marketTrades(symbol), queryFn: () => api.marketTrades(symbol) });
+export const useMarketTrades = (symbol: string) =>
+  useQuery({ queryKey: keys.marketTrades(symbol), queryFn: () => api.marketTrades(symbol), enabled: symbol !== '', refetchInterval: 10_000 });
+/** Live ticks move the last candle between fetches (see Chart.jsx); the periodic refetch picks up GMTrade's own candles. */
 export const useCandles = (symbol: string, interval: CandleInterval) =>
-  useQuery({ queryKey: keys.candles(symbol, interval), queryFn: () => api.candles(symbol, interval) });
+  useQuery({ queryKey: keys.candles(symbol, interval), queryFn: () => api.candles(symbol, interval), enabled: symbol !== '', refetchInterval: 60_000 });
+/**
+ * Fees, price impact and execution price for an order size. While a new size loads, the previous size's quote stays
+ * (same market and side only: another market's or side's figures are never shown for this one).
+ */
+export const useQuote = (symbol: string, side: 'Long' | 'Short', sizeUsd: string | null) => useQuery({
+  queryKey: keys.quote(symbol, side, sizeUsd ?? ''),
+  queryFn: () => api.quote(symbol, side, sizeUsd!),
+  enabled: sizeUsd !== null,
+  placeholderData: (previous, previousQuery) => previousQuery?.queryKey[1] === symbol && previousQuery.queryKey[2] === side ? previous : undefined,
+  staleTime: 5_000,
+});
 
 export const useAccounts = (enabled: boolean) => useQuery({ queryKey: keys.accounts, queryFn: api.accounts, enabled });
 export const useAccount = (id: string | null) => useQuery({ queryKey: keys.account(id ?? ''), queryFn: () => api.account(id!), enabled: id !== null });
@@ -74,6 +89,9 @@ export const useActivity = (id: string | null) => useQuery({ queryKey: keys.acti
 export const usePerformance = (id: string | null, period: Performance['period']) =>
   useQuery({ queryKey: keys.performance(id ?? '', period), queryFn: () => api.performance(id!, period), enabled: id !== null });
 
+export const usePayoutEligibility = (id: string | null) =>
+  useQuery({ queryKey: keys.eligibility(id ?? ''), queryFn: () => api.payoutEligibility(id!), enabled: id !== null });
+
 export const usePayouts = (enabled: boolean) => useQuery({ queryKey: keys.payouts, queryFn: api.payouts, enabled });
 export const usePayout = (id: string | null) => useQuery({ queryKey: keys.payout(id ?? ''), queryFn: () => api.payout(id!), enabled: id !== null });
 export const useVerify = (q: string) => useQuery({ queryKey: keys.verify(q), queryFn: () => api.verifyRecord(q), enabled: q.trim() !== '' });
@@ -82,13 +100,25 @@ export const useVault = () => useQuery({ queryKey: keys.vault, queryFn: api.vaul
 /** The signed-in wallet's notifications; the stream prepends new ones. */
 export const useNotifications = (enabled: boolean) => useQuery({ queryKey: keys.notifications, queryFn: api.notifications, enabled });
 
+/** Marks notifications read (all when `ids` is omitted) and reflects it in the loaded list. */
+export function useReadNotifications() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (ids?: string[]) => api.readNotifications(ids),
+    onSuccess: (_result, ids) => client.setQueryData<Notification[]>(keys.notifications, list =>
+      list && list.map(n => (!ids || ids.includes(n.id) ? { ...n, read: true } : n))),
+  });
+}
+
 // ---------- simulated trading writes ----------
 function useSimMutation<Vars>(accountId: string, mutationFn: (vars: Vars) => Promise<SimOrderResponse>) {
   const client = useQueryClient();
   return useMutation({
     mutationFn,
-    onSuccess: ({ account }) => {
+    onSuccess: ({ account, order }) => {
       patchAccount(client, account);
+      // The response is the order's current state: show it now rather than after the refetch.
+      client.setQueryData<Order[]>(keys.orders(accountId), list => list && [...list.filter(o => o.id !== order.id), order]);
       void client.invalidateQueries({ queryKey: ['account', accountId] });
     },
   });

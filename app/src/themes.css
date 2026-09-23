@@ -99,7 +99,8 @@
 :root[data-theme="dark"] .activation-timeline .done>span { background:#283c2d; border-color:#4c6750; color:#a0c2a0; }
 :root[data-theme="dark"] .activation-timeline .current>span { background:#352344; border-color:#8b64ab; }
 :root[data-theme="dark"] :is(.receipt-top,.receipt-footer) { border-color:#574361; }
-:root[data-theme="dark"] :is(.checkmark,.pending-mark) { background:#2a3c2b; color:#b0c9aa; }
+:root[data-theme="dark"] .checkmark { background:#2a3c2b; color:#b0c9aa; }
+:root[data-theme="dark"] .pending-mark { background:var(--amber-wash); color:var(--amber); }
 :root[data-theme="dark"] .activation-changes>.notice { background:#25212b; }
 :root[data-theme="dark"] .payout-available { background:#2b2138; border-color:#523d67; }
 :root[data-theme="dark"] .payout-available>strong { color:#eadbf8; }

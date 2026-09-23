@@ -1,14 +1,14 @@
-import React, { createContext, lazy, Suspense, useContext, useEffect, useMemo, useState, useCallback } from 'react';
+import React, { createContext, lazy, Suspense, useContext, useEffect, useState, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { ArrowRight, ArrowUpRight, Bell, BookOpen, Check, ChevronDown, Command, Copy, ExternalLink, HelpCircle, LayoutGrid, Menu, Moon, Search, Settings, ShieldCheck, Sun, Wallet, X } from 'lucide-react';
-import { accounts, initialOrders, initialPositions, markets, programs, money, shortAddress } from './data.js';
-import { Badge, Brand, Button, DataRow, Dialog, IconButton, MarketIcon, Notice, RuleList, SessionNotice, WalletOptions } from './ui.jsx';
+import { ArrowRight, ArrowUpRight, Bell, BookOpen, Check, ChevronDown, ExternalLink, HelpCircle, LayoutGrid, Menu, Moon, Search, ShieldCheck, Sun, Wallet, X } from 'lucide-react';
+import { dateTime, explorerAddress, explorerTx, freshnessLabel, isCurrent, marketPrice, percent, shortAddress, tierRules, usd } from './data.js';
+import { Badge, Brand, Button, DataRow, Dialog, Empty, FreshnessBadge, IconButton, InlineLink, MarketIcon, Notice, Pending, RuleList, SessionNotice, Unavailable, WalletOptions } from './ui.jsx';
 import Trading from './Trading.jsx';
 import { AccountsPage, AccountPage, PerformancePage, ActivityPage, MarketsPage } from './Workspace.jsx';
 import { FundingPage, ProgramPage, ConnectPage, CheckoutPage, PaymentPage, ResultPage, ActivationPage } from './Onboarding.jsx';
 import { PayoutsPage, PayoutReview, PayoutReceipt, VerifyPage, VaultPage, SettingsPage } from './Money.jsx';
 import { env } from './lib/env';
-import { applyStreamEvent } from './lib/queries';
+import { applyStreamEvent, useAccounts, useConfig, useMarkets, useNotifications, useReadNotifications } from './lib/queries';
 import { useSession } from './lib/session';
 import { useStream } from './lib/stream';
 
@@ -16,60 +16,65 @@ import { useStream } from './lib/stream';
 const ScreenIndex = import.meta.env.DEV ? lazy(() => import('./ScreenIndex.jsx')) : null;
 const STREAM_LABELS = { connecting: 'Connecting to live data…', connected: 'Live data connected', reconnecting: 'Reconnecting to live data…', offline: 'Offline · retrying' };
 const NETWORK_LABEL = env.cluster === 'mainnet-beta' ? 'Solana' : 'Solana · Localnet';
+/** Which notification kinds each preference toggle controls; account notices always show. */
+const NOTIFICATION_PREFS = { fill: 'fills', risk: 'risk', payout: 'payouts' };
 
 const AppContext = createContext(null);
 export const useApp = () => useContext(AppContext);
 const read = (key, fallback) => { try { const value = localStorage.getItem('props.' + key); return value ? JSON.parse(value) : fallback; } catch { return fallback; } };
-function useSaved(key, fallback) { const [value, setValue] = useState(() => read(key, fallback)); useEffect(() => { localStorage.setItem('props.' + key, JSON.stringify(value)); }, [key, value]); return [value, setValue]; }
-const getPath = () => (location.hash.slice(1) || '/trade/funded').split('?')[0];
+export function useSaved(key, fallback) { const [value, setValue] = useState(() => read(key, fallback)); useEffect(() => { try { localStorage.setItem('props.' + key, JSON.stringify(value)); } catch { /* private mode: keep it for this visit */ } }, [key, value]); return [value, setValue]; }
+const parseHash = () => { const [path, search = ''] = location.hash.slice(1).split('?'); return { path: path || '/trade/funded', query: new URLSearchParams(search) }; };
+const newestFirst = (a, b) => b.createdAt - a.createdAt;
 
 export default function App() {
-  const [path, setPath] = useState(getPath);
+  const [{ path, query }, setRoute] = useState(parseHash);
   const [stage, setStage] = useSaved('stage', 'funded');
   const [marketSymbol, setMarketSymbol] = useSaved('market', 'BTC');
-  const [programSize, setProgramSize] = useSaved('program', 25000);
-  const [evaluationSize, setEvaluationSize] = useSaved('evaluation-size', 25000);
-  const [fundedSize, setFundedSize] = useSaved('funded-size', 25000);
+  const [tierId, setTierId] = useSaved('tier', null);
+  const [selected, setSelected] = useSaved('accounts', {});
   const queryClient = useQueryClient();
   const session = useSession();
-  const [positions, setPositions] = useSaved('positions', { funded: initialPositions, evaluation: initialPositions, practice: [] });
-  const [orders, setOrders] = useSaved('orders', { funded: initialOrders, evaluation: initialOrders, practice: [] });
+  const signedIn = session.status === 'signed-in';
   const [favorites, setFavorites] = useSaved('favorites', ['BTC', 'ETH', 'SOL', 'XAU']);
   const [prefs, setPrefs] = useSaved('preferences', { fills: true, risk: true, payouts: true, density: 'Comfortable', currency: 'USD', motion: false, theme: 'dark' });
   const theme = prefs.theme === 'light' ? 'light' : 'dark';
   const setTheme = next => setPrefs(prev => ({ ...prev, theme: next }));
-  const [payouts, setPayouts] = useSaved('payouts', []);
-  const [selectedReceipt, setSelectedReceipt] = useSaved('selected-receipt', null);
-  useEffect(() => { const pending = payouts.filter(p => p.status === 'Processing'); if (!pending.length) return; const delay = Math.max(0, Math.min(...pending.map(p => p.createdAt + 1500)) - Date.now()); const timer = setTimeout(() => setPayouts(prev => prev.map(p => p.status === 'Processing' && Date.now() >= p.createdAt + 1500 ? { ...p, status: 'Paid' } : p)), delay + 20); return () => clearTimeout(timer); }, [payouts]);
   const [modal, setModal] = useState(null);
   const [toast, setToast] = useState(null);
   const [search, setSearch] = useState('');
-  const streamStatus = useStream(`${env.apiUrl}/v1/stream`, session.me?.wallet ?? '', event => applyStreamEvent(queryClient, event));
-  const network = streamStatus === 'connected';
   const [mobileNav, setMobileNav] = useState(false);
-  const [tradeEvents, setTradeEvents] = useSaved('events', []);
+  const showsNotification = n => n.kind === 'account' || prefs[NOTIFICATION_PREFS[n.kind]] !== false;
+  const notify = useCallback((message, detail = '') => setToast({ message, detail, key: Date.now() }), []);
+  const streamStatus = useStream(`${env.apiUrl}/v1/stream`, session.me?.wallet ?? '', event => {
+    applyStreamEvent(queryClient, event);
+    if (event.type === 'notification' && showsNotification(event.notification)) notify(event.notification.title, event.notification.body);
+  });
+  const live = streamStatus === 'connected';
+  const config = useConfig();
+  const marketsQuery = useMarkets();
+  const markets = marketsQuery.data ?? [];
+  const accountsQuery = useAccounts(signedIn);
+  const accounts = signedIn ? accountsQuery.data ?? [] : [];
   const closeModal = useCallback(() => { setModal(null); setSearch(''); }, []);
   const navigate = useCallback((to) => { location.hash = to; setModal(null); setMobileNav(false); window.scrollTo(0, 0); }, []);
-  const notify = useCallback((message, detail = '') => setToast({ message, detail, key: Date.now() }), []);
-  useEffect(() => { const handler = () => setPath(getPath()); window.addEventListener('hashchange', handler); return () => window.removeEventListener('hashchange', handler); }, []);
+  useEffect(() => { const handler = () => setRoute(parseHash()); window.addEventListener('hashchange', handler); return () => window.removeEventListener('hashchange', handler); }, []);
   useEffect(() => { const match = path.match(/\/(trade|account)\/(funded|evaluation|practice)/); if (match) setStage(match[2]); }, [path]);
   useEffect(() => { if (!toast) return; const id = setTimeout(() => setToast(null), 4800); return () => clearTimeout(id); }, [toast]);
   useEffect(() => { const handler = e => { if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); setModal('markets'); } }; window.addEventListener('keydown', handler); return () => window.removeEventListener('keydown', handler); }, []);
   useEffect(() => { document.documentElement.dataset.density = prefs.density.toLowerCase(); document.documentElement.dataset.motion = prefs.motion ? 'reduced' : 'normal'; }, [prefs]);
   useEffect(() => { document.documentElement.dataset.theme = theme; document.querySelector('meta[name="theme-color"]').content = theme === 'dark' ? '#131217' : '#f6f5f1'; }, [theme]);
-  const market = markets.find(m => m.symbol === marketSymbol) || markets[0];
-  const scaleAccount = (base, size) => { const ratio = size / base.size; return { ...base, size, equity: base.equity * ratio, profit: base.profit * ratio, realized: base.realized * ratio, headroom: base.headroom * ratio, floor: size * .95, target: base.target === null ? null : size * .08, label: `${base.stage} ${size / 1000}K` }; };
-  const accountMap = { ...accounts, funded: scaleAccount(accounts.funded, fundedSize), evaluation: scaleAccount(accounts.evaluation, evaluationSize) };
-  const account = accountMap[stage];
-  const availableMargin = Math.max(0, account.size - (positions[stage] || []).reduce((sum, p) => sum + p.entry * p.quantity / p.leverage, 0));
-  const availablePayout = Math.round(Math.max(0, accountMap.funded.realized * .8 - payouts.reduce((sum, p) => sum + (p.share || 0), 0)) * 100) / 100;
-  const program = programs.find(p => p.size === programSize) || programs[1];
+  const market = markets.find(m => m.symbol === marketSymbol) ?? markets.find(m => m.symbol === 'BTC') ?? markets[0];
+  /** The account a stage works with: the one chosen in the switcher, else the newest current one, else the newest. */
+  const accountFor = s => { const list = accounts.filter(a => a.stage === s).sort(newestFirst); return list.find(a => a.id === selected[s]) ?? list.find(a => isCurrent(a, accounts)) ?? list[0] ?? null; };
+  const account = accountFor(stage);
+  const tiers = config.data?.tiers ?? [];
+  const tier = tiers.find(t => t.id === tierId && t.enabled) ?? tiers.find(t => t.enabled) ?? null;
   const selectMarket = (symbol) => { setMarketSymbol(symbol); closeModal(); navigate(`/trade/${stage}`); };
-  const switchAccount = next => { setStage(next); navigate(path.startsWith('/trade') ? `/trade/${next}` : `/account/${next}`); };
+  const selectAccount = (next, to = path.startsWith('/trade') ? 'trade' : 'account') => { setSelected(prev => ({ ...prev, [next.stage]: next.id })); setStage(next.stage); navigate(`/${to}/${next.stage}`); };
   const copy = async (value) => { try { await navigator.clipboard.writeText(value); notify('Copied to clipboard'); } catch { notify('Copy unavailable', 'Select the address and copy it manually.'); } };
   const openRecord = record => setModal({ type: 'record', record });
-  const value = { path, navigate, stage, setStage, account, accountMap, availableMargin, availablePayout, evaluationSize, setEvaluationSize, fundedSize, setFundedSize, market, marketSymbol, setMarketSymbol, selectMarket, program, setProgramSize, session, positions: positions[stage] || [], allPositions: positions, setPositions: next => setPositions(p => ({ ...p, [stage]: typeof next === 'function' ? next(p[stage] || []) : next })), orders: orders[stage] || [], setOrders: next => setOrders(p => ({ ...p, [stage]: typeof next === 'function' ? next(p[stage] || []) : next })), favorites, setFavorites, prefs, setPrefs, theme, setTheme, payouts, setPayouts, selectedReceipt, setSelectedReceipt, modal, setModal, closeModal, notify, network, streamStatus, openRecord, copy, tradeEvents, setTradeEvents };
-  const currentSection = path.startsWith('/trade') || path === '/markets' ? 'Trade' : ['/payouts', '/payout/review', '/payout/receipt'].includes(path) ? 'Payouts' : ['/verify', '/vault'].includes(path) ? 'Verify' : ['Accounts', ''].includes(path) ? 'Accounts' : path.includes('account') || ['/performance', '/activity', '/result', '/activate'].includes(path) ? 'Accounts' : '';
+  const value = { path, query, navigate, stage, setStage, config, tiers, tier, setTierId, markets, marketsQuery, market, marketSymbol, selectMarket, accounts, accountsQuery, account, accountFor, selectAccount, session, signedIn, favorites, setFavorites, prefs, setPrefs, theme, setTheme, modal, setModal, closeModal, notify, streamStatus, live, openRecord, copy, showsNotification };
+  const currentSection = path.startsWith('/trade') || path === '/markets' ? 'Trade' : ['/payouts', '/payout/review', '/payout/receipt'].includes(path) ? 'Payouts' : ['/verify', '/vault'].includes(path) ? 'Verify' : path.includes('account') || ['/performance', '/activity', '/result', '/activate'].includes(path) ? 'Accounts' : '';
   const navItems = [['Trade', `/trade/${stage}`], ['Accounts', '/accounts'], ['Payouts', '/payouts'], ['Verify', '/verify']];
   let page;
   if (path.startsWith('/trade')) page = <Trading />;
@@ -93,27 +98,58 @@ export default function App() {
   else if (path === '/settings') page = <SettingsPage />;
   else if (ScreenIndex && path === '/screens') page = <Suspense fallback={null}><ScreenIndex /></Suspense>;
   else page = <div className="page"><h1>This page has moved.</h1><Button onClick={() => navigate('/trade/funded')}>Open workspace</Button></div>;
+  const pickerRows = markets.filter(m => `${m.symbol} ${m.pair} ${m.name} ${m.category}`.toLowerCase().includes(search.toLowerCase()));
 
   return <AppContext.Provider value={value}><div className="app-shell">
     <a className="skip-link" href="#main" onClick={e => { e.preventDefault(); document.getElementById("main").focus(); }}>Skip to content</a>
-    <header className="app-header"><Brand /><nav className={mobileNav ? 'main-nav mobile-open' : 'main-nav'} aria-label="Main navigation">{navItems.map(([label, href]) => <a key={label} href={`#${href}`} className={currentSection === label ? 'active' : ''} onClick={() => setMobileNav(false)}>{label}</a>)}</nav><div className="header-end"><button className="search-trigger" onClick={() => setModal('markets')}><Search size={15} /><span>Search markets</span><kbd>⌘ K</kbd></button><a className="funding-link" href="#/get-funded">Get funded <ArrowUpRight size={14} /></a><span className="header-rule" /><IconButton className="theme-toggle" icon={theme === 'dark' ? Sun : Moon} label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} /><IconButton icon={Bell} label="Notifications" onClick={() => setModal('notifications')} /><button className="wallet-button" onClick={() => setModal('wallet')}><span className="wallet-avatar"><Wallet size={13} /></span><span>{session.status === 'signed-in' ? shortAddress(session.me.wallet) : session.status === 'connecting' ? 'Connecting…' : session.address ? 'Sign in' : 'Connect wallet'}</span><ChevronDown size={13} /></button><IconButton className="mobile-menu" icon={mobileNav ? X : Menu} label="Toggle navigation" onClick={() => setMobileNav(!mobileNav)} /></div></header>
+    <header className="app-header"><Brand /><nav className={mobileNav ? 'main-nav mobile-open' : 'main-nav'} aria-label="Main navigation">{navItems.map(([label, href]) => <a key={label} href={`#${href}`} className={currentSection === label ? 'active' : ''} onClick={() => setMobileNav(false)}>{label}</a>)}</nav><div className="header-end"><button className="search-trigger" onClick={() => setModal('markets')}><Search size={15} /><span>Search markets</span><kbd>⌘ K</kbd></button><a className="funding-link" href="#/get-funded">Get funded <ArrowUpRight size={14} /></a><span className="header-rule" /><IconButton className="theme-toggle" icon={theme === 'dark' ? Sun : Moon} label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} /><IconButton icon={Bell} label="Notifications" onClick={() => setModal('notifications')} /><button className="wallet-button" onClick={() => setModal('wallet')}><span className="wallet-avatar"><Wallet size={13} /></span><span>{signedIn ? shortAddress(session.me.wallet) : session.status === 'connecting' ? 'Connecting…' : session.address ? 'Sign in' : 'Connect wallet'}</span><ChevronDown size={13} /></button><IconButton className="mobile-menu" icon={mobileNav ? X : Menu} label="Toggle navigation" onClick={() => setMobileNav(!mobileNav)} /></div></header>
     <main id="main" tabIndex="-1" className={path.startsWith('/trade') ? 'terminal-main' : ''}>{page}</main>
-    <footer className="app-footer"><div><span className={`connection-dot ${network ? '' : 'offline'}`} /><span role="status">{STREAM_LABELS[streamStatus]}</span><span className="footer-divider" /><span>All figures illustrative · No live orders</span></div><div>{ScreenIndex && <a href="#/screens"><LayoutGrid size={12} /> Screen index</a>}<button onClick={() => setModal('rules')}>Preview rules</button><button onClick={() => setModal('help')}><HelpCircle size={13} /> Help</button><span className="network-label">Solana <span className="solana-lines" aria-hidden="true"><i /><i /><i /></span></span></div></footer>
+    <footer className="app-footer"><div><span className={`connection-dot ${live ? '' : 'offline'}`} /><span role="status">{STREAM_LABELS[streamStatus]}</span></div><div>{ScreenIndex && <a href="#/screens"><LayoutGrid size={12} /> Screen index</a>}<button onClick={() => setModal('rules')}>Rules</button><button onClick={() => setModal('help')}><HelpCircle size={13} /> Help</button><span className="network-label">{NETWORK_LABEL} <span className="solana-lines" aria-hidden="true"><i /><i /><i /></span></span></div></footer>
   </div>
   {toast && <div className="toast" role="status" key={toast.key}><span className="toast-check"><Check size={16} /></span><div><strong>{toast.message}</strong>{toast.detail && <p>{toast.detail}</p>}</div><IconButton icon={X} label="Dismiss notification" onClick={() => setToast(null)} /></div>}
-  {modal === 'markets' && <Dialog title="Find a market" onClose={closeModal}><div className="search-field"><Search size={17} /><input autoFocus placeholder="Search markets, symbols or asset classes" aria-label="Search markets" value={search} onChange={e => setSearch(e.target.value)} /><kbd>ESC</kbd></div><div className="market-picker-list">{markets.filter(m => `${m.symbol} ${m.name} ${m.category}`.toLowerCase().includes(search.toLowerCase())).map(m => <button key={m.symbol} onClick={() => selectMarket(m.symbol)}><MarketIcon market={m} /><span><strong>{m.symbol} / USD</strong><small>{m.name} · Perpetual</small></span><span className="picker-price"><strong>{money(m.price, m.price < 2 ? 5 : 2)}</strong><small className={m.change > 0 ? 'positive' : 'negative'}>{m.change > 0 ? '+' : ''}{m.change}%</small></span><ArrowUpRight size={15} /></button>)}{!markets.some(m => `${m.symbol} ${m.name} ${m.category}`.toLowerCase().includes(search.toLowerCase())) && <div className="empty"><h3>No matching market</h3><p>Try a symbol such as BTC or an asset class.</p></div>}</div><p className="dialog-note">Illustrative market selection. Live availability follows venue support.</p></Dialog>}
-  {modal === 'accounts' && <Dialog title="Switch account" onClose={closeModal}><div className="account-picker">{Object.entries(accountMap).map(([key, item]) => <button key={key} onClick={() => switchAccount(key)}><span className="account-initial"><ShieldCheck size={20} /></span><span><strong>{item.label}</strong><small>{item.id} · {key === 'funded' ? 'Funded preview' : 'Simulated'}</small></span><strong>{money(item.equity)}</strong>{stage === key && <Check size={17} className="purple-text" />}</button>)}</div><Button variant="secondary" className="full-width" onClick={() => navigate('/get-funded')} icon={ArrowRight}>Start another evaluation</Button></Dialog>}
+  {modal === 'markets' && <Dialog title="Find a market" onClose={closeModal}><div className="search-field"><Search size={17} /><input autoFocus placeholder="Search markets, symbols or asset classes" aria-label="Search markets" value={search} onChange={e => setSearch(e.target.value)} /><kbd>ESC</kbd></div><div className="market-picker-list">{marketsQuery.isPending ? <Pending>Loading GMTrade markets…</Pending> : marketsQuery.isError ? <Unavailable title="Markets are unavailable" error={marketsQuery.error} retry={marketsQuery.refetch} /> : pickerRows.map(m => <button key={m.symbol} onClick={() => selectMarket(m.symbol)}><MarketIcon market={m} /><span><strong>{m.pair}</strong><small>{m.name} · {m.tradable ? 'Perpetual' : 'Not available for funded trading'}</small></span><span className="picker-price"><strong>{marketPrice(m.price, m)}</strong>{freshnessLabel(m) ? <FreshnessBadge market={m} /> : <small className={m.change24h > 0 ? 'positive' : 'negative'}>{percent(m.change24h)}</small>}</span><ArrowUpRight size={15} /></button>)}{marketsQuery.isSuccess && !pickerRows.length && <div className="empty"><h3>No matching market</h3><p>Try a symbol such as BTC or an asset class.</p></div>}</div><p className="dialog-note">{markets.length ? `${markets.length} GMTrade perpetual markets. Prices update live.` : 'Markets come from GMTrade.'}</p></Dialog>}
+  {modal === 'accounts' && <AccountSwitcher onClose={closeModal} />}
   {modal === 'wallet' && <WalletDialog session={session} onClose={closeModal} navigate={navigate} notify={notify} />}
-  {modal === 'rules' && <Dialog title="Rules for this design preview" onClose={closeModal}><Notice tone="purple">These are illustrative settings for exploring the design. Final program terms are still to be set.</Notice><RuleList size={program.size} /><p className="dialog-note">The example uses a static equity floor, includes fees and open P&L, and assumes an account can continue after payout. Supported markets and leverage require integration validation.</p><Button className="full-width" onClick={() => navigate('/program')}>View program details</Button></Dialog>}
-  {modal === 'notifications' && <Dialog title="Notifications" onClose={closeModal}><div className="notification-list">{[['Your evaluation is complete', 'All example objectives have been met.', '/result'], ['Payout received', 'Your sample receipt is ready to inspect.', '/payout/receipt'], ['Your next trading session', 'You have two open sample positions.', `/trade/${stage}`]].map(([title, body, href], i) => <button key={title} onClick={() => navigate(href)}><span className="notification-icon"><Check size={16} /></span><span><strong>{title}</strong><small>{body}</small><time>{i === 0 ? '12 minutes ago' : i === 1 ? 'Yesterday' : 'Sep 21'}</time></span><ArrowUpRight size={15} /></button>)}</div></Dialog>}
-  {modal === 'help' && <Dialog title="A little help, right here" onClose={closeModal}><div className="help-links"><button onClick={() => setModal('rules')}><BookOpen size={20} /><span><strong>Understand your rules</strong><small>Targets, drawdown and payout eligibility.</small></span><ArrowRight size={16} /></button><button onClick={() => navigate('/verify')}><ShieldCheck size={20} /><span><strong>Follow the evidence</strong><small>Account, trade and payout records.</small></span><ArrowRight size={16} /></button><a href="https://docs.gmtrade.xyz/about/trading/" target="_blank" rel="noreferrer"><ExternalLink size={20} /><span><strong>GMTrade documentation</strong><small>Learn about the proposed execution venue.</small></span><ArrowUpRight size={16} /></a></div><div className="shortcut-row"><span>Find a market</span><kbd>⌘ / Ctrl K</kbd></div><div className="shortcut-row"><span>Close a dialog</span><kbd>Esc</kbd></div></Dialog>}
-  {modal?.type === 'record' && <Dialog title="Record details" onClose={closeModal}><Badge tone="purple">Illustrative record</Badge><h3 className="record-title">{modal.record.title || `${modal.record.symbol || 'Account'} · ${modal.record.id || 'PT-1046'}`}</h3><DataRow label="Record ID" value={modal.record.id || 'PT-1046'} /><DataRow label="Account" value={account.id} /><DataRow label="Status" value="Confirmed in preview" /><DataRow label="Source" value={stage === 'funded' ? 'Sample venue execution' : 'Simulation engine'} /><Notice>This sample has no blockchain transaction. Live records would link to their specific source and confirmation.</Notice><Button className="full-width" onClick={() => navigate('/verify')}>Open verification workspace</Button></Dialog>}
+  {modal === 'rules' && <RulesDialog onClose={closeModal} />}
+  {modal === 'notifications' && <NotificationsDialog onClose={closeModal} />}
+  {modal === 'help' && <Dialog title="A little help, right here" onClose={closeModal}><div className="help-links"><button onClick={() => setModal('rules')}><BookOpen size={20} /><span><strong>Understand your rules</strong><small>Targets, drawdown and payout eligibility.</small></span><ArrowRight size={16} /></button><button onClick={() => navigate('/verify')}><ShieldCheck size={20} /><span><strong>Follow the evidence</strong><small>Account, trade and payout records.</small></span><ArrowRight size={16} /></button><a href="https://docs.gmtrade.xyz/about/trading/" target="_blank" rel="noreferrer"><ExternalLink size={20} /><span><strong>GMTrade documentation</strong><small>How the execution venue fills funded trades.</small></span><ArrowUpRight size={16} /></a></div><div className="shortcut-row"><span>Find a market</span><kbd>⌘ / Ctrl K</kbd></div><div className="shortcut-row"><span>Close a dialog</span><kbd>Esc</kbd></div></Dialog>}
+  {modal?.type === 'record' && <RecordDialog record={modal.record} onClose={closeModal} />}
   </AppContext.Provider>;
+}
+
+function AccountSwitcher({ onClose }) {
+  const { accounts, accountsQuery, accountFor, selectAccount, signedIn, navigate, setModal, stage } = useApp();
+  const current = accounts.filter(a => isCurrent(a, accounts)).sort(newestFirst);
+  const active = accountFor(stage);
+  return <Dialog title="Switch account" onClose={onClose}>{!signedIn ? <Empty icon={Wallet} title="Sign in to see your accounts" action={<Button onClick={() => setModal('wallet')}>Connect wallet</Button>}>Your practice, evaluation and funded accounts belong to your wallet.</Empty> : accountsQuery.isPending ? <Pending>Loading your accounts…</Pending> : accountsQuery.isError ? <Unavailable title="Accounts are unavailable" error={accountsQuery.error} retry={accountsQuery.refetch} /> : !current.length ? <Empty icon={ShieldCheck} title="No active accounts">Start practice for free, or choose an evaluation.</Empty> : <div className="account-picker">{current.map(item => <button key={item.id} onClick={() => selectAccount(item)}><span className="account-initial"><ShieldCheck size={20} /></span><span><strong>{item.label}</strong><small>{item.shortId} · {item.stage === 'funded' ? 'Funded' : 'Simulated'}</small></span><strong>{usd(item.equity)}</strong>{active?.id === item.id && <Check size={17} className="purple-text" />}</button>)}</div>}<Button variant="secondary" className="full-width" onClick={() => navigate('/get-funded')} icon={ArrowRight}>Start another evaluation</Button></Dialog>;
+}
+
+function RulesDialog({ onClose }) {
+  const { account, tier, config, navigate } = useApp();
+  const rules = account?.rules ?? (tier && tierRules(tier));
+  return <Dialog title={account ? `Rules for ${account.label}` : tier ? `Rules for the ${tier.name} evaluation` : 'Account rules'} onClose={onClose}>{rules ? <><RuleList rules={rules} /><DataRow label="Equity floor" value={usd(rules.floorUsd)} /><DataRow label="Maximum total exposure" value={usd(rules.maxExposureUsd, 0)} />{rules.version != null && <DataRow label="Terms version" value={`v${rules.version}${rules.termsHash ? ` · ${rules.termsHash.slice(0, 8)}` : ''}`} />}<Notice tone="purple">Each position is backed only by its own collateral, so GMTrade can liquidate one position while your account equity is still above its floor. The floor includes open P&L and trading costs across all positions.</Notice></> : config.isError ? <Unavailable title="Rules are unavailable" error={config.error} retry={config.refetch} /> : <Pending>Loading the program rules…</Pending>}<Button className="full-width" onClick={() => navigate('/program')}>View program details</Button></Dialog>;
+}
+
+function NotificationsDialog({ onClose }) {
+  const { signedIn, navigate, setModal, showsNotification } = useApp();
+  const list = useNotifications(signedIn);
+  const markRead = useReadNotifications();
+  const shown = (list.data ?? []).filter(showsNotification);
+  const open = n => { if (!n.read) markRead.mutate([n.id]); if (n.href.startsWith('/')) navigate(n.href); else window.open(n.href, '_blank', 'noreferrer'); };
+  return <Dialog title="Notifications" onClose={onClose}>{!signedIn ? <Empty icon={Bell} title="Sign in to see notifications" action={<Button onClick={() => setModal('wallet')}>Connect wallet</Button>}>Fills, account risk and payout updates for your wallet appear here.</Empty> : list.isPending ? <Pending>Loading notifications…</Pending> : list.isError ? <Unavailable title="Notifications are unavailable" error={list.error} retry={list.refetch} /> : !shown.length ? <Empty icon={Bell} title="You're all caught up">New fills, risk alerts and payout updates will appear here.</Empty> : <><div className="notification-list">{shown.map(n => <button key={n.id} onClick={() => open(n)}><span className="notification-icon"><Check size={16} /></span><span><strong>{n.title}</strong><small>{n.body}</small><time>{dateTime(n.ts)}{n.read ? '' : ' · New'}</time></span><ArrowUpRight size={15} /></button>)}</div>{shown.some(n => !n.read) && <Button variant="secondary" className="full-width" disabled={markRead.isPending} onClick={() => markRead.mutate(undefined)}>Mark all as read</Button>}</>}</Dialog>;
+}
+
+/** Details of one record: an activity item, trade, payout or evidence item, with its onchain references when it has any. */
+function RecordDialog({ record, onClose }) {
+  const { navigate } = useApp();
+  const reference = record.signature ?? record.address;
+  return <Dialog title="Record details" onClose={onClose}><Badge tone={record.simulated ? 'purple' : 'green'}>{record.badge ?? (record.simulated ? 'Simulated' : 'Onchain record')}</Badge><h3 className="record-title">{record.title}</h3>{record.rows.map(([label, value]) => <DataRow key={label} label={label} value={value} />)}{record.signature && <DataRow label="Transaction"><InlineLink href={explorerTx(record.signature)} external>{shortAddress(record.signature)}</InlineLink></DataRow>}{record.address && <DataRow label="Account address"><InlineLink href={explorerAddress(record.address)} external>{shortAddress(record.address)}</InlineLink></DataRow>}<Notice>{record.note ?? (record.simulated ? 'Simulated by the Props.trade engine at live GMTrade prices. It has no blockchain transaction.' : reference ? 'The linked transaction or account is the source of this record.' : 'This record is still being indexed. Its transaction appears here once it is confirmed.')}</Notice>{!record.simulated && reference && <Button className="full-width" onClick={() => navigate(`/verify?q=${reference}`)}>Open verification workspace</Button>}</Dialog>;
 }
 
 function WalletDialog({ session, onClose, navigate, notify }) {
   const signedIn = session.status === 'signed-in';
   const usdc = session.me?.usdcBalance;
   async function disconnect() { await session.disconnect(); onClose(); notify('Wallet disconnected'); }
-  return <Dialog title={signedIn ? 'Your wallet' : 'Connect a wallet'} onClose={onClose}><div className="wallet-summary"><div className="wallet-large"><Wallet size={25} /></div><strong>{session.address ? shortAddress(session.address) : 'Choose a Solana wallet'}</strong><Badge tone="purple">{session.walletName ?? 'Solana wallet'}</Badge></div><SessionNotice session={session}>{signedIn ? 'Signed in. Every transaction still needs your approval in your wallet.' : 'Signing in proves this wallet is yours. It sends no transaction and costs nothing.'}</SessionNotice>{signedIn ? <><DataRow label="USDC balance" value={usdc == null ? 'Unavailable' : money(Number(usdc))} /><DataRow label="Network" value={NETWORK_LABEL} /><div className="button-row"><Button variant="secondary" onClick={disconnect}>Disconnect</Button><Button onClick={() => navigate('/settings')}>Preferences</Button></div></> : session.address ? <div className="button-row"><Button variant="secondary" onClick={disconnect}>Disconnect</Button><Button disabled={session.status === 'signing' || session.network.state === 'wrong'} onClick={session.signIn}>{session.status === 'signing' ? 'Check your wallet…' : 'Sign in'}</Button></div> : <WalletOptions session={session} onChoose={session.connect} />}</Dialog>;
+  return <Dialog title={signedIn ? 'Your wallet' : 'Connect a wallet'} onClose={onClose}><div className="wallet-summary"><div className="wallet-large"><Wallet size={25} /></div><strong>{session.address ? shortAddress(session.address) : 'Choose a Solana wallet'}</strong><Badge tone="purple">{session.walletName ?? 'Solana wallet'}</Badge></div><SessionNotice session={session}>{signedIn ? 'Signed in. Every transaction still needs your approval in your wallet.' : 'Signing in proves this wallet is yours. It sends no transaction and costs nothing.'}</SessionNotice>{signedIn ? <><DataRow label="USDC balance" value={usdc == null ? 'Unavailable' : usd(usdc)} /><DataRow label="Network" value={NETWORK_LABEL} /><div className="button-row"><Button variant="secondary" onClick={disconnect}>Disconnect</Button><Button onClick={() => navigate('/settings')}>Preferences</Button></div></> : session.address ? <div className="button-row"><Button variant="secondary" onClick={disconnect}>Disconnect</Button><Button disabled={session.status === 'signing' || session.network.state === 'wrong'} onClick={session.signIn}>{session.status === 'signing' ? 'Check your wallet…' : 'Sign in'}</Button></div> : <WalletOptions session={session} onChoose={session.connect} />}</Dialog>;
 }
+

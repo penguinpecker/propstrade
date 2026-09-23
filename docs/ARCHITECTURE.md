@@ -302,6 +302,21 @@ App (round 1): `VITE_RPC_URL` and `VITE_API_URL` are required at build time (the
 requests). **The API must be same-site with the app** (e.g. app `props.trade`, API `api.props.trade`) or the
 SameSite=Lax session cookie will not flow.
 
+App (round 2): `Market.indexTokenDecimals` (additive) lets the browser convert prices to GMTrade unit prices for
+trigger and acceptable prices. Funded opens carry take-profit / stop-loss as whole-position (`CLOSE_ALL`) orders in the
+same transaction (open + TP + SL ≈ 1,091 B); closes go two per transaction (three measure 1,223 B of Solana's 1,232).
+Every wallet transaction is rebuilt from fresh chain state, simulated before the wallet is asked to sign, sent with
+preflight, confirmed by polling signature status against its last valid block height, and — for GMTrade orders —
+followed until the keeper closes each order account it created (position size up = executed, unchanged = cancelled).
+Fees shown before signing come from `getFeeForMessage` of the built message plus the rent of the accounts it creates.
+`@props/sdk` (Anchor, spl-token) loads on first transaction; the Solana wallet stack is its own chunk. No compute-unit
+price is set yet. Transactions are built at 1.4M CU and signed with their simulated use + 20% (open + TP + SL measured
+377k–445k CU in review, over the SDK's 400k default). Sends use no `maxRetries` (the RPC node rebroadcasts until the
+blockhash expires). After signing, no read error counts as an outcome: a send that fails in transit and status reads
+that fail keep the signature and keep following it; only a failed-onchain status or an expiry re-checked after the
+last valid block height ends it, and the checkout's pending-payment guard is cleared only then. The evaluation
+purchase refuses to build when the API tier's fee, version or terms hash differ from the onchain `Tier` account.
+
 Round 2 module ownership:
 - `server/src/modules/sim` — practice + evaluation engine; routes `/v1/sim/*`, `/v1/practice/*`; implements `SimService`.
 - `server/src/modules/chain` — indexer, funded accounts, payouts, verify, vault, config, chain-job executor
