@@ -153,7 +153,7 @@ describe('migrations', () => {
         select table_name from information_schema.tables where table_schema = 'public' order by table_name`;
       expect(tables.map((t) => t.table_name)).toEqual([
         'account_events', 'accounts', 'admin_audit_log', 'auth_nonces', 'chain_jobs', 'closed_trades', 'equity_snapshots',
-        'evaluations', 'funded_accounts', 'gm_orders', 'gm_position_snapshots', 'kyc_requests', 'notifications', 'payouts',
+        'evaluations', 'funded_accounts', 'gm_orders', 'gm_position_snapshots', 'gmtrade_deploys', 'indexer_cursors', 'kyc_requests', 'notifications', 'payouts',
         'program_events', 'sessions', 'sim_fills', 'sim_orders', 'sim_positions', 'users', 'vault_ledger', 'venue_fills',
       ]);
       const committed = JSON.parse(readFileSync(`${migrationsFolder}/meta/_journal.json`, 'utf8')).entries.length;

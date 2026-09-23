@@ -160,7 +160,9 @@ export class Env {
       const anchor = logs.map((l) => /Error Code: (\w+)/.exec(l)?.[1]).find(Boolean);
       return { ok: false, logs, cu: meta.computeUnitsConsumed(), error: anchor ?? result.err().toString(), events: [] };
     }
-    return { ok: true, logs, cu: meta.computeUnitsConsumed(), events: this.vault.parseEvents(logs) };
+    const keys = tx.compileMessage().accountKeys;
+    const inner = meta.innerInstructions().flat().map((i) => ({ programId: keys[i.instruction().programIdIndex()]!, data: i.instruction().data() }));
+    return { ok: true, logs, cu: meta.computeUnitsConsumed(), events: this.vault.parseEvents(inner) };
   }
 
   /** Sends and asserts success. */

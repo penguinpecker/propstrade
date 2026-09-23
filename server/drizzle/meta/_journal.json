@@ -15,6 +15,27 @@
       "when": 1790120817756,
       "tag": "0001_widen_onchain_ints",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1790127384617,
+      "tag": "0002_chain_indexer",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1790130948143,
+      "tag": "0003_keeper",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1790135725846,
+      "tag": "0004_job_rejections_deploy_ack",
+      "breakpoints": true
     }
   ]
 }

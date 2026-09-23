@@ -29,6 +29,7 @@ pub(crate) fn top_up_from_treasury<'info>(
     Ok(amount)
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 #[instruction(tier_id: u16, index: u32)]
 pub struct BuyEvaluation<'info> {
@@ -118,7 +119,7 @@ pub(crate) fn buy_evaluation(ctx: Context<BuyEvaluation>, tier_id: u16, index: u
     let c = &mut ctx.accounts.config;
     c.fees_collected = c.fees_collected.checked_add(fee).ok_or(VaultError::MathOverflow)?;
     c.evaluations_sold = c.evaluations_sold.checked_add(1).ok_or(VaultError::MathOverflow)?;
-    emit!(EvaluationPurchased {
+    emit_cpi!(EvaluationPurchased {
         evaluation: e.key(),
         trader,
         tier_id,
@@ -129,6 +130,7 @@ pub(crate) fn buy_evaluation(ctx: Context<BuyEvaluation>, tier_id: u16, index: u
     Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct ActivateFunded<'info> {
     #[account(mut)]
@@ -242,10 +244,11 @@ pub(crate) fn activate_funded(ctx: Context<ActivateFunded>) -> Result<()> {
     c.allocated_principal = c.allocated_principal.checked_add(principal).ok_or(VaultError::MathOverflow)?;
     c.funded_activated = c.funded_activated.checked_add(1).ok_or(VaultError::MathOverflow)?;
     c.funded_active = c.funded_active.checked_add(1).ok_or(VaultError::MathOverflow)?;
-    emit!(FundedActivated { funded: funded_key, evaluation, trader, owner, principal, owner_lamports, ts });
+    emit_cpi!(FundedActivated { funded: funded_key, evaluation, trader, owner, principal, owner_lamports, ts });
     Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct RequestPayout<'info> {
     #[account(mut)]
@@ -309,10 +312,11 @@ pub(crate) fn request_payout(ctx: Context<RequestPayout>) -> Result<()> {
     p.status = PayoutStatus::Requested;
     p.created_at = ts;
     p.bump = ctx.bumps.payout;
-    emit!(PayoutRequested { funded: funded_key, request: p.key(), seq, balance, profit, trader_amount, vault_amount, ts });
+    emit_cpi!(PayoutRequested { funded: funded_key, request: p.key(), seq, balance, profit, trader_amount, vault_amount, ts });
     Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct CancelPayout<'info> {
     pub trader: Signer<'info>,
@@ -340,6 +344,6 @@ pub(crate) fn cancel_payout(ctx: Context<CancelPayout>) -> Result<()> {
     let p = &mut ctx.accounts.payout;
     p.status = PayoutStatus::Cancelled;
     p.resolved_at = ts;
-    emit!(PayoutCancelled { funded: p.funded, request: p.key(), ts });
+    emit_cpi!(PayoutCancelled { funded: p.funded, request: p.key(), ts });
     Ok(())
 }

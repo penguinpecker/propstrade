@@ -23,21 +23,26 @@ const isUniqueViolation = (err: unknown): boolean =>
   typeof err === 'object' && err !== null &&
   ((err as { code?: string }).code === '23505' || isUniqueViolation((err as { cause?: unknown }).cause));
 
-export function registerAdminRoutes(app: FastifyInstance, { db, adminToken }: { db: Db; adminToken: string }) {
+/** onRequest hook for operator routes: `Authorization: Bearer <ADMIN_API_TOKEN>`, else 401. */
+export function adminAuth(adminToken: string) {
   const expected = sha256(adminToken);
+  return async (req: FastifyRequest) => {
+    const header = req.headers.authorization ?? '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : '';
+    // Hashing first makes the comparison constant-time regardless of the presented token's length.
+    if (!token || !timingSafeEqual(sha256(token), expected)) {
+      throw new ApiError(401, 'unauthorized', 'Admin token required');
+    }
+  };
+}
 
+/** admin_audit_log row for an operator action. */
+export const audit = (req: FastifyRequest, action: string, target: string, details: Record<string, unknown>) =>
+  ({ action, target, details, ip: req.ip, requestId: req.id });
+
+export function registerAdminRoutes(app: FastifyInstance, { db, adminToken }: { db: Db; adminToken: string }) {
   app.register(async (admin) => {
-    admin.addHook('onRequest', async (req) => {
-      const header = req.headers.authorization ?? '';
-      const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-      // Hashing first makes the comparison constant-time regardless of the presented token's length.
-      if (!token || !timingSafeEqual(sha256(token), expected)) {
-        throw new ApiError(401, 'unauthorized', 'Admin token required');
-      }
-    });
-
-    const audit = (req: FastifyRequest, action: string, target: string, details: Record<string, unknown>) =>
-      ({ action, target, details, ip: req.ip, requestId: req.id });
+    admin.addHook('onRequest', adminAuth(adminToken));
 
     admin.get('/kyc', async (req) => {
       const { status, limit } = parse(ListQuery, req.query);

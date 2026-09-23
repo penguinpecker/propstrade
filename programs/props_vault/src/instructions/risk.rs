@@ -41,6 +41,7 @@ fn transfer_from_owner<'info>(
     )
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 #[instruction(wallet: Pubkey, identity_hash: [u8; 32])]
 pub struct SetIdentity<'info> {
@@ -87,10 +88,11 @@ pub(crate) fn set_identity(ctx: Context<SetIdentity>, wallet: Pubkey, identity_h
     let lock = &mut ctx.accounts.identity_lock;
     lock.profile = profile_key;
     lock.bump = ctx.bumps.identity_lock;
-    emit!(IdentitySet { profile: profile_key, wallet, identity_hash, ts });
+    emit_cpi!(IdentitySet { profile: profile_key, wallet, identity_hash, ts });
     Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct RecordEvaluationResult<'info> {
     pub risk_authority: Signer<'info>,
@@ -121,10 +123,11 @@ pub(crate) fn record_evaluation_result(
     e.final_equity = final_equity;
     e.trades_root = trades_root;
     e.resolved_at = ts;
-    emit!(EvaluationResolved { evaluation: e.key(), trader: e.trader, passed, final_equity, trades_root, ts });
+    emit_cpi!(EvaluationResolved { evaluation: e.key(), trader: e.trader, passed, final_equity, trades_root, ts });
     Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct ApprovePayout<'info> {
     pub risk_authority: Signer<'info>,
@@ -214,10 +217,11 @@ pub(crate) fn approve_payout<'info>(ctx: Context<'_, '_, 'info, 'info, ApprovePa
     let c = &mut ctx.accounts.config;
     c.payouts_paid = c.payouts_paid.checked_add(trader_amount).ok_or(VaultError::MathOverflow)?;
     c.profit_to_vault = c.profit_to_vault.checked_add(vault_amount).ok_or(VaultError::MathOverflow)?;
-    emit!(PayoutPaid { funded: funded_key, request, trader, trader_amount, vault_amount, ts });
+    emit_cpi!(PayoutPaid { funded: funded_key, request, trader, trader_amount, vault_amount, ts });
     Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct RejectPayout<'info> {
     pub risk_authority: Signer<'info>,
@@ -247,10 +251,11 @@ pub(crate) fn reject_payout(ctx: Context<RejectPayout>, reason_code: u16) -> Res
     p.status = PayoutStatus::Rejected;
     p.reason_code = reason_code;
     p.resolved_at = ts;
-    emit!(PayoutRejected { funded: p.funded, request: p.key(), reason_code, ts });
+    emit_cpi!(PayoutRejected { funded: p.funded, request: p.key(), reason_code, ts });
     Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct RiskFunded<'info> {
     pub risk_authority: Signer<'info>,
@@ -274,7 +279,7 @@ pub(crate) fn restrict(ctx: Context<RiskFunded>, restricted: bool) -> Result<()>
     };
     require!(f.status == from, VaultError::InvalidAccountStatus);
     f.status = to;
-    emit!(AccountRestricted { funded: f.key(), restricted, ts: now()? });
+    emit_cpi!(AccountRestricted { funded: f.key(), restricted, ts: now()? });
     Ok(())
 }
 
@@ -285,10 +290,11 @@ pub(crate) fn mark_breached(ctx: Context<RiskFunded>) -> Result<()> {
         VaultError::InvalidAccountStatus
     );
     f.status = FundedStatus::Breached;
-    emit!(AccountBreached { funded: f.key(), ts: now()? });
+    emit_cpi!(AccountBreached { funded: f.key(), ts: now()? });
     Ok(())
 }
 
+#[event_cpi]
 #[derive(Accounts)]
 pub struct CloseFunded<'info> {
     pub risk_authority: Signer<'info>,
@@ -367,6 +373,6 @@ pub(crate) fn close_funded<'info>(ctx: Context<'_, '_, 'info, 'info, CloseFunded
     let c = &mut ctx.accounts.config;
     c.allocated_principal = c.allocated_principal.checked_sub(principal).ok_or(VaultError::MathOverflow)?;
     c.funded_active = c.funded_active.checked_sub(1).ok_or(VaultError::MathOverflow)?;
-    emit!(AccountClosed { funded: funded_key, principal, usdc_returned, lamports_returned, ts: now()? });
+    emit_cpi!(AccountClosed { funded: funded_key, principal, usdc_returned, lamports_returned, ts: now()? });
     Ok(())
 }

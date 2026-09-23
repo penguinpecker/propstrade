@@ -61,4 +61,24 @@ describe('advisory-lock leader election', () => {
     const [row] = await admin`select count(*)::int as n from pg_locks where locktype = 'advisory' and objid = ${key}`;
     expect(row!.n).toBe(0);
   });
+
+  it('lets the leader ask right away whether it still holds the lock, between the periodic checks', async () => {
+    const key = randomInt(1, 2 ** 31 - 1);
+    const stop = new AbortController();
+    let held: (() => Promise<boolean>) | undefined;
+    const done = runAsLeader({
+      databaseUrl: testDatabaseUrl(), key, signal: stop.signal, log, intervalMs: 60_000,
+      run: (lost, h) => new Promise<void>((resolve) => {
+        held = h;
+        lost.addEventListener('abort', () => resolve(), { once: true });
+      }),
+    });
+    await until(() => held !== undefined);
+    expect(await held!()).toBe(true);
+    await admin`select pg_terminate_backend(pid) from pg_locks
+      where locktype = 'advisory' and classid = 0 and objid = ${key} and granted`;
+    expect(await held!()).toBe(false); // the periodic check would only notice in a minute
+    stop.abort();
+    await done;
+  });
 });

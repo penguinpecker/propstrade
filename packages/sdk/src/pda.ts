@@ -38,3 +38,5 @@ export const fundedPda = (evaluation: PublicKey): PublicKey => pda([seed('funded
 export const ownerPda = (funded: PublicKey): PublicKey => pda([seed('owner'), funded.toBytes()]);
 export const ownerUsdcAddress = (funded: PublicKey): PublicKey => getAssociatedTokenAddressSync(USDC_MINT, ownerPda(funded), true);
 export const payoutPda = (funded: PublicKey, seq: number): PublicKey => pda([seed('payout'), funded.toBytes(), u32le(seq)]);
+/** Signer of props_vault's event self-CPIs (Anchor `#[event_cpi]`); every instruction that emits an event takes it. */
+export const eventAuthorityPda = (): PublicKey => pda([seed('__event_authority')]);

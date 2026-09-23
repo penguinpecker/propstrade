@@ -8,10 +8,12 @@ import {
   TransactionMessage,
   VersionedTransaction,
 } from '@solana/web3.js';
-import type { Connection, TransactionInstruction } from '@solana/web3.js';
+import type { Connection, TransactionInstruction, VersionedTransactionResponse } from '@solana/web3.js';
+import { utils } from '@coral-xyz/anchor';
 import { GMTRADE_PROGRAM_ID, GMTRADE_STORE, PROPS_VAULT_PROGRAM_ID, USDC_MINT } from './constants.ts';
 import { gmEventAuthority, gmStoreWallet } from './gmtrade.ts';
-import { capitalVaultAddress, configPda, solTreasuryPda, vaultAuthorityPda } from './pda.ts';
+import type { InvokedInstruction } from './client.ts';
+import { capitalVaultAddress, configPda, eventAuthorityPda, solTreasuryPda, vaultAuthorityPda } from './pda.ts';
 
 /**
  * Measured on the mainnet GMTrade binary: an open ≈ 140–155k CU; an open plus a stop-loss in one
@@ -55,6 +57,7 @@ export async function fetchLookupTables(connection: Connection, addresses: Publi
 export function sharedLookupAddresses(): PublicKey[] {
   return [
     PROPS_VAULT_PROGRAM_ID,
+    eventAuthorityPda(),
     configPda(),
     vaultAuthorityPda(),
     capitalVaultAddress(),
@@ -91,4 +94,12 @@ export function createLookupTableInstructions(p: {
     );
   }
   return { address, instructions };
+}
+
+/** Every inner instruction (CPI) of a confirmed transaction, in execution order, with its program resolved. */
+export function innerInstructionsOf(tx: Pick<VersionedTransactionResponse, 'transaction' | 'meta'>): InvokedInstruction[] {
+  const keys = tx.transaction.message.getAccountKeys({ accountKeysFromLookups: tx.meta?.loadedAddresses ?? undefined });
+  return [...(tx.meta?.innerInstructions ?? [])]
+    .sort((a, b) => a.index - b.index)
+    .flatMap((group) => group.instructions.map((ix) => ({ programId: keys.get(ix.programIdIndex)!, data: utils.bytes.bs58.decode(ix.data) })));
 }

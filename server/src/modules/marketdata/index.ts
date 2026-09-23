@@ -314,6 +314,7 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
       pure: pool.meta.isPure,
       isClosed: isMarketClosed(account.data),
       raw: { market: input.market, virtualInventories: input.virtualInventories, slot: account.slot },
+      prices: input.prices,
       fetchedAt: Date.now(),
     };
   }
