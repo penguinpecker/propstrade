@@ -1,5 +1,5 @@
 // Chain-job executor (leader only): sends set_identity with the KYC authority and record_evaluation_result /
-// approve_payout / reject_payout / restrict(false) with a risk authority. Every attempt first re-reads the onchain
+// approve_payout / reject_payout / restrict(false) / close_funded with a risk authority. Every attempt first re-reads the onchain
 // state (already done → confirmed with the signature of the transaction that did it, from the indexer), simulates,
 // stores the signature before sending, confirms, and retries with backoff: RPC trouble for as long as it lasts, the
 // chain's own refusal 10 times.
@@ -11,6 +11,7 @@ import { enumName, identityLockPda, traderProfilePda, type PropsVaultClient } fr
 import { parseFixed } from '@props/gmtrade';
 import type { Db } from '../../db/client.ts';
 import { chainJobs, programEvents } from '../../db/schema.ts';
+import type { Sealer } from '../../lib/integrity.ts';
 import type { EvaluationResult, SimService } from '../types.ts';
 import { hex } from './reader.ts';
 import type { VaultEventName } from './events.ts';
@@ -25,6 +26,7 @@ export type JobPayload = {
   approve_payout: { payout: string };
   reject_payout: { payout: string; reasonCode: number };
   lift_restriction: { funded: string };
+  close_funded: { funded: string };
 };
 
 /** What an attempt must do after re-reading the chain. */
@@ -47,6 +49,7 @@ const DONE_BY: { [K in JobKind]: { event: VaultEventName; fields(job: Job): Reco
   approve_payout: { event: 'payoutPaid', fields: (job) => ({ request: payload(job, 'approve_payout').payout }) },
   reject_payout: { event: 'payoutRejected', fields: (job) => ({ request: payload(job, 'reject_payout').payout }) },
   lift_restriction: { event: 'accountRestricted', fields: (job) => ({ funded: payload(job, 'lift_restriction').funded, restricted: 'false' }) },
+  close_funded: { event: 'accountClosed', fields: (job) => ({ funded: payload(job, 'close_funded').funded }) },
 };
 
 export interface JobDeps {
@@ -54,6 +57,8 @@ export interface JobDeps {
   rpc: SendRpc & Pick<Connection, 'getAccountInfo'>;
   client: PropsVaultClient;
   keys: { risk?: Keypair; kyc?: Keypair };
+  /** Checks every job's seal before its plan: a job this server did not write is never signed. */
+  sealer: Sealer;
   sim?: Pick<SimService, 'markRecorded'>;
   log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>;
 }
@@ -123,6 +128,20 @@ export function createJobs(d: JobDeps) {
       if (status !== 'restricted') return { permanent: `Account is ${status}` };
       return { instructions: [await client.restrict({ riskAuthority: risk.publicKey, funded, restricted: false })], signer: risk };
     },
+    async close_funded(job, risk) {
+      const address = new PublicKey(payload(job, 'close_funded').funded);
+      const account = await client.fetchFunded(address);
+      if (!account) throw new Rejected('Funded account not found');
+      const status = enumName<string>(account.status);
+      if (status === 'closed') return { done: true };
+      if (status === 'payoutPending') return { permanent: 'A payout request is pending: approve, reject or cancel it first' };
+      if (account.slots.some((s) => !s.marketToken.equals(PublicKey.default)) || account.orders.some((o) => !o.order.equals(PublicKey.default))) {
+        return { permanent: 'The account still has positions or orders: close and cancel them (and sync) first' };
+      }
+      // The program re-checks every existing GMTrade position of the owner PDA as flat.
+      const positions = await client.fetchOwnerPositions(address);
+      return { instructions: [await client.closeFunded({ riskAuthority: risk.publicKey, funded: { address, account }, positions })], signer: risk };
+    },
   };
 
   const signerFor = (kind: JobKind) => (kind === 'set_identity' ? d.keys.kyc : d.keys.risk);
@@ -161,6 +180,13 @@ export function createJobs(d: JobDeps) {
 
   async function attempt(job: Job) {
     const signer = signerFor(job.kind)!;
+    if (!d.sealer.verifyJob(job)) {
+      // Written to the database by something other than this server (or with another SESSION_SECRET): never signed.
+      const lastError = 'The job failed its integrity check (not written by this server); nothing was signed';
+      await db.update(chainJobs).set({ status: 'failed', lastError, updatedAt: sql`now()` }).where(eq(chainJobs.id, job.id));
+      d.log.error({ job: job.id, kind: job.kind, subject: job.subject }, 'chain job failed its integrity check');
+      return;
+    }
     try {
       if (job.status === 'sent' && job.signature) {
         const status = (await rpc.getSignatureStatuses([job.signature], { searchTransactionHistory: true })).value[0];
@@ -220,14 +246,19 @@ export function createJobs(d: JobDeps) {
   return { runDue, run };
 }
 
+/** A new chain_jobs row, sealed. */
+export const jobRow = <K extends JobKind>(sealer: Sealer, kind: K, subject: string | null, payload: JobPayload[K]) =>
+  ({ kind, subject, payload, mac: sealer.job({ kind, subject, payload }) });
+
 /** Queues a job once per subject (again when the subject's job failed); false when one is pending or done. */
-export async function enqueue<K extends JobKind>(db: Db, kind: K, subject: string, body: JobPayload[K]): Promise<boolean> {
-  const rows = await db.insert(chainJobs).values({ kind, subject, payload: body })
-    .onConflictDoUpdate({ target: chainJobs.subject, set: requeue({ kind, payload: body }), setWhere: eq(chainJobs.status, 'failed') })
+export async function enqueue<K extends JobKind>(db: Db, sealer: Sealer, kind: K, subject: string, body: JobPayload[K]): Promise<boolean> {
+  const row = jobRow(sealer, kind, subject, body);
+  const rows = await db.insert(chainJobs).values(row)
+    .onConflictDoUpdate({ target: chainJobs.subject, set: requeue(row), setWhere: eq(chainJobs.status, 'failed') })
     .returning({ id: chainJobs.id });
   return rows.length > 0;
 }
 
-/** Column values that put a failed job back in the queue as new (optionally with a new kind and payload). */
-export const requeue = (over: Partial<Pick<Job, 'kind' | 'payload'>> = {}) =>
+/** Column values that put a failed job back in the queue as new (optionally as a new sealed row: kind, payload, mac). */
+export const requeue = (over: Partial<Pick<Job, 'kind' | 'payload' | 'mac'>> = {}) =>
   ({ ...over, status: 'queued' as const, attempts: 0, rejections: 0, lastError: null, signature: null, updatedAt: sql`now()` });

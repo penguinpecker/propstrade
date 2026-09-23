@@ -18,6 +18,7 @@ import {
 import { buildApp } from '../../../app.ts';
 import { loadConfig } from '../../../config.ts';
 import { chainJobs, evaluations, fundedAccounts, gmOrders, indexerCursors, payouts, programEvents, vaultLedger } from '../../../db/schema.ts';
+import { createSealer } from '../../../lib/integrity.ts';
 import { createConnection } from '../../../lib/solana.ts';
 import { createStreamHub } from '../../../stream.ts';
 import { APP_ORIGIN, signIn } from '../../../../test/helpers.ts';
@@ -26,8 +27,9 @@ import { sendTx, startValidator, type Validator } from '../../../../../tests/pro
 import type { ModuleContext } from '../../types.ts';
 import { parseVaultEvents } from '../events.ts';
 import { createChain } from '../index.ts';
+import { jobRow } from '../jobs.ts';
 import type { GmIndexer } from '../venue.ts';
-import { freshDb, simStub, until } from './support.ts';
+import { freshDb, simStub, until, TEST_SESSION_SECRET, sealer } from './support.ts';
 
 const hasValidator = (() => {
   try {
@@ -57,7 +59,7 @@ const adminToken = randomBytes(32).toString('hex');
 /** The server as deployed: core app + the chain module with the throwaway authority keys. */
 async function startServer() {
   const config = loadConfig({
-    DATABASE_URL: t.url, APP_ORIGIN, SESSION_SECRET: randomBytes(32).toString('hex'), ADMIN_API_TOKEN: adminToken,
+    DATABASE_URL: t.url, APP_ORIGIN, SESSION_SECRET: TEST_SESSION_SECRET, ADMIN_API_TOKEN: adminToken,
     RPC_URL: validator.rpcUrl, RPC_WS_URL: validator.wsUrl, SOLANA_CLUSTER: 'localnet', PROGRAM_ID: PROPS_VAULT_PROGRAM_ID.toBase58(), TRUST_PROXY_HOPS: '0',
   });
   const rpc = createConnection(config);
@@ -140,7 +142,7 @@ test('chain module against solana-test-validator: index, jobs, funded lifecycle,
   // ---- purchase → indexer (through the subscription) → sim.createEvaluation with the onchain terms
   const evaluation = evaluationPda(trader.publicKey, 0);
   const sentAt = Date.now();
-  const purchase = await send([await vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0 })], [trader]);
+  const purchase = await send([await vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0, feeUsdc: usdc(TIERS.t10k.fee), tierVersion: 1 })], [trader]);
   const created = await until(async () => server.stub.created[0], 20_000, 'createEvaluation');
   assert.ok(Date.now() - sentAt < 20_000, 'indexed long before the 60 s fallback poll');
   assert.deepEqual(created, {
@@ -154,7 +156,7 @@ test('chain module against solana-test-validator: index, jobs, funded lifecycle,
   assert.equal(kycStart.statusCode, 200);
   const [request] = (await adminCall('GET', '/v1/admin/kyc')).body as { id: string }[];
   const identityHash = hex(hash32('person-1'));
-  assert.equal((await adminCall('POST', `/v1/admin/kyc/${request!.id}/approve`, { identityHash })).status, 200);
+  assert.equal((await adminCall('POST', `/v1/admin/kyc/${request!.id}/approve`, { identityHash, country: 'DE' })).status, 200);
   await until(async () => (await t.db.select().from(chainJobs).where(eq(chainJobs.kind, 'set_identity')))[0]?.status === 'confirmed', 30_000, 'set_identity');
   assert.equal(hex((await vault.fetch('traderProfile', traderProfilePda(trader.publicKey)))!.identityHash), identityHash);
   assert.equal((await get<{ kyc: string }>('/v1/me', session.cookie)).body.kyc, 'verified');
@@ -173,17 +175,27 @@ test('chain module against solana-test-validator: index, jobs, funded lifecycle,
   await until(async () => (await t.db.select().from(evaluations).where(eq(evaluations.address, evaluation.toBase58())))[0]?.resultSignature === recordJob.signature, 20_000, 'result indexed');
 
   // Idempotency against chain state: an already-recorded result is confirmed without a transaction; a conflicting one fails.
-  const [again] = await t.db.insert(chainJobs).values({ kind: 'record_evaluation_result', payload: result }).returning();
-  const [conflict] = await t.db.insert(chainJobs).values({ kind: 'record_evaluation_result', payload: { ...result, passed: false } }).returning();
+  const [again] = await t.db.insert(chainJobs).values(jobRow(sealer, 'record_evaluation_result', null, result)).returning();
+  const [conflict] = await t.db.insert(chainJobs).values(jobRow(sealer, 'record_evaluation_result', null, { ...result, passed: false })).returning();
+  // Someone with write access to the database but not the server's environment: a set_identity for a wallet of theirs.
+  const intruder = Keypair.generate().publicKey;
+  const forgedPayload = { wallet: intruder.toBase58(), identityHash: hex(hash32('forged')) };
+  const [forged] = await t.db.insert(chainJobs).values({
+    kind: 'set_identity', payload: forgedPayload, mac: createSealer('not the server secret').job({ kind: 'set_identity', subject: null, payload: forgedPayload }),
+  }).returning();
   const signaturesBefore = (await connection.getSignaturesForAddress(PROPS_VAULT_PROGRAM_ID)).length;
   await until(async () => {
-    const rows = await t.db.select().from(chainJobs).where(sql`${chainJobs.id} in (${again!.id}, ${conflict!.id})`);
+    const rows = await t.db.select().from(chainJobs).where(sql`${chainJobs.id} in (${again!.id}, ${conflict!.id}, ${forged!.id})`);
     return rows.every((r) => r.status === 'confirmed' || r.status === 'failed') && rows;
   }, 20_000, 'replayed jobs');
   const [replayed] = await t.db.select().from(chainJobs).where(eq(chainJobs.id, again!.id));
   const [refused] = await t.db.select().from(chainJobs).where(eq(chainJobs.id, conflict!.id));
+  const [unsealed] = await t.db.select().from(chainJobs).where(eq(chainJobs.id, forged!.id));
   assert.deepEqual([replayed!.status, replayed!.signature], ['confirmed', recordJob.signature]);
   assert.deepEqual([refused!.status, refused!.lastError], ['failed', 'Evaluation is already recorded as passed']);
+  assert.deepEqual([unsealed!.status, unsealed!.signature], ['failed', null]);
+  assert.match(unsealed!.lastError!, /integrity check/);
+  assert.equal(await vault.fetch('traderProfile', traderProfilePda(intruder)), null, 'no identity was set for the forged job');
   assert.equal((await connection.getSignaturesForAddress(PROPS_VAULT_PROGRAM_ID)).length, signaturesBefore, 'nothing was sent');
 
   // ---- activation → funded account in the accounts API
@@ -256,11 +268,14 @@ test('chain module against solana-test-validator: index, jobs, funded lifecycle,
   assert.deepEqual([rejected.reasonCode, rejected.reason], [2, 'Requested profit does not match the account\'s GMTrade trade history']);
   assert.equal(enumName((await vault.fetch('payoutRequest', payout2))!.status), 'rejected');
 
-  // ---- closure (the keeper's job; sent directly here) → closed account, principal back in the vault ledger
+  // ---- closure by an operator (admin API → sealed close_funded job) → closed account, principal back in the vault ledger
   const positions = await vault.fetchOwnerPositions(fundedAddress);
   assert.equal(positions.length, 1, 'the cancelled order left a flat Position account');
-  await send([await vault.closeFunded({ riskAuthority: risk.publicKey, funded: await fresh(), positions })], [risk]);
-  await until(async () => (await t.db.select().from(fundedAccounts))[0]?.status === 'closed', 20_000, 'closure indexed');
+  assert.equal((await adminCall('POST', `/v1/admin/funded/${fundedAddress.toBase58()}/close`)).status, 200);
+  await until(async () => (await t.db.select().from(fundedAccounts))[0]?.status === 'closed', 30_000, 'closure indexed');
+  assert.equal(enumName((await vault.fetchFunded(fundedAddress))!.status), 'closed');
+  const [closeJob] = await t.db.select().from(chainJobs).where(eq(chainJobs.subject, `close:${fundedAddress.toBase58()}`));
+  await until(async () => (await t.db.select().from(chainJobs).where(eq(chainJobs.id, closeJob!.id)))[0]?.status === 'confirmed', 20_000, 'close job confirmed');
   summary = await summaryOf();
   assert.deepEqual([summary.status, summary.equity, summary.realizedPnl], ['closed', '10100', '100']);
   const stats = (await get<VaultStats>('/v1/vault')).body;
@@ -282,11 +297,12 @@ test('chain module against solana-test-validator: index, jobs, funded lifecycle,
   const e = await verify(evaluation.toBase58());
   assert.deepEqual(e.items.map((i) => i.title).slice(0, 3), ['Evaluation purchased', 'Evaluation account', 'Evaluation passed']);
   assert.match(e.items[2]!.description, new RegExp(tradesRoot));
+  assert.deepEqual(e.items[2]!.tradesRoot, { root: tradesRoot, evaluation: evaluation.toBase58() }, 'the app recomputes the root from the linked fill list');
   assert.deepEqual((await verify(paid.paySignature!)).items.map((i) => i.title), ['Payout paid']);
 
   // ---- restart: transactions while the server is down are backfilled, none twice
   await server.stop();
-  await send([await vault.buyEvaluation({ trader: latecomer.publicKey, tierId: TIERS.t10k.id, index: 0 })], [latecomer]);
+  await send([await vault.buyEvaluation({ trader: latecomer.publicKey, tierId: TIERS.t10k.id, index: 0, feeUsdc: usdc(TIERS.t10k.fee), tierVersion: 1 })], [latecomer]);
   await send([await vault.depositCapital({ admin: admin.publicKey, amount: usdc('50') })], [admin]);
   server = await startServer();
   await until(async () => server.stub.created.find((c) => c.wallet === latecomer.publicKey.toBase58()), 30_000, 'backfilled purchase');

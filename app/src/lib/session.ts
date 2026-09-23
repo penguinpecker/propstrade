@@ -4,11 +4,33 @@ import { useConnection, useWallet } from '@solana/wallet-adapter-react';
 import { WalletError, WalletNotReadyError, WalletReadyState, type WalletName } from '@solana/wallet-adapter-base';
 import bs58 from 'bs58';
 import type { AppConfig, Me } from '@props/shared';
+import { SIWS_STATEMENT, buildSiwsMessage } from '@props/shared/siws';
 import { api, ApiRequestError } from './api';
 import { env, type Cluster } from './env';
 import { clearUserData, keys, meOptions, useConfig, useMe } from './queries';
 
 export type SessionStatus = 'no-wallet' | 'disconnected' | 'connecting' | 'needs-sign-in' | 'signing' | 'signed-in';
+
+/**
+ * Why a sign-in message from the API must not be signed, or null when it is exactly the message this app's server
+ * builds for this wallet, this site (host and origin) and this cluster: any other text could sign the trader in
+ * elsewhere, for whoever controls the API.
+ */
+export function signInMessageProblem(message: string, expected: { address: string; host: string; origin: string; cluster: Cluster }): string | null {
+  const field = (name: string) => new RegExp(`^${name}: (.+)$`, 'm').exec(message)?.[1];
+  const [nonce, issuedAt, expirationTime] = [field('Nonce'), field('Issued At'), field('Expiration Time')];
+  const refused = 'The sign-in message is not for this site or network, so it was not signed.';
+  if (!nonce || !issuedAt || !expirationTime || !/^[A-Za-z0-9]+$/.test(nonce)) return refused;
+  try {
+    const built = buildSiwsMessage({
+      domain: expected.host, address: expected.address, statement: SIWS_STATEMENT, uri: expected.origin,
+      chainId: expected.cluster === 'mainnet-beta' ? 'mainnet' : 'localnet', nonce, issuedAt: new Date(issuedAt), expirationTime: new Date(expirationTime),
+    });
+    return built === message ? null : refused;
+  } catch { // an invalid date
+    return refused;
+  }
+}
 /** `wrong` blocks sign-in; `unreachable` only warns (sign-in does not need the RPC). */
 export interface NetworkCheck { state: 'checking' | 'ok' | 'wrong' | 'unreachable'; reason?: string }
 export interface WalletOption { name: WalletName; icon: string }
@@ -116,7 +138,8 @@ export function useSession(): Session {
     setNotice(null);
     try {
       const { message } = await api.nonce(address);
-      if (!message.includes(address)) throw new Error('The sign-in message does not name this wallet, so it was not signed.');
+      const problem = signInMessageProblem(message, { address, host: location.host, origin: location.origin, cluster: env.cluster });
+      if (problem) throw new Error(problem);
       const signature = await signMessage(new TextEncoder().encode(message));
       await api.verify({ wallet: address, message, signature: bs58.encode(signature) });
       // The profile comes from /v1/me. Drop any read that started before the cookie existed, then read it fresh.

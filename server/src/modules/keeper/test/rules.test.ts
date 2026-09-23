@@ -73,8 +73,8 @@ test('a healthy, synced account needs nothing', () => {
   assert.equal(planStep(account(), ctx()), null);
 });
 
-test('breach: equity at the floor restricts and closes every open position, freeing an order slot when all 8 are used', () => {
-  assert.deepEqual(planStep(account({ value: 0n }), ctx())?.actions, [{ type: 'restrict' }, { type: 'close', slot: 0 }]);
+test('breach: equity at the floor marks the account breached and closes every open position, freeing an order slot when all 8 are used', () => {
+  assert.deepEqual(planStep(account({ value: 0n }), ctx())?.actions, [{ type: 'markBreached' }, { type: 'close', slot: 0 }]);
   assert.equal(planStep(account({ value: 1n }), ctx()), null, 'one unit above the floor is not a breach');
   assert.equal(planStep(account({ value: null }), ctx()), null, 'no risk decision on stale or unvalued prices');
 
@@ -84,7 +84,7 @@ test('breach: equity at the floor restricts and closes every open position, free
     positions: new Map([['position-0', { size: USD, collateral: 1n, netValue: 0n }], ['position-1', { size: USD, collateral: 1n, netValue: 0n }]]),
   });
   two.markets.set(NVDA, { ...two.markets.get(NVDA)!, open: false });
-  assert.deepEqual(planStep(two, ctx())?.actions, [{ type: 'restrict' }, { type: 'close', slot: 0 }]);
+  assert.deepEqual(planStep(two, ctx())?.actions, [{ type: 'markBreached' }, { type: 'close', slot: 0 }]);
 
   // All 8 tracked: a finished order is recovered first, then the trader's TP/SL before an increase.
   const full = account({
@@ -97,15 +97,33 @@ test('breach: equity at the floor restricts and closes every open position, free
   const withTwo = account({ ...full, slots: [slot(0, SOL), slot(1, SOL, { isLong: false, gmPosition: 'position-1' })],
     positions: new Map([['position-0', { size: USD, collateral: 1n, netValue: 0n }], ['position-1', { size: USD, collateral: 1n, netValue: 0n }]]) });
   assert.deepEqual(planStep(withTwo, ctx())?.actions, [
-    { type: 'restrict' }, { type: 'closeCompleted', order: 'done' }, { type: 'cancel', order: 'sl0' }, { type: 'close', slot: 0 }, { type: 'close', slot: 1 },
+    { type: 'markBreached' }, { type: 'closeCompleted', order: 'done' }, { type: 'cancel', order: 'sl0' }, { type: 'close', slot: 0 }, { type: 'close', slot: 1 },
   ]);
 
-  // Already restricted with a risk close pending: nothing more to send for the breach.
-  const closing = account({ value: 0n, status: 'restricted', orders: [order({ order: 'rc', type: 'close', placedByRisk: true })] });
+  // Restricted (e.g. after a GMTrade upgrade) is no shelter: the breach still ends the account.
+  assert.deepEqual(planStep(account({ value: 0n, status: 'restricted' }), ctx())?.actions, [{ type: 'markBreached' }, { type: 'close', slot: 0 }]);
+  // Already breached with a risk close pending: nothing more to send for the breach.
+  const closing = account({ value: 0n, status: 'breached', orders: [order({ order: 'rc', type: 'close', placedByRisk: true })] });
   assert.equal(planStep(closing, ctx())?.kind ?? null, null);
   // A risk close that GMTrade could not execute is finished: recover it and close again.
-  const retry = account({ value: 0n, status: 'restricted', orders: [order({ order: 'rc', type: 'close', placedByRisk: true, state: 'cancelled' })] });
+  const retry = account({ value: 0n, status: 'breached', orders: [order({ order: 'rc', type: 'close', placedByRisk: true, state: 'cancelled' })] });
   assert.deepEqual(planStep(retry, ctx())?.actions, [{ type: 'close', slot: 0 }]);
+  // Once breached, positions are closed whatever they are worth now (liquidation leftovers put V above zero).
+  assert.deepEqual(planStep(account({ status: 'breached' }), ctx())?.actions, [{ type: 'close', slot: 0 }]);
+  assert.equal(planStep(account({ status: 'payoutPending', value: 0n }), ctx())?.actions.some((a) => a.type === 'markBreached'), false, 'the program marks only active or restricted accounts');
+});
+
+test('closure: a breached account is closed once flat, never before, and without a top-up first', () => {
+  const flat = account({ status: 'breached', slots: [], positions: new Map(), value: 5n * USD, ownerLamports: 1n });
+  assert.deepEqual(planStep(flat, ctx()), { kind: 'closure', actions: [{ type: 'closeFunded' }], detail: 'the breached account is flat' });
+  // An order GMTrade finished but left open: recovered and synced first.
+  const leftover = account({ ...flat, ownerLamports: 200_000_000n, orders: [order({ order: 'done', type: 'close', placedByRisk: true, state: 'completed' })] });
+  assert.equal(planStep(leftover, ctx())?.kind, 'cleanup');
+  // A position in a closed market waits for the session; the account stays open until then.
+  const shut = account({ status: 'breached' });
+  shut.markets.set(SOL, { ...shut.markets.get(SOL)!, open: false });
+  assert.equal(planStep(shut, ctx()), null);
+  assert.equal(planStep(account({ slots: [], positions: new Map() }), ctx()), null, 'a flat healthy account stays open');
 });
 
 test('session guard: over-levered stock and FX positions are closed from 15 minutes before the session ends, only while open', () => {

@@ -63,5 +63,21 @@ export const isOpenOrder = order => !['executed', 'canceled', 'rejected'].includ
 export const usdBase = market => market.pair.endsWith('/ USD') ? market.pair.split(' / ')[0] : null;
 /** A market's price, with "$" when the pair is quoted in USD ("$64,482.00"; "147.214" for USD / JPY). */
 export const marketPrice = (value, market) => value == null ? DASH : `${usdBase(market) ? '$' : ''}${price(value, market.priceDecimals)}`;
+/**
+ * Why the stage's accounts cannot trade a market, or null when they can: funded accounts and evaluations (identical
+ * rules) trade the allowlisted markets, practice any market whose preferred GMTrade pool is USDC-only (as the engine
+ * checks). `label` names it in market lists, `reason` explains it where an order would be placed.
+ */
+export function stageRestriction(market, stage, usdcMint) {
+  if (stage === 'practice') {
+    const pool = market.pools.find(p => p.marketToken === market.marketToken);
+    const usdcOnly = pool?.pure && (!usdcMint || (pool.longToken === usdcMint && pool.shortToken === usdcMint));
+    return usdcOnly ? null : { label: 'Not available in practice', reason: `${market.symbol} has no USDC-only pool on GMTrade, so it cannot be traded here.` };
+  }
+  if (market.tradable) return null;
+  return stage === 'funded'
+    ? { label: 'Not available for funded trading', reason: market.unavailableReason ?? 'Not available for funded trading.' }
+    : { label: 'Not available in evaluations', reason: `${market.symbol} is not available in evaluations: they trade only the markets funded accounts can.` };
+}
 /** Label for a market price that is not live ('Stale', 'Delayed', 'Unavailable'), or null when it is live. */
 export const freshnessLabel = market => market.freshness === 'live' ? null : market.freshness[0].toUpperCase() + market.freshness.slice(1);

@@ -60,9 +60,10 @@ export function createVerify(d: { db: Db; rpc: Pick<Connection, 'getAccountInfo'
         title: `Evaluation ${e.status === 'failed' ? 'failed' : 'passed'}`, state: 'confirmed', ...tx(e.resultSignature, undefined, e.resolvedAt),
         description: `Result recorded with final equity ${dec(e.finalEquity ?? '0')} USD and trades root ${e.tradesRoot}.`,
         establishes: 'A Props.trade risk authority recorded the result onchain. The evaluation\'s trades were simulated off-chain against live '
-          + 'GMTrade prices and are not onchain. The trades root is a SHA-256 Merkle root over the evaluation\'s canonical fill list: recompute it '
-          + 'from the fills in this account\'s trade history and compare. A match shows the fill list was not changed after the result was '
-          + 'recorded; it does not show that the simulated fills were fair.',
+          + 'GMTrade prices and are not onchain. The trades root is a SHA-256 Merkle root over the evaluation\'s canonical fill list, which '
+          + 'anyone can download here and recompute it from. A match shows the fill list was not changed after the result was recorded; it '
+          + 'does not show that the simulated fills were fair.',
+        ...(e.tradesRoot ? { tradesRoot: { root: e.tradesRoot, evaluation: e.address } } : {}),
       });
     } else {
       items.push({

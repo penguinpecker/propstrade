@@ -805,6 +805,14 @@ export type PropsVault = {
         {
           "name": "index",
           "type": "u32"
+        },
+        {
+          "name": "expectedFeeUsdc",
+          "type": "u64"
+        },
+        {
+          "name": "expectedTierVersion",
+          "type": "u32"
         }
       ]
     },
@@ -5491,6 +5499,16 @@ export type PropsVault = {
       "code": 6039,
       "name": "mathOverflow",
       "msg": "Arithmetic overflow"
+    },
+    {
+      "code": 6040,
+      "name": "tierChanged",
+      "msg": "The tier's fee or terms changed since they were reviewed"
+    },
+    {
+      "code": 6041,
+      "name": "dailyPrincipalLimit",
+      "msg": "Funded activations reached the vault's daily limit; try again later"
     }
   ],
   "types": [
@@ -5709,6 +5727,22 @@ export type PropsVault = {
             "type": "u64"
           },
           {
+            "name": "maxDailyPrincipal",
+            "type": "u64"
+          },
+          {
+            "name": "principalWindowStart",
+            "docs": [
+              "The current activation window: it opens with the first activation after the previous one ended, lasts a day,",
+              "and `principal_in_window` counts what was posted in it."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "principalInWindow",
+            "type": "u64"
+          },
+          {
             "name": "paused",
             "type": {
               "defined": {
@@ -5858,6 +5892,14 @@ export type PropsVault = {
           },
           {
             "name": "ownerSolMin",
+            "type": "u64"
+          },
+          {
+            "name": "maxDailyPrincipal",
+            "docs": [
+              "Principal `activate_funded` may post per day, USDC base units. Bounds what a compromised risk or KYC key, or a",
+              "tampered server database (evaluation results and identities are decided off-chain), can put at risk."
+            ],
             "type": "u64"
           }
         ]

@@ -1,7 +1,7 @@
 // A real solana-test-validator for smoke and end-to-end suites: the mainnet GMTrade binary at its address, cloned
 // mainnet accounts (Store restart slot patched to the local 0), props_vault deployed through the upgradeable loader,
 // and funded USDC token accounts. Nothing talks to mainnet except the optional read-only --clone-feature-set
-// (disable with CLONE_FEATURES=0).
+// (disable with CLONE_FEATURES=0) and the read-only `clone` list.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
@@ -32,6 +32,8 @@ export interface ValidatorOptions {
   mints?: [mint: PublicKey, decimals: number][];
   /** Any other accounts to exist at genesis (e.g. a GMTrade Position as a keeper fill would leave it). */
   accounts?: { address: PublicKey; owner: PublicKey; data: Buffer; lamports: number }[];
+  /** Mainnet accounts to clone as they are now (read-only), e.g. a market's virtual inventory or index token mint. */
+  clone?: PublicKey[];
 }
 
 export interface Validator {
@@ -84,6 +86,10 @@ function writeAccountDir(dir: string, o: ValidatorOptions): void {
 }
 
 export async function startValidator(o: ValidatorOptions): Promise<Validator> {
+  const rpcUrl = `http://127.0.0.1:${o.rpcPort}`;
+  const connection = new Connection(rpcUrl, 'confirmed');
+  // Something already answering there would be taken for this validator: the suite would run against another chain.
+  if (await connection.getSlot().then(() => true, () => false)) throw new Error(`a validator already listens on port ${o.rpcPort}`);
   const workDir = mkdtempSync(join(tmpdir(), 'props-vault-validator-'));
   const accounts = join(workDir, 'accounts');
   mkdirSync(accounts);
@@ -96,10 +102,10 @@ export async function startValidator(o: ValidatorOptions): Promise<Validator> {
     '--upgradeable-program', PROPS_VAULT_PROGRAM_ID.toBase58(), PROGRAM_SO, o.upgradeAuthority.toBase58(),
     '--account-dir', accounts,
   ];
-  if (process.env.CLONE_FEATURES !== '0') args.push('--clone-feature-set', '--url', 'https://api.mainnet-beta.solana.com');
+  for (const address of o.clone ?? []) args.push('--clone', address.toBase58());
+  if (process.env.CLONE_FEATURES !== '0') args.push('--clone-feature-set');
+  if (o.clone?.length || process.env.CLONE_FEATURES !== '0') args.push('--url', 'https://api.mainnet-beta.solana.com');
   const child: ChildProcess = spawn('solana-test-validator', args, { stdio: ['ignore', 'ignore', 'inherit'] });
-  const rpcUrl = `http://127.0.0.1:${o.rpcPort}`;
-  const connection = new Connection(rpcUrl, 'confirmed');
   const stop = () => {
     child.kill('SIGINT');
     rmSync(workDir, { recursive: true, force: true });

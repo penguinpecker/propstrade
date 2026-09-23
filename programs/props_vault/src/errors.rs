@@ -82,4 +82,8 @@ pub enum VaultError {
     OwnerFloatSufficient,
     #[msg("Arithmetic overflow")]
     MathOverflow,
+    #[msg("The tier's fee or terms changed since they were reviewed")]
+    TierChanged,
+    #[msg("Funded activations reached the vault's daily limit; try again later")]
+    DailyPrincipalLimit,
 }

@@ -73,8 +73,14 @@ pub mod props_vault {
 
     // ----- trader -----
 
-    pub fn buy_evaluation(ctx: Context<BuyEvaluation>, tier_id: u16, index: u32) -> Result<()> {
-        instructions::buy_evaluation(ctx, tier_id, index)
+    pub fn buy_evaluation(
+        ctx: Context<BuyEvaluation>,
+        tier_id: u16,
+        index: u32,
+        expected_fee_usdc: u64,
+        expected_tier_version: u32,
+    ) -> Result<()> {
+        instructions::buy_evaluation(ctx, tier_id, index, expected_fee_usdc, expected_tier_version)
     }
 
     pub fn activate_funded(ctx: Context<ActivateFunded>) -> Result<()> {

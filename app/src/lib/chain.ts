@@ -3,8 +3,8 @@
 import './buffer';
 import bs58 from 'bs58';
 import {
-  CLOSE_ALL, GMTRADE_PROGRAM_ID, PROPS_VAULT_IDL, PROPS_VAULT_PROGRAM_ID, PropsVaultClient, acceptablePrice, buildTransaction, decodeGmPosition,
-  evaluationPda, fundedPda, gmPositionPda, ownerPda, payoutPda, tierPda, toMicro, toUnitPrice, traderProfilePda, usdToGm,
+  CLOSE_ALL, GMTRADE_PROGRAM_ID, PROPS_VAULT_IDL, PROPS_VAULT_PROGRAM_ID, PropsVaultClient, acceptablePrice, buildTransaction, decodeGmMarketMeta, decodeGmPosition,
+  evaluationPda, fundedPda, gmPositionPda, marketConfigPda, ownerPda, payoutPda, tierPda, toMicro, toUnitPrice, traderProfilePda, usdToGm,
   type FundedRef,
 } from '@props/sdk';
 import { ComputeBudgetProgram, PublicKey, SendTransactionError, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
@@ -118,7 +118,8 @@ async function positionSize(connection: Connection, position: PublicKey): Promis
 
 /**
  * The program charges the tier account's fee and pins its terms, so the tier the trader reviewed (from the API) must
- * match it exactly; otherwise nothing is built.
+ * match it exactly; otherwise nothing is built. The purchase carries the reviewed fee and tier version, and the program
+ * refuses it if the tier changes before it lands.
  */
 export async function prepareEvaluation(connection: Connection, trader: PublicKey, tier: Pick<Tier, 'id' | 'feeUsdc' | 'version' | 'termsHash'>) {
   const c = client(connection);
@@ -127,7 +128,7 @@ export async function prepareEvaluation(connection: Connection, trader: PublicKe
   if (BigInt(onchain.feeUsdc.toString()) !== toMicro(tier.feeUsdc) || onchain.version !== tier.version || Buffer.from(onchain.termsHash).toString('hex') !== tier.termsHash)
     throw new TxError('This evaluation\'s fee or terms changed since the page loaded. Reload the page to review the current terms.');
   const index = profile?.evaluationCount ?? 0;
-  const instruction = await c.buyEvaluation({ trader, tierId: tier.id, index });
+  const instruction = await c.buyEvaluation({ trader, tierId: tier.id, index, feeUsdc: toMicro(tier.feeUsdc), tierVersion: tier.version });
   const sizes = [c.program.account.evaluation.size, ...(profile ? [] : [c.program.account.traderProfile.size])];
   return { ...(await prepare(connection, trader, [instruction], await rent(connection, sizes))), evaluation: evaluationPda(trader, index).toBase58() };
 }
@@ -150,7 +151,35 @@ export async function preparePayoutRequest(connection: Connection, trader: Publi
 
 // ---------- funded trading ----------
 
-export interface MarketRef { marketToken: string; indexTokenDecimals: number }
+/** A market as the trader sees it (from the API); every order checks it onchain first (onchainMarket). */
+export interface MarketRef { marketToken: string; symbol: string }
+
+/** An SPL mint's `decimals` byte. */
+const MINT_DECIMALS_OFFSET = 44;
+
+/**
+ * The market an order goes to, as the chain has it rather than as the API describes it: its MarketConfig (which the
+ * program checks every order against) must name the symbol the trader is looking at, and the index token's decimals,
+ * which scale every signed trigger and acceptable price, come from the index token's mint, through the GMTrade Market
+ * the config pins.
+ */
+async function onchainMarket(connection: Connection, market: MarketRef): Promise<{ marketToken: PublicKey; decimals: number }> {
+  const marketToken = new PublicKey(market.marketToken);
+  const unconfirmed = new TxError(`The ${market.symbol} market could not be confirmed onchain, so nothing was built. Reload the page and try again.`);
+  const config = await client(connection).fetch('marketConfig', marketConfigPda(marketToken));
+  if (!config || Buffer.from(config.indexSymbol).toString('utf8').replace(/\0+$/, '') !== market.symbol) throw unconfirmed;
+  const gm = await connection.getAccountInfo(config.gmMarket, 'confirmed');
+  let indexToken: PublicKey;
+  try {
+    if (!gm?.owner.equals(GMTRADE_PROGRAM_ID)) throw unconfirmed;
+    indexToken = decodeGmMarketMeta(gm.data).indexToken;
+  } catch {
+    throw unconfirmed;
+  }
+  const mint = await connection.getAccountInfo(indexToken, 'confirmed');
+  if (!mint || mint.data.length <= MINT_DECIMALS_OFFSET) throw unconfirmed;
+  return { marketToken, decimals: mint.data[MINT_DECIMALS_OFFSET]! };
+}
 
 /** A GMTrade order a transaction created, and the position it changes, to follow until a keeper executes or cancels it. */
 export interface OrderFollow { order: string; position: string; sizeBefore: bigint; increase: boolean }
@@ -173,8 +202,8 @@ export interface OpenInput {
 export async function prepareOpen(connection: Connection, trader: PublicKey, input: OpenInput) {
   const c = client(connection);
   const funded = await fundedRef(connection, input.funded);
-  const marketToken = new PublicKey(input.market.marketToken);
-  const reference = unitPrice(input.price, input.market.indexTokenDecimals);
+  const { marketToken, decimals } = await onchainMarket(connection, input.market);
+  const reference = unitPrice(input.price, decimals);
   const open = await c.openPosition({
     trader, funded, marketToken, isLong: input.isLong, orderType: input.kind === 'Market' ? 'market' : 'limit',
     collateral: collateralMicro(input.collateralUsd), sizeDeltaUsd: usdToGm(usd6(input.sizeUsd)),
@@ -185,7 +214,7 @@ export async function prepareOpen(connection: Connection, trader: PublicKey, inp
   for (const [orderType, price] of [['takeProfit', input.takeProfit], ['stopLoss', input.stopLoss]] as const) {
     if (!price) continue;
     const protection = await c.setProtection({
-      trader, funded, marketToken, isLong: input.isLong, orderType, triggerPrice: unitPrice(price, input.market.indexTokenDecimals),
+      trader, funded, marketToken, isLong: input.isLong, orderType, triggerPrice: unitPrice(price, decimals),
       sizeDeltaUsd: CLOSE_ALL, ordersBefore: instructions.length,
     });
     instructions.push(protection.instruction);
@@ -208,12 +237,12 @@ export async function prepareClose(connection: Connection, trader: PublicKey, in
   const instructions: TransactionInstruction[] = [];
   const closes: { order: PublicKey; position: PublicKey }[] = [];
   for (const p of input.positions) {
-    const marketToken = new PublicKey(p.market.marketToken);
+    const { marketToken, decimals } = await onchainMarket(connection, p.market);
     const size = p.percent >= 100 ? CLOSE_ALL : usdToGm(usd6(p.sizeUsd * p.percent / 100));
     if (size !== CLOSE_ALL && size < usdToGm('1')) throw new TxError('GMTrade closes at least $1 of a position. Choose a larger share.');
     const close = await c.closePosition({
       authority: trader, funded, marketToken, isLong: p.isLong, sizeDeltaUsd: size, ordersBefore: instructions.length,
-      acceptablePrice: acceptablePrice(unitPrice(p.markPrice, p.market.indexTokenDecimals), p.isLong, false, input.slippageBps),
+      acceptablePrice: acceptablePrice(unitPrice(p.markPrice, decimals), p.isLong, false, input.slippageBps),
     });
     instructions.push(close.instruction);
     closes.push({ order: close.order, position: gmPositionPda(ownerPda(funded.address), marketToken, p.isLong) });
@@ -237,11 +266,11 @@ export interface ProtectionInput {
 export async function prepareProtection(connection: Connection, trader: PublicKey, input: ProtectionInput) {
   const c = client(connection);
   const funded = await fundedRef(connection, input.funded);
-  const marketToken = new PublicKey(input.market.marketToken);
+  const { marketToken, decimals } = await onchainMarket(connection, input.market);
   const instructions: TransactionInstruction[] = [];
   let created = 0;
   for (const [orderType, side] of [['takeProfit', input.takeProfit], ['stopLoss', input.stopLoss]] as const) {
-    const triggerPrice = side.price ? unitPrice(side.price, input.market.indexTokenDecimals) : null;
+    const triggerPrice = side.price ? unitPrice(side.price, decimals) : null;
     if (side.order && triggerPrice !== null) instructions.push(await c.updateOrder({ trader, funded, order: new PublicKey(side.order), triggerPrice }));
     else if (side.order) instructions.push(await c.cancelOrder({ authority: trader, funded, order: new PublicKey(side.order) }));
     else if (triggerPrice !== null) {

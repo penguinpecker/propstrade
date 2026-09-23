@@ -3,6 +3,7 @@
 //  2. the GMTrade upgrade restriction lapses for an account that was payout-pending when the upgrade was handled;
 //  3. linked-position (hedge) detection is bypassed by opening a $1 stub first;
 //  4. an account whose read keeps failing gets no stop-out or session guard, and no alert (only a log line).
+// Later review: a breached account was only restricted, never marked breached and closed (see the last test).
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import BN from 'bn.js';
@@ -10,7 +11,7 @@ import { Keypair, PublicKey, SystemProgram } from '@solana/web3.js';
 import { GMTRADE_PROGRAM_ID, ORDER_DISCRIMINATOR, PROPS_VAULT_PROGRAM_ID, ownerPda, ownerUsdcAddress, type ConfigAccount } from '@props/sdk';
 import { eq, isNotNull } from 'drizzle-orm';
 import { evaluations, fundedAccounts, gmtradeDeploys, indexerCursors } from '../../../db/schema.ts';
-import { encodeAccount, freshDb, offlineClient, silentLog, until } from '../../chain/test/support.ts';
+import { encodeAccount, freshDb, offlineClient, sealer, silentLog, until } from '../../chain/test/support.ts';
 import type { Alerts } from '../alerts.ts';
 import { createKeeper } from '../keeper.ts';
 import { exposuresOf, linkedPositions, planStep, reviewPayout, type AccountView, type FillRow, type OrderView } from '../rules.ts';
@@ -33,7 +34,7 @@ after(async () => {
 });
 
 type Info = { data: Buffer; owner: PublicKey; lamports: number; executable: boolean; rentEpoch: number };
-type Status = 'active' | 'restricted' | 'payoutPending';
+type Status = 'active' | 'restricted' | 'payoutPending' | 'breached' | 'closed';
 
 /** A fake chain + RPC for createKeeper: accounts in a map, every transaction simulates and confirms. */
 function fakeChain() {
@@ -87,6 +88,23 @@ function fakeChain() {
     });
     return restrict(p);
   };
+  const lifecycle: string[] = [];
+  const markBreached = client.markBreached.bind(client);
+  client.markBreached = (p) => {
+    queued.push(() => {
+      lifecycle.push('markBreached');
+      setStatus(p.funded.toBase58(), 'breached');
+    });
+    return markBreached(p);
+  };
+  const closeFunded = client.closeFunded.bind(client);
+  client.closeFunded = (p) => {
+    queued.push(() => {
+      lifecycle.push(`closeFunded(${p.positions?.map(String).join(',')})`);
+      setStatus(p.funded.address.toBase58(), 'closed');
+    });
+    return closeFunded(p);
+  };
   const sync = client.sync.bind(client);
   client.sync = (p) => {
     // Drops vanished orders and frees the idle slot (all the scenarios here need).
@@ -134,7 +152,7 @@ function fakeChain() {
     },
   };
   return {
-    client, rpc, accounts, put, system, usdc, funded, gmOrder, setStatus, sent, restricted,
+    client, rpc, accounts, put, system, usdc, funded, gmOrder, setStatus, sent, restricted, lifecycle,
     setDeploySlot: (s: bigint) => void (deploySlot = s),
     /** Runs once, right after the next getMultipleAccountsInfoAndContext has read its accounts. */
     afterNextRead: (fn: () => void) => void (afterFirstRead = fn),
@@ -205,7 +223,7 @@ async function refundedOrder(race: boolean) {
   const notified: string[] = [];
   const keeper = createKeeper({
     db: t.db, rpc: chain.rpc as never, client: chain.client, reader: { evaluation: async () => { throw new Error('unused'); }, market: async () => sol },
-    marketdata: openSol as never, risk: Keypair.generate(), log: silentLog, alerts: recorder().a,
+    marketdata: openSol as never, risk: Keypair.generate(), sealer, log: silentLog, alerts: recorder().a,
     notify: async (_wallet, n) => void notified.push(n.title),
   });
   const stop = new AbortController();
@@ -235,7 +253,7 @@ test('finding 2: an account that was payout-pending when a GMTrade upgrade was h
   const r = recorder();
   const keeper = createKeeper({
     db: t.db, rpc: chain.rpc as never, client: chain.client, reader: { evaluation: async () => { throw new Error('unused'); }, market: async () => sol },
-    marketdata: openSol as never, risk: Keypair.generate(), log: silentLog, alerts: r.a, notify: async () => {},
+    marketdata: openSol as never, risk: Keypair.generate(), sealer, log: silentLog, alerts: r.a, notify: async () => {},
   });
   const stop = new AbortController();
   const done = keeper.run(stop.signal, async () => true, 20);
@@ -308,7 +326,7 @@ test('finding 4: an account the keeper cannot read or value is alerted, not only
   const keeper = createKeeper({
     db: t.db, rpc: chain.rpc as never, client: chain.client,
     reader: { evaluation: async () => { throw new Error('unused'); }, market: async () => { throw new Error('market account unavailable'); } },
-    marketdata: openSol as never, risk: Keypair.generate(), alerts: r.a, notify: async () => {},
+    marketdata: openSol as never, risk: Keypair.generate(), sealer, alerts: r.a, notify: async () => {},
     log: { ...silentLog, error: (_o: unknown, msg?: string) => void errors.push(String(msg)) },
   });
   const stop = new AbortController();
@@ -387,7 +405,7 @@ test('critical finding, keeper side: a props_vault transaction left unindexed fo
   const run = async () => {
     const keeper = createKeeper({
       db: t.db, rpc: rpc as never, client: chain.client, reader: { evaluation: async () => { throw new Error('unused'); }, market: async () => sol },
-      marketdata: openSol as never, risk: Keypair.generate(), log: silentLog, alerts: r.a, notify: async () => {},
+      marketdata: openSol as never, risk: Keypair.generate(), sealer, log: silentLog, alerts: r.a, notify: async () => {},
     });
     const stop = new AbortController();
     await runTicks(keeper, stop, keeper.run(stop.signal, async () => true, 20), 1);
@@ -403,4 +421,30 @@ test('critical finding, keeper side: a props_vault transaction left unindexed fo
   assert.equal(alert?.level, 'critical');
   assert.match(alert!.text, /^The props_vault indexer is behind: 2 transaction\(s\) not indexed, the oldest 7 min old \(stuckSig\)/);
   await t.db.delete(indexerCursors);
+});
+
+test('a funded account whose equity reached the floor is marked breached, then closed once flat, and stays closed', async () => {
+  await t.db.delete(gmtradeDeploys);
+  const chain = fakeChain();
+  const fundedKey = Keypair.generate().publicKey;
+  const address = fundedKey.toBase58();
+  await fundedRow(address, Keypair.generate().publicKey.toBase58());
+  // Every position was liquidated and the owner holds no USDC: V = 0, the account is flat.
+  chain.put(fundedKey, chain.funded('active'));
+  chain.put(ownerUsdcAddress(fundedKey), chain.usdc(0n));
+  chain.put(ownerPda(fundedKey), chain.system(250_000_000));
+  const flatPosition = Keypair.generate().publicKey;
+  chain.client.fetchOwnerPositions = async (f) => (f.equals(fundedKey) ? [flatPosition] : []);
+  const r = recorder();
+  const keeper = createKeeper({
+    db: t.db, rpc: chain.rpc as never, client: chain.client, reader: { evaluation: async () => { throw new Error('unused'); }, market: async () => sol },
+    marketdata: openSol as never, risk: Keypair.generate(), sealer, log: silentLog, alerts: r.a, notify: async () => {},
+  });
+  const stop = new AbortController();
+  await runTicks(keeper, stop, keeper.run(stop.signal, async () => true, 20), 3);
+  assert.deepEqual(chain.lifecycle, ['markBreached', `closeFunded(${flatPosition.toBase58()})`], 'the owner PDA\'s GMTrade positions are passed for the flat check');
+  assert.deepEqual(chain.restricted, [], 'no restriction an operator could lift');
+  assert.ok(r.alerts.some((a) => a.key === `breach:${address}` && a.level === 'critical'));
+  assert.ok(r.alerts.some((a) => a.key === `closed:${address}`));
+  await t.db.delete(fundedAccounts).where(eq(fundedAccounts.address, address));
 });

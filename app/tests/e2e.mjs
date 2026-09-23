@@ -353,7 +353,7 @@ try {
       await page.getByRole('button', { name: 'Pay 79.00 USDC' }).click();
       await page.waitForURL('**/#/payment?sig=*');
       await main.getByText('Payment complete').waitFor({ timeout: 15_000 });
-      assert.deepEqual(sent('buyEvaluation').map(s => s.data), [{ tierId: 1, index: 2 }]);
+      assert.deepEqual(sent('buyEvaluation').map(s => ({ ...s.data, expectedFeeUsdc: s.data.expectedFeeUsdc.toString() })), [{ tierId: 1, index: 2, expectedFeeUsdc: '79000000', expectedTierVersion: 1 }]);
       await main.getByRole('button', { name: 'Open your evaluation' }).click();
       await page.waitForURL('**/#/trade/evaluation');
       await page.locator('.account-strip').getByText('Evaluation 10K').waitFor();
@@ -387,6 +387,48 @@ try {
       await page.keyboard.press('Escape');
     });
 
+    await check('stage context: a return visit opens the last stage, onboarding rules show the tier, the ticket refuses what the stage cannot trade', async () => {
+      await page.goto(`${siteUrl}/#/trade/evaluation`);
+      await page.locator('.account-strip').getByText(/^Evaluation/).first().waitFor();
+      await page.locator('header').getByRole('link', { name: 'Props.trade home' }).click();
+      await page.waitForFunction(() => location.hash === '#/');
+      await page.locator('.order-panel .badge').getByText('Evaluation', { exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => localStorage.getItem('props.stage')), '"evaluation"', 'the saved stage survives');
+      // Onboarding: the footer rules are the tier's, and the resume notice names the account in progress.
+      await page.goto(`${siteUrl}/#/program`);
+      await page.locator('footer').getByRole('button', { name: 'Rules' }).click();
+      const rules = page.getByRole('dialog');
+      await rules.getByRole('heading', { name: /^Rules for the \w+ evaluation$/ }).waitFor();
+      await rules.getByRole('button', { name: 'Back to program details' }).click();
+      await page.goto(`${siteUrl}/#/get-funded`);
+      await main.getByRole('button', { name: /Resume trading|Continue to activation/ }).waitFor();
+      // FARTCOIN has no USDC-only pool: not in evaluations (their own copy), not in practice either.
+      for (const [stage, copy] of [['evaluation', 'FARTCOIN is not available in evaluations: they trade only the markets funded accounts can.'], ['practice', 'FARTCOIN has no USDC-only pool on GMTrade, so it cannot be traded here.']]) {
+        await page.goto(`${siteUrl}/#/trade/${stage}`);
+        await page.locator('.order-panel').waitFor();
+        await page.keyboard.press('Control+k');
+        await page.getByRole('dialog', { name: 'Find a market' }).getByRole('button', { name: /FARTCOIN/ }).click();
+        await page.locator('.order-panel').getByText(copy).waitFor();
+        assert.ok(await page.locator('.order-panel').getByRole('button', { name: /Buy \/ Long FARTCOIN/ }).isDisabled(), `${stage}: the order can still be submitted`);
+      }
+      await page.goto(`${siteUrl}/#/trade/funded`);
+    });
+
+    await check('phone width: notifications and market search stay reachable', async () => {
+      await page.setViewportSize({ width: 390, height: 844 });
+      try {
+        await page.goto(`${siteUrl}/#/accounts`);
+        const header = page.locator('header');
+        await header.getByRole('button', { name: /^Notifications/ }).waitFor({ state: 'visible' });
+        await header.getByRole('button', { name: 'Toggle navigation' }).click();
+        await header.getByRole('button', { name: 'Search markets' }).click();
+        await page.getByRole('dialog', { name: 'Find a market' }).waitFor();
+        await page.keyboard.press('Escape');
+      } finally {
+        await page.setViewportSize({ width: 1920, height: 1080 });
+      }
+    });
+
     await check('notifications: listed, filtered by preferences, and marked read', async () => {
       await page.getByRole('button', { name: 'Notifications' }).click();
       const dialog = page.getByRole('dialog');
@@ -403,6 +445,35 @@ try {
       await page.keyboard.press('Escape');
     });
 
+    await check('account links: a notification opens the account it names, and a past evaluation keeps its history', async () => {
+      const past = w.accounts.find(a => a.stage === 'evaluation' && a.status === 'passed'); // became the funded account
+      assert.equal(past.label, w.accounts.find(a => a.id === w.evalActive).label, 'fixture: two evaluations with the same label');
+      await page.goto(`${siteUrl}/#/trade/evaluation`);
+      const strip = page.locator('.account-strip .active-account small');
+      await strip.waitFor();
+      const trading = await strip.textContent();
+      stub.publish({ type: 'notification', notification: { id: '6f0c5d0e-0000-4000-8000-000000000009', title: 'Close to the loss limit', body: `${past.label} ${past.shortId}: less than a quarter of the loss allowance is left`, href: `/account/evaluation?id=${past.id}`, ts: Date.now(), read: false, kind: 'risk' } }, w.wallet);
+      await page.locator('header').getByRole('button', { name: /Notifications, \d+ unread/ }).click();
+      await page.getByRole('dialog').getByRole('button', { name: /Close to the loss limit/ }).click();
+      await page.waitForURL(`**/#/account/evaluation?id=${past.id}`);
+      await main.getByText(`${past.shortId} · Started`).waitFor();
+      await page.getByRole('navigation', { name: 'Account sections' }).getByRole('link', { name: 'Activity' }).click();
+      await page.waitForURL(`**/#/activity?id=${past.id}`);
+      await main.getByText(`Your account, line by line. ${past.shortId}`).waitFor();
+      // Past accounts → result → "Review account history" stays on that evaluation.
+      await page.goto(`${siteUrl}/#/accounts`);
+      await page.getByRole('tab', { name: 'Past accounts' }).click();
+      await main.locator('.archived-account', { hasText: past.shortId }).getByRole('button', { name: 'View result' }).click();
+      await page.waitForURL(`**/#/result?id=${past.id}`);
+      await main.getByRole('link', { name: /Review account history/ }).click();
+      await page.waitForURL(`**/#/activity?id=${past.id}`);
+      await main.getByText(`Your account, line by line. ${past.shortId}`).waitFor();
+      // Viewing a past account does not change what the terminal trades.
+      await page.goto(`${siteUrl}/#/trade/evaluation`);
+      await page.locator('.account-strip .active-account small', { hasText: trading }).waitFor();
+      assert.ok(!trading.includes(past.shortId));
+    });
+
     await check('activity: rows from the API and a CSV export of exactly the shown rows', async () => {
       await page.goto(`${siteUrl}/#/trade/evaluation`);
       await page.getByRole('button', { name: /Evaluation 10K/ }).first().click();
@@ -416,6 +487,15 @@ try {
       const csv = readFileSync(await download.path(), 'utf8').trim().split('\n');
       assert.equal(csv.length, shown + 1, 'CSV rows differ from the shown rows');
       assert.match(csv[0], /^Time \(UTC\),Type,Event/);
+    });
+
+    await check('positions show where GMTrade liquidates them and the margin backing them', async () => {
+      await page.goto(`${siteUrl}/#/trade/evaluation`); // Evaluation 25K, selected by the activity check
+      const row = page.locator('.position-table tbody tr').filter({ hasText: 'SOL / USD' });
+      await row.waitFor();
+      assert.deepEqual(await page.locator('.position-table thead th').allTextContents(), ['Market / side', 'Position size', 'Entry price', 'Mark price', 'Liq. price', 'Unrealized P&L', 'TP / SL', '']);
+      await row.getByText('98.12', { exact: true }).waitFor();
+      await row.getByText('$4,600.00 · $1,533.33 margin').waitFor();
     });
 
     await check('stream outage: reconnecting, offline, trading paused, then recovery', async () => {

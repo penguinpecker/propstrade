@@ -133,7 +133,7 @@ const fresh = async (address: PublicKey) => ({ address, account: (await vault.fe
 /** A trader with an active 10K funded account (500 USDC principal). */
 async function funded(trader: Keypair, person: string) {
   const evaluation = evaluationPda(trader.publicKey, 0);
-  await send([await vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0 })], [trader]);
+  await send([await vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0, feeUsdc: usdc(TIERS.t10k.fee), tierVersion: 1 })], [trader]);
   await send([await vault.setIdentity({ kycAuthority: kyc.publicKey, wallet: trader.publicKey, identityHash: hash32(person) })], [kyc]);
   await send([await vault.recordEvaluationResult({ riskAuthority: risk.publicKey, evaluation, passed: true, finalEquity: usdc('10900'), tradesRoot: hash32('fills') })], [risk]);
   await send([await vault.activateFunded({ trader: trader.publicKey, evaluation })], [trader]);
@@ -247,7 +247,7 @@ test('keeper against solana-test-validator: top-up, session-guard close with a c
 
     // ---- operator alerts: stale prices under an open funded position, order churn, a chain job that failed for good
     solFreshness = 'stale';
-    await t.db.insert(chainJobs).values({ kind: 'reject_payout', subject: 'AnotherPayout', payload: {}, status: 'failed', lastError: 'simulation failed: InvalidPayoutStatus' });
+    await t.db.insert(chainJobs).values({ kind: 'reject_payout', subject: 'AnotherPayout', payload: {}, mac: '0'.repeat(64), status: 'failed', lastError: 'simulation failed: InvalidPayoutStatus' });
     await t.db.insert(gmOrders).values(Array.from({ length: 50 }, (_, i) => ({
       address: `Churn${i}`, fundedAccount: fundedB.toBase58(), marketToken: MARKETS.SOL.token.toBase58(), symbol: 'SOL', side: 'Long' as const,
       kind: 'Market' as const, isIncrease: true, sizeUsd: '10', status: 'executed' as const, createSignature: 'churn', createdAt: new Date(keeperNow()), closedAt: new Date(),

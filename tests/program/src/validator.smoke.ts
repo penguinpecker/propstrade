@@ -78,7 +78,7 @@ describe('solana-test-validator smoke (real CPIs through @props/sdk)', () => {
     const config = await vault.fetchConfig();
     assert.ok(config?.admin.equals(admin.publicKey));
 
-    await send(connection, [await vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0 })], [trader]);
+    await send(connection, [await vault.buyEvaluation({ trader: trader.publicKey, tierId: TIERS.t10k.id, index: 0, feeUsdc: usdc(TIERS.t10k.fee), tierVersion: 1 })], [trader]);
     const evaluation = evaluationPda(trader.publicKey, 0);
     await send(connection, [await vault.setIdentity({ kycAuthority: kyc.publicKey, wallet: trader.publicKey, identityHash: hash32('smoke') })], [kyc]);
     await send(

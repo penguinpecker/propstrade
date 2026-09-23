@@ -4,21 +4,20 @@ import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import type { Me, Notification } from '@props/shared';
+import { PROPS_VAULT_IDL } from '@props/sdk';
+import { IdlCoder, type Idl } from '@props/gmtrade';
 import type { Config } from '../config.js';
 import type { Db } from '../db/client.js';
 import { chainJobs, kycRequests, notifications } from '../db/schema.js';
 import { ApiError, parse } from '../errors.js';
+import { isBlocked, refineResidence, residence } from '../lib/geo.js';
 import { TOKEN_PROGRAM_ID, USDC_MINT, associatedTokenAddress, formatUnits, tokenAccountAmount } from '../lib/solana.js';
 
 export type BalanceRpc = Pick<Connection, 'getMultipleAccountsInfo'>;
 
-/**
- * US persons (GMTrade terms), including residents of US territories with their own ISO code, and comprehensively
- * sanctioned countries (ISO 3166-1 alpha-2).
- */
-const BLOCKED_COUNTRIES = new Set(['US', 'PR', 'GU', 'VI', 'AS', 'MP', 'UM', 'CU', 'IR', 'KP', 'SY']);
+const vaultCoder = new IdlCoder(PROPS_VAULT_IDL as Idl);
 
-const KycStartBody = z.object({ country: z.string().regex(/^[A-Z]{2}$/, 'ISO 3166-1 alpha-2 code') });
+const KycStartBody = z.object(residence).superRefine(refineResidence);
 const ReadBody = z.object({ ids: z.array(z.uuid()).max(200).optional() });
 
 const walletOf = (req: FastifyRequest): string => {
@@ -63,22 +62,27 @@ export function registerAccountRoutes(app: FastifyInstance, deps: { db: Db; conf
       const [walletInfo, ata, profileInfo] = infos;
       me.solBalance = formatUnits(BigInt(walletInfo?.lamports ?? 0), 9);
       me.usdcBalance = ata && ata.owner.equals(TOKEN_PROGRAM_ID) ? formatUnits(tokenAccountAmount(ata.data), 6) : '0';
-      if (profile && programId && profileInfo?.owner.equals(programId)) me.profile = profile.toBase58();
+      if (profile && programId && profileInfo?.owner.equals(programId)) {
+        me.profile = profile.toBase58();
+        // The identity set onchain is what activation checks; the indexer can see it before the job executor confirms.
+        const { identity_hash } = vaultCoder.decodeAccount('TraderProfile', profileInfo.data);
+        if ((identity_hash as number[]).some((b) => b !== 0)) me.kyc = 'verified';
+      }
     }
     return me;
   });
 
   app.post('/v1/kyc/start', auth, async (req) => {
     const wallet = walletOf(req);
-    const { country } = parse(KycStartBody, req.body);
-    if (BLOCKED_COUNTRIES.has(country)) {
-      throw new ApiError(403, 'region_blocked', 'Funded accounts are not available in your country');
+    const { country, region } = parse(KycStartBody, req.body);
+    if (isBlocked({ country, region })) {
+      throw new ApiError(403, 'region_blocked', `Funded accounts are not available in your ${region ? 'region' : 'country'}`);
     }
     if ((await latestKyc(db, wallet))?.status === 'approved') {
       throw new ApiError(409, 'already_approved', 'This wallet has already passed identity review');
     }
     // The partial unique index keeps one pending request per wallet, also under concurrent calls.
-    await db.insert(kycRequests).values({ wallet, country }).onConflictDoNothing();
+    await db.insert(kycRequests).values({ wallet, country, region }).onConflictDoNothing();
     return { kyc: 'pending' as const };
   });
 

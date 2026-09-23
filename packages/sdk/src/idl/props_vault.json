@@ -799,6 +799,14 @@
         {
           "name": "index",
           "type": "u32"
+        },
+        {
+          "name": "expected_fee_usdc",
+          "type": "u64"
+        },
+        {
+          "name": "expected_tier_version",
+          "type": "u32"
         }
       ]
     },
@@ -5485,6 +5493,16 @@
       "code": 6039,
       "name": "MathOverflow",
       "msg": "Arithmetic overflow"
+    },
+    {
+      "code": 6040,
+      "name": "TierChanged",
+      "msg": "The tier's fee or terms changed since they were reviewed"
+    },
+    {
+      "code": 6041,
+      "name": "DailyPrincipalLimit",
+      "msg": "Funded activations reached the vault's daily limit; try again later"
     }
   ],
   "types": [
@@ -5703,6 +5721,22 @@
             "type": "u64"
           },
           {
+            "name": "max_daily_principal",
+            "type": "u64"
+          },
+          {
+            "name": "principal_window_start",
+            "docs": [
+              "The current activation window: it opens with the first activation after the previous one ended, lasts a day,",
+              "and `principal_in_window` counts what was posted in it."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "principal_in_window",
+            "type": "u64"
+          },
+          {
             "name": "paused",
             "type": {
               "defined": {
@@ -5852,6 +5886,14 @@
           },
           {
             "name": "owner_sol_min",
+            "type": "u64"
+          },
+          {
+            "name": "max_daily_principal",
+            "docs": [
+              "Principal `activate_funded` may post per day, USDC base units. Bounds what a compromised risk or KYC key, or a",
+              "tampered server database (evaluation results and identities are decided off-chain), can put at risk."
+            ],
             "type": "u64"
           }
         ]

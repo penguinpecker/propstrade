@@ -1,36 +1,9 @@
-// Sign-In With Solana message, in the exact text layout wallets produce for `solana:signIn`
-// (Wallet Standard createSignInMessageText), so the app may use signIn or signMessage interchangeably.
+// Sign-In With Solana: the message (built in @props/shared/siws, which the app checks against its own origin before
+// signing), its nonce and the signature check.
 import { ed25519 } from '@noble/curves/ed25519.js';
 import bs58 from 'bs58';
 
-export interface SiwsFields {
-  domain: string;       // host of APP_ORIGIN, e.g. "props.trade"
-  address: string;      // base58 wallet
-  statement: string;
-  uri: string;          // APP_ORIGIN
-  chainId: 'mainnet' | 'localnet';
-  nonce: string;
-  issuedAt: Date;
-  expirationTime: Date;
-}
-
-export const SIWS_STATEMENT = 'Sign in to Props.trade. This request does not send a transaction or cost a fee.';
-
-export function buildSiwsMessage(f: SiwsFields): string {
-  return [
-    `${f.domain} wants you to sign in with your Solana account:`,
-    f.address,
-    '',
-    f.statement,
-    '',
-    `URI: ${f.uri}`,
-    'Version: 1',
-    `Chain ID: ${f.chainId}`,
-    `Nonce: ${f.nonce}`,
-    `Issued At: ${f.issuedAt.toISOString()}`,
-    `Expiration Time: ${f.expirationTime.toISOString()}`,
-  ].join('\n');
-}
+export { SIWS_STATEMENT, buildSiwsMessage, type SiwsFields } from '@props/shared/siws';
 
 export function nonceOf(message: string): string | undefined {
   return /^Nonce: ([A-Za-z0-9]+)$/m.exec(message)?.[1];

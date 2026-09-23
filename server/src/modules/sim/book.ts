@@ -10,12 +10,12 @@ import type { PostgresJsQueryResultHKT } from 'drizzle-orm/postgres-js';
 import type { AccountRules, AccountSummary, Fill, Order, OrderStatus, Position, PriceTick } from '@props/shared';
 import { model, type PositionStatus } from '@props/gmsol-wasm';
 import type * as schema from '../../db/schema.ts';
-import { accounts, evaluations, simFills, simOrders, simPositions } from '../../db/schema.ts';
+import { accounts, evaluations, simFills, simOrders, simPositions, simResults } from '../../db/schema.ts';
 import type { MarketDataService, MarketState } from '../types.ts';
 import { micro, microText, modelInput, priceText, tickUnits, trim, usd, usdText, usdToMicro } from './model.ts';
 
 export type Q = PgDatabase<PostgresJsQueryResultHKT, typeof schema>;
-export type AccountRow = typeof accounts.$inferSelect & { purchaseSignature: string | null };
+export type AccountRow = typeof accounts.$inferSelect & { purchaseSignature: string | null; resultSignature: string | null };
 export type PositionRow = typeof simPositions.$inferSelect;
 export type OrderRow = typeof simOrders.$inferSelect;
 export type FillRow = typeof simFills.$inferSelect;
@@ -25,6 +25,7 @@ export const PENDING: OrderStatus[] = ['awaiting_execution', 'awaiting_price'];
 export const TRADING = new Set<string>(['active', 'near_limit', 'checking']);
 export const STALE_MS = 20_000;
 export const practiceId = (wallet: string) => `practice:${wallet}`;
+export const shortIdOf = (a: Pick<AccountRow, 'id' | 'stage'>) => (a.stage === 'practice' ? 'PRACTICE' : `PT-${a.id.slice(0, 4)}…`);
 
 /** The model's Position account image (base64), which carries GMTrade's fee checkpoints. */
 export const modelAccount = (p: PositionRow) => (p.modelState as { account: string }).account;
@@ -34,9 +35,10 @@ export const visibleTo = (wallet: string) =>
   and(eq(accounts.wallet, wallet), or(eq(accounts.stage, 'evaluation'), eq(accounts.id, practiceId(wallet))));
 
 async function selectAccounts(q: Q, where: SQL | undefined): Promise<AccountRow[]> {
-  const rows = await q.select({ account: accounts, purchaseSignature: evaluations.purchaseSignature }).from(accounts)
-    .leftJoin(evaluations, eq(evaluations.address, accounts.id)).where(where);
-  return rows.map((row) => ({ ...row.account, purchaseSignature: row.purchaseSignature }));
+  // The result's transaction as the chain module confirmed it to the engine (markRecorded).
+  const rows = await q.select({ account: accounts, purchaseSignature: evaluations.purchaseSignature, resultSignature: simResults.recordedSignature })
+    .from(accounts).leftJoin(evaluations, eq(evaluations.address, accounts.id)).leftJoin(simResults, eq(simResults.evaluation, accounts.id)).where(where);
+  return rows.map((row) => ({ ...row.account, purchaseSignature: row.purchaseSignature, resultSignature: row.resultSignature }));
 }
 
 export async function loadAccount(q: Q, id: string, wallet?: string): Promise<AccountRow | undefined> {
@@ -163,7 +165,7 @@ export function value(a: AccountRow, marks: Mark[], orders: OrderRow[], now = Da
   const equity = size + realized + unrealized;
   const summary: AccountSummary = {
     id: a.id, stage: a.stage, status: a.status, label: a.label,
-    shortId: a.stage === 'practice' ? 'PRACTICE' : `PT-${a.id.slice(0, 4)}…`,
+    shortId: shortIdOf(a),
     rules: rulesOf(a),
     equity: microText(equity), realizedPnl: microText(realized), unrealizedPnl: microText(unrealized),
     allowanceRemaining: microText(equity - size + allowance),
@@ -172,7 +174,9 @@ export function value(a: AccountRow, marks: Mark[], orders: OrderRow[], now = Da
     targetProgressPct: target ? Math.max(0, round2((Number(realized + unrealized) / Number(target)) * 100)) : null,
     eligiblePayout: null,
     createdAt: a.createdAt.getTime(), activatedAt: a.activatedAt?.getTime() ?? null, resolvedAt: a.resolvedAt?.getTime() ?? null,
-    evidence: a.stage === 'evaluation' ? { evaluation: a.id, ...(a.purchaseSignature ? { purchaseSignature: a.purchaseSignature } : {}) } : {},
+    evidence: a.stage === 'evaluation'
+      ? { evaluation: a.id, ...(a.purchaseSignature ? { purchaseSignature: a.purchaseSignature } : {}), ...(a.resultSignature ? { resultSignature: a.resultSignature } : {}) }
+      : {},
     freshness: !complete ? 'unavailable' : stale ? 'stale' : 'live',
   };
   return { summary, positions: marks.map((m) => toPosition(m, orders)), equity, realized, unrealized, complete };

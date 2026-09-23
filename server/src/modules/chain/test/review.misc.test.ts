@@ -15,7 +15,7 @@ import type { VaultEvent } from '../events.ts';
 import type { Notice } from '../projector.ts';
 import { createVenue } from '../venue.ts';
 import { createVerify } from '../verify.ts';
-import { encodeAccount, freshDb, offlineClient, programTx, silentLog, simStub } from './support.ts';
+import { encodeAccount, freshDb, offlineClient, programTx, silentLog, simStub, sealer } from './support.ts';
 
 let t: Awaited<ReturnType<typeof freshDb>>;
 before(async () => {
@@ -38,9 +38,9 @@ test('an evaluation result is not stranded by an RPC outage, and one that failed
     },
   };
   const { sim, recorded } = simStub();
-  const jobs = createJobs({ db: t.db, rpc: rpc as never, client: new PropsVaultClient(rpc as never), sim, log: silentLog, keys: { risk: Keypair.generate() } });
+  const jobs = createJobs({ db: t.db, rpc: rpc as never, client: new PropsVaultClient(rpc as never), sim, log: silentLog, sealer, keys: { risk: Keypair.generate() } });
   const result = { evaluation: evaluation.toBase58(), wallet: Keypair.generate().publicKey.toBase58(), passed: true, finalEquityUsd: '10800', tradesRoot: '07'.repeat(32), resolvedAt: Date.now() };
-  await enqueue(t.db, 'record_evaluation_result', result.evaluation, result);
+  await enqueue(t.db, sealer, 'record_evaluation_result', result.evaluation, result);
   const runAll = async (times: number) => {
     for (let i = 0; i < times; i++) {
       await jobs.runDue();
@@ -64,16 +64,16 @@ test('an evaluation result is not stranded by an RPC outage, and one that failed
   // A result the chain keeps refusing (here: its evaluation cannot be found) fails for good after 10 refusals ...
   const other = { ...result, evaluation: Keypair.generate().publicKey.toBase58() };
   onchain = 'missing';
-  await enqueue(t.db, 'record_evaluation_result', other.evaluation, other);
+  await enqueue(t.db, sealer, 'record_evaluation_result', other.evaluation, other);
   const refused = async () => (await t.db.select().from(chainJobs).where(eq(chainJobs.subject, other.evaluation)))[0]!;
   await runAll(9);
   assert.equal((await refused()).status, 'queued', 'refused 9 times: still retried');
   await runAll(1);
   assert.deepEqual([(await refused()).status, (await refused()).lastError], ['failed', 'Evaluation account not found']);
   // ... and the same result delivered again puts it back in the queue.
-  assert.equal(await enqueue(t.db, 'record_evaluation_result', other.evaluation, other), true);
+  assert.equal(await enqueue(t.db, sealer, 'record_evaluation_result', other.evaluation, other), true);
   assert.deepEqual([(await refused()).status, (await refused()).attempts, (await refused()).rejections], ['queued', 0, 0]);
-  assert.equal(await enqueue(t.db, 'record_evaluation_result', other.evaluation, other), false, 'a pending job is not queued twice');
+  assert.equal(await enqueue(t.db, sealer, 'record_evaluation_result', other.evaluation, other), false, 'a pending job is not queued twice');
 });
 
 test('verify: a failed props_vault transaction is not shown as "confirmed, waiting for the indexer"', async () => {
@@ -104,7 +104,7 @@ test('vault: total capital right after an activation matches the chain (balance 
   const configData = () => encodeAccount(client, 'config', {
     admin: PublicKey.default, pendingAdmin: null, riskAuthorities: [], kycAuthority: PublicKey.default, usdcMint: USDC_MINT,
     gmtradeProgram: PublicKey.default, gmtradeStore: PublicKey.default, capitalVault: capitalVaultAddress(), traderShareBps: 8000,
-    minPayout: new BN(50_000_000), ownerSolTarget: new BN(1), ownerSolMin: new BN(1), paused: { newEvaluations: false, trading: false, payouts: false },
+    minPayout: new BN(50_000_000), ownerSolTarget: new BN(1), ownerSolMin: new BN(1), maxDailyPrincipal: new BN(1), principalWindowStart: new BN(0), principalInWindow: new BN(0), paused: { newEvaluations: false, trading: false, payouts: false },
     feesCollected: new BN(0), allocatedPrincipal: new BN(chain.allocated.toString()), payoutsPaid: new BN(0), profitToVault: new BN(0),
     evaluationsSold: new BN(1), fundedActivated: new BN(chain.allocated ? 1 : 0), fundedActive: chain.allocated ? 1 : 0,
     bump: 255, vaultBump: 255, feeVaultBump: 255, solTreasuryBump: 255,

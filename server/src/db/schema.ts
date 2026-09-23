@@ -46,7 +46,7 @@ export const payoutStatus = pgEnum('payout_status', ['requested', 'reviewing', '
 export const ledgerDirection = pgEnum('ledger_direction', ['in', 'out', 'internal']);
 export const notificationKind = pgEnum('notification_kind', ['fill', 'risk', 'payout', 'account']);
 export const kycStatus = pgEnum('kyc_status', ['pending', 'approved', 'rejected']);
-export const chainJobKind = pgEnum('chain_job_kind', ['set_identity', 'record_evaluation_result', 'approve_payout', 'reject_payout', 'lift_restriction']);
+export const chainJobKind = pgEnum('chain_job_kind', ['set_identity', 'record_evaluation_result', 'approve_payout', 'reject_payout', 'lift_restriction', 'close_funded']);
 export const chainJobStatus = pgEnum('chain_job_status', ['queued', 'sent', 'confirmed', 'failed']);
 
 // ---------- identity + auth ----------
@@ -188,6 +188,8 @@ export const simResults = pgTable('sim_results', {
   resolvedAt: at('resolved_at').notNull(),
   recordedSignature: signature('recorded_signature'),
   recordedAt: at('recorded_at'),
+  /** HMAC over the result as emitted (server/src/lib/integrity.ts); a row without a valid one is never redelivered. */
+  mac: char('mac', { length: 64 }).notNull(),
 });
 
 /** Round trips for every stage; funded rows come from venue_fills. */
@@ -429,6 +431,7 @@ export const notifications = pgTable('notifications', {
  *   approve_payout           { payout }
  *   reject_payout            { payout, reasonCode }
  *   lift_restriction         { funded }
+ *   close_funded             { funded }
  * `subject` (the evaluation or payout PDA, `lift:<funded>`) makes enqueueing idempotent: one job per evaluation result
  * and one decision per payout, whoever (keeper or admin) asks first.
  */
@@ -444,6 +447,8 @@ export const chainJobs = pgTable('chain_jobs', {
   rejections: integer('rejections').notNull().default(0),
   lastError: text('last_error'),
   signature: signature('signature'),
+  /** HMAC over kind, subject and payload (server/src/lib/integrity.ts); checked before anything is signed. */
+  mac: char('mac', { length: 64 }).notNull(),
   createdAt: now('created_at'),
   updatedAt: now('updated_at'),
 }, (t) => [
@@ -459,6 +464,8 @@ export const kycRequests = pgTable('kyc_requests', {
   id: uuid('id').primaryKey().defaultRandom(),
   wallet: pubkey('wallet').notNull().references(() => users.wallet),
   country: char('country', { length: 2 }).notNull(),
+  /** ISO 3166-2 subdivision (e.g. "UA-43"), required where only part of a country is sanctioned. */
+  region: text('region'),
   status: kycStatus('status').notNull().default('pending'),
   identityHash: char('identity_hash', { length: 64 }),
   reason: text('reason'),

@@ -8,11 +8,12 @@ import type { Payout } from '@props/shared';
 import type { Db } from '../../db/client.ts';
 import { accounts, adminAuditLog, chainJobs, fundedAccounts, payouts } from '../../db/schema.ts';
 import { ApiError, parse } from '../../errors.ts';
+import type { Sealer } from '../../lib/integrity.ts';
 import { walletSchema } from '../../lib/solana.ts';
 import { adminAuth, audit } from '../../routes/admin.ts';
 import type { AccountsProvider, SimService } from '../types.ts';
 import type { FundedProvider } from './funded.ts';
-import { requeue, type JobPayload } from './jobs.ts';
+import { jobRow, requeue, type JobPayload } from './jobs.ts';
 import { ProgramNotInitialized, type ProgramReader } from './program.ts';
 import { PAYOUT_REJECTION_REASONS, rejectionReason } from './projector.ts';
 import { dec } from './reader.ts';
@@ -34,7 +35,7 @@ const RejectBody = z.object({
 const notFound = () => new ApiError(404, 'not_found', 'Account not found');
 
 export function registerRoutes(app: FastifyInstance, d: {
-  db: Db; sim?: SimService; funded: FundedProvider; program: ProgramReader; verify(q: string): Promise<unknown>; adminToken: string;
+  db: Db; sim?: SimService; funded: FundedProvider; program: ProgramReader; verify(q: string): Promise<unknown>; adminToken: string; sealer: Sealer;
 }) {
   const { db, funded } = d;
   const auth = { preHandler: app.requireWallet };
@@ -124,8 +125,9 @@ export function registerRoutes(app: FastifyInstance, d: {
         const [payout] = await tx.select().from(payouts).where(eq(payouts.address, id)).for('update');
         if (!payout) throw new ApiError(404, 'not_found', 'Payout not found');
         if (payout.status !== 'requested' && payout.status !== 'reviewing') throw new ApiError(409, 'not_pending', `Payout is already ${payout.status}`);
-        const [job] = await tx.insert(chainJobs).values({ kind, subject: id, payload })
-          .onConflictDoUpdate({ target: chainJobs.subject, set: requeue({ kind, payload }), setWhere: eq(chainJobs.status, 'failed') })
+        const row = jobRow(d.sealer, kind, id, payload);
+        const [job] = await tx.insert(chainJobs).values(row)
+          .onConflictDoUpdate({ target: chainJobs.subject, set: requeue(row), setWhere: eq(chainJobs.status, 'failed') })
           .returning({ id: chainJobs.id });
         if (!job) throw new ApiError(409, 'decision_exists', 'A decision for this payout is already being processed');
         await tx.insert(adminAuditLog).values(audit(req, `payout.${kind === 'approve_payout' ? 'approve' : 'reject'}`, id, { job: job.id, ...payload }));
@@ -153,12 +155,33 @@ export function registerRoutes(app: FastifyInstance, d: {
         const [funded] = await tx.select({ status: fundedAccounts.status }).from(fundedAccounts).where(eq(fundedAccounts.address, id));
         if (!funded) throw new ApiError(404, 'not_found', 'Funded account not found');
         if (funded.status !== 'restricted') throw new ApiError(409, 'not_restricted', `Account is ${funded.status.replace('_', ' ')}`);
-        const payload = { funded: id };
-        const [job] = await tx.insert(chainJobs).values({ kind: 'lift_restriction', subject: `lift:${id}`, payload })
-          .onConflictDoUpdate({ target: chainJobs.subject, set: requeue({ payload }), setWhere: inArray(chainJobs.status, ['failed', 'confirmed']) })
+        const row = jobRow(d.sealer, 'lift_restriction', `lift:${id}`, { funded: id });
+        const [job] = await tx.insert(chainJobs).values(row)
+          .onConflictDoUpdate({ target: chainJobs.subject, set: requeue(row), setWhere: inArray(chainJobs.status, ['failed', 'confirmed']) })
           .returning({ id: chainJobs.id });
         if (!job) throw new ApiError(409, 'in_progress', 'Lifting this restriction is already in progress');
         await tx.insert(adminAuditLog).values(audit(req, 'funded.lift_restriction', id, { job: job.id }));
+        return { id, job: job.id };
+      });
+    });
+
+    /**
+     * Queues close_funded for a flat funded account (not awaiting a payout): its USDC and SOL go back to the vault and its
+     * principal and the trader's funded slot are released, e.g. the runbook's small-money test account. Breached accounts
+     * are closed by the keeper.
+     */
+    admin.post('/funded/:id/close', async (req) => {
+      const { id } = parse(FundedParams, req.params);
+      return db.transaction(async (tx) => {
+        const [funded] = await tx.select({ status: fundedAccounts.status }).from(fundedAccounts).where(eq(fundedAccounts.address, id));
+        if (!funded) throw new ApiError(404, 'not_found', 'Funded account not found');
+        if (!['active', 'restricted', 'breached'].includes(funded.status)) throw new ApiError(409, 'not_closable', `Account is ${funded.status.replace('_', ' ')}`);
+        const row = jobRow(d.sealer, 'close_funded', `close:${id}`, { funded: id });
+        const [job] = await tx.insert(chainJobs).values(row)
+          .onConflictDoUpdate({ target: chainJobs.subject, set: requeue(row), setWhere: eq(chainJobs.status, 'failed') })
+          .returning({ id: chainJobs.id });
+        if (!job) throw new ApiError(409, 'in_progress', 'Closing this account is already in progress');
+        await tx.insert(adminAuditLog).values(audit(req, 'funded.close', id, { job: job.id }));
         return { id, job: job.id };
       });
     });

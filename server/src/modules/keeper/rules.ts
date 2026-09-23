@@ -44,10 +44,12 @@ export type Action =
   | { type: 'topUp' }
   | { type: 'sync' }
   | { type: 'restrict' }
+  | { type: 'markBreached' }
   | { type: 'closeCompleted'; order: string }
   | { type: 'cancel'; order: string }
-  | { type: 'close'; slot: number };
-export type StepKind = 'topUp' | 'breach' | 'session' | 'upgrade' | 'cleanup' | 'sync';
+  | { type: 'close'; slot: number }
+  | { type: 'closeFunded' };
+export type StepKind = 'topUp' | 'breach' | 'session' | 'upgrade' | 'cleanup' | 'sync' | 'closure';
 /** One transaction's worth of work, in execution order (a prefix is sent when all of it does not fit). */
 export interface Step { kind: StepKind; actions: Action[]; detail: string }
 
@@ -64,6 +66,8 @@ export interface PlanContext {
 const isIncrease = (o: OrderView) => o.type === 'market' || o.type === 'limit';
 const sizeOf = (v: AccountView, s: SlotView) => v.positions.get(s.gmPosition)?.size ?? 0n;
 const openSlots = (v: AccountView) => v.slots.filter((s) => sizeOf(v, s) > 0n);
+/** No used slot and no tracked order: what `close_funded` requires (the program re-checks every owner position). */
+const isFlat = (v: AccountView) => !v.slots.length && !v.orders.length;
 
 /**
  * Which of the trader's pending orders a risk close cancels first when it needs a tracked-order slot: orders on the
@@ -132,14 +136,25 @@ export function staleProtections(v: AccountView): OrderView[] {
 }
 
 const steps: Record<StepKind, (v: AccountView, c: PlanContext) => Step | null> = {
-  topUp: (v, c) => (v.ownerLamports < c.ownerSolMin
+  // A breached account that is flat is closed next, which returns its SOL: no top-up first.
+  topUp: (v, c) => (v.ownerLamports < c.ownerSolMin && !(v.status === 'breached' && isFlat(v))
     ? { kind: 'topUp', actions: [{ type: 'topUp' }], detail: `owner PDA holds ${formatFixed(v.ownerLamports, 9, 9)} SOL, below the ${formatFixed(c.ownerSolMin, 9, 9)} minimum` }
     : null),
 
+  /**
+   * Equity at the floor ends the account, as a failed evaluation ends: `mark_breached` (terminal; the restriction lift
+   * cannot reopen it) and a close of every open position. A breached account keeps getting its positions closed
+   * whatever they are worth now (a liquidation can leave collateral behind), and is closed once flat (`closure`).
+   */
   breach: (v) => {
-    if (v.value === null || v.value > 0n) return null;
     const closable = openSlots(v).filter((s) => v.markets.get(s.marketToken)?.open);
-    const actions = [...(v.status === 'active' ? [{ type: 'restrict' } as const] : []), ...riskCloses(v, closable)];
+    if (v.status === 'breached') {
+      const actions = riskCloses(v, closable);
+      return actions.length ? { kind: 'breach', actions, detail: 'the account breached its floor: closing its remaining positions' } : null;
+    }
+    if (v.value === null || v.value > 0n) return null;
+    const mark = v.status === 'active' || v.status === 'restricted' ? [{ type: 'markBreached' } as const] : [];
+    const actions = [...mark, ...riskCloses(v, closable)];
     return actions.length ? { kind: 'breach', actions, detail: 'equity is at or below the account floor' } : null;
   },
 
@@ -171,6 +186,12 @@ const steps: Record<StepKind, (v: AccountView, c: PlanContext) => Step | null> =
   },
 
   sync: (v) => (syncDiffers(v) ? { kind: 'sync', actions: [{ type: 'sync' }], detail: 'GMTrade state differs from the last sync' } : null),
+
+  // Last: cleanup and sync have freed every slot and order by now. USDC left goes back to the capital vault, the SOL
+  // float to the treasury, and the principal and the trader's funded slot are released.
+  closure: (v) => (v.status === 'breached' && isFlat(v)
+    ? { kind: 'closure', actions: [{ type: 'closeFunded' }], detail: 'the breached account is flat' }
+    : null),
 };
 
 /** The next transaction for an account, most urgent first; null when there is nothing to do. */

@@ -10,8 +10,11 @@ import {
   usdString, type KeeperMarket, type Pair, type PropsLimits,
 } from '@props/gmtrade';
 import { model } from '@props/gmsol-wasm';
+import { z } from 'zod';
+import { parse } from '../../errors.ts';
+import { adminAuth } from '../../routes/admin.ts';
 import type { MarketDataService, MarketState, ModuleContext } from '../types.ts';
-import { fetchAllowlist, fetchAnchorIdl, type MarketConfigLimits } from './allowlist.ts';
+import { fetchAllowlist, type MarketConfigLimits } from './allowlist.ts';
 
 /** Props defaults (ARCHITECTURE.md §1) until a market has an onchain MarketConfig. */
 const DEFAULT_LIMITS: Record<MarketCategory, { maxLeverage: number; closedMaxLeverage: number | null }> = {
@@ -66,6 +69,8 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
   const published = new Map<string, string>();
   const pendingTicks = new Map<string, PriceTick>();
   const tickListeners = new Set<(tick: PriceTick) => void>();
+  /** Prices pinned by the test hook below (NODE_ENV=test on localnet only), by symbol. */
+  const pinned = new Map<string, string>();
   const candleCache = new Map<string, { at: number; ttl: number; candles: CandlesResponse['candles'] }>();
   const tradeCache = new Map<string, { at: number; trades: MarketTrade[] }>();
 
@@ -129,7 +134,14 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
     const token = pool?.meta && feed.tokens.get(pool.meta.indexToken.pubkey);
     if (!pool || !token) return undefined;
     const data = feed.accounts.get(pool.pubkey)?.data;
-    return priceTick(symbol, token, sessionOf(token.price, data ? isMarketClosed(data) : false));
+    const tick = priceTick(symbol, token, sessionOf(token.price, data ? isMarketClosed(data) : false));
+    const price = pinned.get(symbol);
+    return tick && price ? { ...tick, min: price, max: price, mid: price, ts: Date.now() } : tick;
+  }
+
+  function emitTick(tick: PriceTick) {
+    pendingTicks.set(tick.symbol, tick);
+    for (const fn of tickListeners) fn(tick);
   }
 
   async function refreshPairs() {
@@ -159,11 +171,9 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
     opens24h = next;
   }
 
-  let idl: Awaited<ReturnType<typeof fetchAnchorIdl>> | undefined;
   async function refreshAllowlist() {
-    idl ??= await fetchAnchorIdl(rpcUrl, programId!);
     const tokens = [...feed.markets.values()].flatMap((m) => (m.meta?.isPure ? [m.marketToken] : []));
-    allowlist = await fetchAllowlist(rpcUrl, programId!, idl, tokens);
+    allowlist = await fetchAllowlist(rpcUrl, programId!, tokens);
   }
 
   function every(ms: number, what: string, fn: () => unknown) {
@@ -181,9 +191,7 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
   feed.onTick((token) => {
     const symbol = symbolByIndexToken.get(token.pubkey);
     const tick = symbol && tickFor(symbol);
-    if (!tick) return;
-    pendingTicks.set(tick.symbol, tick);
-    for (const fn of tickListeners) fn(tick);
+    if (tick) emitTick(tick);
   });
 
   const ready = (async () => {
@@ -356,6 +364,29 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
       return send(reply, err);
     }
   });
+
+  // Test hook, registered only when NODE_ENV=test on a local cluster (never on mainnet, whatever NODE_ENV says: pinned
+  // prices decide simulated fills, and so evaluation results that unlock funded capital): pins a market's price, which
+  // then replaces the live one in every tick this module serves and ticks every second, so the full-stack rehearsal
+  // (app/tests/fullstack.e2e.mjs) can decide an evaluation through the sim engine's own rules on a known price path.
+  // `{ "price": null }` returns the market to live prices.
+  if (ctx.env.NODE_ENV === 'test' && ctx.config.SOLANA_CLUSTER === 'localnet') {
+    const PinBody = z.object({ price: z.string().regex(/^\d+(\.\d+)?$/).nullable() });
+    app.put<{ Params: { symbol: string } }>('/v1/test/prices/:symbol', { onRequest: adminAuth(ctx.config.ADMIN_API_TOKEN) }, async (req, reply) => {
+      const { price } = parse(PinBody, req.body);
+      const symbol = req.params.symbol.toUpperCase();
+      if (!started || !bySymbol.has(symbol)) return send(reply, new HttpError(404, 'not_found', `unknown market ${symbol}`));
+      if (price === null) pinned.delete(symbol);
+      else pinned.set(symbol, price);
+      return tickFor(symbol) ?? null;
+    });
+    every(1_000, 'pinned prices', () => {
+      for (const symbol of pinned.keys()) {
+        const tick = tickFor(symbol);
+        if (tick) emitTick(tick);
+      }
+    });
+  }
 
   return {
     ready: () => ready,

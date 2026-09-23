@@ -46,7 +46,8 @@ export const rejectionReason = (code: number) => PAYOUT_REJECTION_REASONS[code] 
 
 const at = (ts: string) => new Date(Number(ts) * 1000);
 const side = (isLong: boolean) => (isLong ? 'Long' : 'Short') as 'Long' | 'Short';
-const accountHref = (funded: string) => `/account/${funded}`;
+/** App route of one funded account (a trader can have a closed funded account next to a new one). */
+export const fundedHref = (funded: string) => `/account/funded?id=${funded}`;
 
 /**
  * Applies one event. Onchain reads go through the (cached) reader; the sim's createEvaluation is idempotent, so a
@@ -112,7 +113,7 @@ export async function project(tx: Tx, ev: VaultEvent, eventIndex: number, info: 
         detail: `${principal} USDC loss allowance moved from the Props.trade capital vault to this account.`,
       });
       await ledger(LEDGER.principalAllocated, e.principal, e.ts, e.funded);
-      return [{ wallet: e.trader, kind: 'account', title: `${label} is active`, body: `Your funded account is ready to trade with a ${principal} USDC loss allowance.`, href: accountHref(e.funded) }];
+      return [{ wallet: e.trader, kind: 'account', title: `${label} is active`, body: `Your funded account is ready to trade with a ${principal} USDC loss allowance.`, href: fundedHref(e.funded) }];
     }
     case 'orderRequested': {
       const e = ev.data;
@@ -257,13 +258,13 @@ export async function project(tx: Tx, ev: VaultEvent, eventIndex: number, info: 
         type: 'risk', ts: at(e.ts), title: e.restricted ? 'Account restricted' : 'Restriction lifted',
         detail: e.restricted ? 'The risk service limited this account to closing and protecting positions.' : 'The account can open positions again.',
       });
-      return e.restricted ? [{ wallet: await traderOf(e.funded), kind: 'risk', title: 'Account restricted', body: 'New positions are blocked; you can still close and protect positions.', href: accountHref(e.funded) }] : [];
+      return e.restricted ? [{ wallet: await traderOf(e.funded), kind: 'risk', title: 'Account restricted', body: 'New positions are blocked; you can still close and protect positions.', href: fundedHref(e.funded) }] : [];
     }
     case 'accountBreached': {
       const e = ev.data;
       await setFundedStatus(e.funded, 'breached');
       await activity(e.funded, { type: 'risk', ts: at(e.ts), title: 'Loss limit reached', detail: 'Equity reached the account floor; the account is closing.' });
-      return [{ wallet: await traderOf(e.funded), kind: 'risk', title: 'Loss limit reached', body: 'Your funded account reached its equity floor and is being closed.', href: accountHref(e.funded) }];
+      return [{ wallet: await traderOf(e.funded), kind: 'risk', title: 'Loss limit reached', body: 'Your funded account reached its equity floor and is being closed.', href: fundedHref(e.funded) }];
     }
     case 'accountClosed': {
       const e = ev.data;
@@ -290,8 +291,9 @@ export async function project(tx: Tx, ev: VaultEvent, eventIndex: number, info: 
     case 'feesSwept':
       await ledger(LEDGER.feesSwept, ev.data.amount, ev.data.ts);
       return [];
-    case 'configChanged':
     case 'identitySet':
+      return [{ wallet: ev.data.wallet, kind: 'account', title: 'Identity verified', body: 'Your identity review is complete.', href: '/activate' }];
+    case 'configChanged':
     case 'ownerToppedUp':
     case 'solTreasuryWithdrawn':
       return []; // kept in program_events; no projection

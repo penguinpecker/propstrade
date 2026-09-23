@@ -18,7 +18,7 @@ import { createStreamHub } from '../../../stream.ts';
 import { APP_ORIGIN, signIn } from '../../../../test/helpers.ts';
 import type { ModuleContext } from '../../types.ts';
 import { createChain } from '../index.ts';
-import { encodeAccount, freshDb, offlineClient, simStub } from './support.ts';
+import { TEST_SESSION_SECRET, encodeAccount, freshDb, offlineClient, sealer, simStub } from './support.ts';
 
 const client = offlineClient();
 const key = () => Keypair.generate().publicKey;
@@ -71,7 +71,7 @@ function fundedAccountData(trader: PublicKey, evaluation: PublicKey, status: str
 function configData(paused = false) {
   return encodeAccount(client, 'config', {
     admin: key(), pendingAdmin: null, riskAuthorities: [key()], kycAuthority: key(), usdcMint: USDC_MINT, gmtradeProgram: key(), gmtradeStore: key(),
-    capitalVault: capitalVaultAddress(), traderShareBps: 8000, minPayout: new BN(50_000_000), ownerSolTarget: new BN(1), ownerSolMin: new BN(1),
+    capitalVault: capitalVaultAddress(), traderShareBps: 8000, minPayout: new BN(50_000_000), ownerSolTarget: new BN(1), ownerSolMin: new BN(1), maxDailyPrincipal: new BN(1), principalWindowStart: new BN(0), principalInWindow: new BN(0),
     paused: { newEvaluations: false, trading: false, payouts: paused }, feesCollected: new BN(79_000_000), allocatedPrincipal: new BN(500_000_000),
     payoutsPaid: new BN(0), profitToVault: new BN(0), evaluationsSold: new BN(1), fundedActivated: new BN(1), fundedActive: 1,
     bump: 255, vaultBump: 255, feeVaultBump: 255, solTreasuryBump: 255,
@@ -91,7 +91,7 @@ before(async () => {
   t = await freshDb('chain_routes');
   adminToken = randomBytes(32).toString('hex');
   const config = loadConfig({
-    DATABASE_URL: t.url, APP_ORIGIN, SESSION_SECRET: randomBytes(32).toString('hex'), ADMIN_API_TOKEN: adminToken, RPC_URL: 'http://127.0.0.1:1',
+    DATABASE_URL: t.url, APP_ORIGIN, SESSION_SECRET: TEST_SESSION_SECRET, ADMIN_API_TOKEN: adminToken, RPC_URL: 'http://127.0.0.1:1',
     PROGRAM_ID: PROPS_VAULT_PROGRAM_ID.toBase58(), SOLANA_CLUSTER: 'mainnet-beta', TRUST_PROXY_HOPS: '0',
   });
   const hub = createStreamHub();
@@ -266,6 +266,22 @@ test('admin: lifting a restriction queues restrict(false) once, again only after
   assert.deepEqual([again!.id, again!.status, again!.signature], [job!.id, 'queued', null]);
   assert.deepEqual((await t.db.select().from(adminAuditLog).where(eq(adminAuditLog.target, ids.funded))).map((a) => a.action), ['funded.lift_restriction', 'funded.lift_restriction']);
   await t.db.update(fundedAccounts).set({ status: 'active' }).where(eq(fundedAccounts.address, ids.funded));
+  await t.db.delete(chainJobs).where(eq(chainJobs.id, job!.id));
+});
+
+test('admin: closing a funded account queues one sealed close_funded, refused while a payout is pending', async () => {
+  const close = () => admin('POST', `/v1/admin/funded/${ids.funded}/close`);
+  assert.equal((await admin('POST', `/v1/admin/funded/${key().toBase58()}/close`)).status, 404);
+  await t.db.update(fundedAccounts).set({ status: 'payout_pending' }).where(eq(fundedAccounts.address, ids.funded));
+  assert.equal((await close()).status, 409, 'a payout request is pending');
+  await t.db.update(fundedAccounts).set({ status: 'active' }).where(eq(fundedAccounts.address, ids.funded));
+  const queued = await close();
+  assert.equal(queued.status, 200);
+  const [job] = await t.db.select().from(chainJobs).where(eq(chainJobs.subject, `close:${ids.funded}`));
+  assert.deepEqual([job!.id, job!.kind, job!.status, job!.payload], [queued.body.job, 'close_funded', 'queued', { funded: ids.funded }]);
+  assert.equal(sealer.verifyJob(job!), true, 'sealed with the server secret');
+  assert.equal((await close()).status, 409, 'already in progress');
+  assert.deepEqual((await t.db.select().from(adminAuditLog).where(eq(adminAuditLog.target, ids.funded))).map((a) => a.action).filter((a) => a === 'funded.close'), ['funded.close']);
   await t.db.delete(chainJobs).where(eq(chainJobs.id, job!.id));
 });
 

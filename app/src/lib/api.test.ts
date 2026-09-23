@@ -57,13 +57,15 @@ describe('api client', () => {
     expect(error).toMatchObject({ status: 200, code: 'bad_response', message: 'The Props.trade service sent an unexpected response.' });
   });
 
-  it('sends the KYC country and the notification ids the server expects', async () => {
+  it('sends the KYC residence and the notification ids the server expects', async () => {
     fetchMock.mockImplementation(async () => json(200, {}));
-    await api.startKyc('DE');
+    await api.startKyc({ country: 'DE' });
+    await api.startKyc({ country: 'UA', region: 'UA-30' });
     await api.readNotifications(['n1']);
     await api.readNotifications();
     expect(fetchMock.mock.calls.map(([url, init]) => [url, init?.body])).toEqual([
       ['/v1/kyc/start', '{"country":"DE"}'],
+      ['/v1/kyc/start', '{"country":"UA","region":"UA-30"}'],
       ['/v1/notifications/read', '{"ids":["n1"]}'],
       ['/v1/notifications/read', '{}'],
     ]);

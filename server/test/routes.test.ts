@@ -1,5 +1,7 @@
-import { Keypair, PublicKey, type AccountInfo } from '@solana/web3.js';
-import { eq } from 'drizzle-orm';
+import { Connection, Keypair, PublicKey, type AccountInfo } from '@solana/web3.js';
+import BN from 'bn.js';
+import { eq, sql } from 'drizzle-orm';
+import { PropsVaultClient } from '@props/sdk';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { adminAuditLog, chainJobs, kycRequests, notifications } from '../src/db/schema.js';
 import { TOKEN_PROGRAM_ID, USDC_MINT, associatedTokenAddress } from '../src/lib/solana.js';
@@ -21,6 +23,12 @@ function usdcAccount(owner: PublicKey, amount: bigint): AccountInfo<Buffer> {
   data.writeBigUInt64LE(amount, 64);
   return info(TOKEN_PROGRAM_ID, 2_039_280, data);
 }
+
+const vaultCoder = new PropsVaultClient(new Connection('http://127.0.0.1:1')).program.coder.accounts;
+/** A TraderProfile account image as props_vault writes it. */
+const traderProfile = async (wallet: PublicKey, identityHash: Uint8Array) => Buffer.from(
+  await vaultCoder.encode('traderProfile', { wallet, identityHash: [...identityHash], verifiedAt: new BN(0), activeFunded: 0, evaluationCount: 1, bump: 255 }));
+const profileOf = (wallet: PublicKey) => PublicKey.findProgramAddressSync([Buffer.from('trader'), wallet.toBuffer()], new PublicKey(t.config.PROGRAM_ID!))[0];
 
 const admin = (method: 'GET' | 'POST', url: string, payload?: object, token = t.config.ADMIN_API_TOKEN) =>
   t.app.inject({ method, url, payload, headers: { authorization: `Bearer ${token}` } });
@@ -54,10 +62,10 @@ describe('GET /v1/me', () => {
   it('returns SOL and USDC balances and the trader profile from one RPC read', async () => {
     const user = await signIn(t.app);
     const owner = new PublicKey(user.wallet);
-    const profile = PublicKey.findProgramAddressSync([Buffer.from('trader'), owner.toBuffer()], new PublicKey(t.config.PROGRAM_ID!))[0];
+    const profile = profileOf(owner);
     accounts.set(user.wallet, info(new PublicKey('11111111111111111111111111111111'), 1_500_000_000));
     accounts.set(associatedTokenAddress(owner, USDC_MINT).toBase58(), usdcAccount(owner, 12_345_678n));
-    accounts.set(profile.toBase58(), info(new PublicKey(t.config.PROGRAM_ID!), 1_000_000, Buffer.alloc(100)));
+    accounts.set(profile.toBase58(), info(new PublicKey(t.config.PROGRAM_ID!), 1_000_000, await traderProfile(owner, new Uint8Array(32))));
     const calls = rpc.calls;
     const res = await as(user.cookie).get('/v1/me');
     expect(res.json()).toEqual({ wallet: user.wallet, kyc: 'none', solBalance: '1.5', usdcBalance: '12.345678', profile: profile.toBase58() });
@@ -98,6 +106,33 @@ describe('KYC', () => {
     expect(us.statusCode).toBe(403);
     expect(us.json().error.code).toBe('region_blocked');
     expect((await as(user.cookie).post('/v1/kyc/start', { country: 'germany' })).statusCode).toBe(400);
+    // Ukraine is sanctioned only in part: its residents name their region, and the sanctioned ones are refused.
+    expect((await as(user.cookie).post('/v1/kyc/start', { country: 'UA' })).statusCode).toBe(400);
+    expect((await as(user.cookie).post('/v1/kyc/start', { country: 'DE', region: 'UA-30' })).statusCode).toBe(400);
+    for (const region of ['UA-43', 'UA-40', 'UA-14', 'UA-09']) {
+      const refused = await as(user.cookie).post('/v1/kyc/start', { country: 'UA', region });
+      expect([refused.statusCode, refused.json().error.code]).toEqual([403, 'region_blocked']);
+    }
+    expect(await t.db.select().from(kycRequests).where(eq(kycRequests.wallet, user.wallet))).toHaveLength(0);
+    expect((await as(user.cookie).post('/v1/kyc/start', { country: 'UA', region: 'UA-30' })).statusCode).toBe(200);
+    const [kyiv] = await t.db.select().from(kycRequests).where(eq(kycRequests.wallet, user.wallet));
+    expect(kyiv).toMatchObject({ country: 'UA', region: 'UA-30' });
+  });
+
+  it('approval records the residence the reviewer confirmed, and refuses a blocked one', async () => {
+    const user = await signIn(t.app);
+    await as(user.cookie).post('/v1/kyc/start', { country: 'UA', region: 'UA-46' });
+    const [request] = await t.db.select().from(kycRequests).where(eq(kycRequests.wallet, user.wallet));
+    const identityHash = '12'.repeat(32);
+    expect((await admin('POST', `/v1/admin/kyc/${request!.id}/approve`, { identityHash })).statusCode, 'no residence').toBe(400);
+    expect((await admin('POST', `/v1/admin/kyc/${request!.id}/approve`, { identityHash, country: 'UA' })).statusCode, 'no region').toBe(400);
+    // The documents show a Donetsk address: approval is refused, nothing is queued.
+    const blocked = await admin('POST', `/v1/admin/kyc/${request!.id}/approve`, { identityHash, country: 'UA', region: 'UA-14' });
+    expect([blocked.statusCode, blocked.json().error.code]).toEqual([403, 'region_blocked']);
+    expect(await t.db.select().from(chainJobs).where(sql`${chainJobs.payload}->>'wallet' = ${user.wallet}`)).toHaveLength(0);
+    expect((await admin('POST', `/v1/admin/kyc/${request!.id}/approve`, { identityHash, country: 'UA', region: 'UA-46' })).statusCode).toBe(200);
+    const [approved] = await t.db.select().from(kycRequests).where(eq(kycRequests.id, request!.id));
+    expect(approved).toMatchObject({ status: 'approved', country: 'UA', region: 'UA-46' });
   });
 
   it('approval queues a set_identity job; verified only once the job is confirmed onchain', async () => {
@@ -109,7 +144,7 @@ describe('KYC', () => {
     const listed = await admin('GET', '/v1/admin/kyc?status=pending');
     expect(listed.json().some((r: { id: string }) => r.id === request!.id)).toBe(true);
 
-    const approved = await admin('POST', `/v1/admin/kyc/${request!.id}/approve`, { identityHash });
+    const approved = await admin('POST', `/v1/admin/kyc/${request!.id}/approve`, { identityHash, country: 'FR' });
     expect(approved.statusCode).toBe(200);
     const [job] = await t.db.select().from(chainJobs).where(eq(chainJobs.id, approved.json().job));
     expect(job).toMatchObject({ kind: 'set_identity', status: 'queued', payload: { wallet: user.wallet, identityHash } });
@@ -120,8 +155,21 @@ describe('KYC', () => {
     await t.db.update(chainJobs).set({ status: 'confirmed' }).where(eq(chainJobs.id, job!.id));
     expect((await as(user.cookie).get('/v1/me')).json().kyc).toBe('verified');
 
-    expect((await admin('POST', `/v1/admin/kyc/${request!.id}/approve`, { identityHash })).json().error.code).toBe('not_pending');
+    expect((await admin('POST', `/v1/admin/kyc/${request!.id}/approve`, { identityHash, country: 'FR' })).json().error.code).toBe('not_pending');
     expect((await as(user.cookie).post('/v1/kyc/start', { country: 'FR' })).statusCode).toBe(409);
+  });
+
+  it('is verified once the identity is set onchain, also before the job executor has confirmed its job', async () => {
+    const user = await signIn(t.app);
+    await as(user.cookie).post('/v1/kyc/start', { country: 'IT' });
+    const [request] = await t.db.select().from(kycRequests).where(eq(kycRequests.wallet, user.wallet));
+    const identityHash = 'ef'.repeat(32);
+    await admin('POST', `/v1/admin/kyc/${request!.id}/approve`, { identityHash, country: 'IT' });
+    const owner = new PublicKey(user.wallet);
+    accounts.set(profileOf(owner).toBase58(), info(new PublicKey(t.config.PROGRAM_ID!), 1_000_000, await traderProfile(owner, new Uint8Array(32))));
+    expect((await as(user.cookie).get('/v1/me')).json().kyc).toBe('pending');
+    accounts.set(profileOf(owner).toBase58(), info(new PublicKey(t.config.PROGRAM_ID!), 1_000_000, await traderProfile(owner, Buffer.from(identityHash, 'hex'))));
+    expect((await as(user.cookie).get('/v1/me')).json().kyc).toBe('verified');
   });
 
   it('one identity can back only one wallet', async () => {
@@ -132,8 +180,8 @@ describe('KYC', () => {
       const [r] = await t.db.select().from(kycRequests).where(eq(kycRequests.wallet, user.wallet));
       ids.push(r!.id);
     }
-    expect((await admin('POST', `/v1/admin/kyc/${ids[0]}/approve`, { identityHash })).statusCode).toBe(200);
-    const second = await admin('POST', `/v1/admin/kyc/${ids[1]}/approve`, { identityHash });
+    expect((await admin('POST', `/v1/admin/kyc/${ids[0]}/approve`, { identityHash, country: 'GB' })).statusCode).toBe(200);
+    const second = await admin('POST', `/v1/admin/kyc/${ids[1]}/approve`, { identityHash, country: 'GB' });
     expect(second.statusCode).toBe(409);
     expect(second.json().error.code).toBe('identity_in_use');
     const [still] = await t.db.select().from(kycRequests).where(eq(kycRequests.id, ids[1]!));

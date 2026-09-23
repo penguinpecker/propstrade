@@ -12,7 +12,7 @@ import { eq, sql } from 'drizzle-orm';
 import { PROPS_VAULT_PROGRAM_ID, PropsVaultClient } from '@props/sdk';
 import { chainJobs, programEvents } from '../../../db/schema.ts';
 import { createJobs, enqueue } from '../jobs.ts';
-import { encodeAccount, freshDb, silentLog, simStub } from './support.ts';
+import { encodeAccount, freshDb, silentLog, simStub, sealer } from './support.ts';
 
 const evaluation = Keypair.generate().publicKey;
 const trader = Keypair.generate().publicKey;
@@ -62,9 +62,9 @@ test('a processed (not yet confirmed) transaction is waited for, not sent again;
   };
   const client = new PropsVaultClient(rpc as never);
   const { sim, recorded } = simStub();
-  const jobs = createJobs({ db: t.db, rpc: rpc as never, client, sim, log: silentLog, keys: { risk: Keypair.generate() } });
+  const jobs = createJobs({ db: t.db, rpc: rpc as never, client, sim, log: silentLog, sealer, keys: { risk: Keypair.generate() } });
   const result = { evaluation: evaluation.toBase58(), wallet: trader.toBase58(), passed: true, finalEquityUsd: '10800', tradesRoot: '07'.repeat(32), resolvedAt: Date.now() };
-  await enqueue(t.db, 'record_evaluation_result', result.evaluation, result);
+  await enqueue(t.db, sealer, 'record_evaluation_result', result.evaluation, result);
 
   for (let i = 0; i < 4; i++) {
     await jobs.runDue();
@@ -90,9 +90,9 @@ test('a job whose own transaction failed completes with the transaction that did
     },
   };
   const { sim, recorded } = simStub();
-  const jobs = createJobs({ db: t.db, rpc: rpc as never, client: new PropsVaultClient(rpc as never), sim, log: silentLog, keys: { risk: Keypair.generate() } });
+  const jobs = createJobs({ db: t.db, rpc: rpc as never, client: new PropsVaultClient(rpc as never), sim, log: silentLog, sealer, keys: { risk: Keypair.generate() } });
   const result = { evaluation: evaluationKey.toBase58(), wallet: trader.toBase58(), passed: true, finalEquityUsd: '10800', tradesRoot: '07'.repeat(32), resolvedAt: Date.now() };
-  await enqueue(t.db, 'record_evaluation_result', result.evaluation, result);
+  await enqueue(t.db, sealer, 'record_evaluation_result', result.evaluation, result);
   await t.db.update(chainJobs).set({ status: 'sent', signature: 'failedSig', updatedAt: sql`now() - interval '1 hour'` }).where(eq(chainJobs.subject, result.evaluation));
 
   await jobs.runDue(); // done onchain, but the indexer has not seen the transaction that did it yet: wait for it

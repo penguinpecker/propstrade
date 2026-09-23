@@ -2,9 +2,11 @@
 // redelivers every evaluation result the chain module has not confirmed as recorded.
 import { randomUUID } from 'node:crypto';
 import { Keypair } from '@solana/web3.js';
+import { eq } from 'drizzle-orm';
 import { expect, it } from 'vitest';
 import type { SimOrderRequest } from '@props/shared';
 import { fromUnitPrice, toUnitPrice } from '@props/sdk';
+import { simResults } from '../../src/db/schema.js';
 import type { EvaluationResult } from '../../src/modules/types.js';
 import { startSim, type Sim } from './harness.js';
 
@@ -75,7 +77,20 @@ it('takes over the open book after a restart and redelivers unrecorded results u
   try {
     await until(() => heard.c.length > 0);
     expect(heard.c.map((r) => r.evaluation)).toEqual([evaluations[1]]);
+    // Someone with write access to the database alone turns the failed result into a pass, and un-records the other:
+    // only the untouched one is redelivered for the risk authority to sign.
+    await c.db.update(simResults).set({ passed: true }).where(eq(simResults.evaluation, evaluations[1]!));
+    await c.db.update(simResults).set({ recordedSignature: null }).where(eq(simResults.evaluation, evaluations[0]!));
   } finally {
     await c.stop();
+  }
+
+  const heardD: EvaluationResult[] = [];
+  const d = await startSim('restart', { databaseUrl: a.databaseUrl, onResolved: (r) => heardD.push(r) });
+  try {
+    await until(() => heardD.length > 0); // every row is checked in the same synchronous pass
+    expect(heardD.map((r) => [r.evaluation, r.passed])).toEqual([[evaluations[0], false]]);
+  } finally {
+    await d.stop();
   }
 });

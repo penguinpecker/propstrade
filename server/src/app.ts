@@ -11,6 +11,7 @@ import { errorHandler, notFoundHandler } from './errors.js';
 import type { ModuleStatus } from './modules/index.js';
 import type { Services } from './modules/types.js';
 import { type BalanceRpc, registerAccountRoutes } from './routes/account.js';
+import { createSealer } from './lib/integrity.js';
 import { registerAdminRoutes } from './routes/admin.js';
 import { registerStream, type StreamHub } from './stream.js';
 
@@ -65,7 +66,7 @@ export async function buildApp(deps: AppDeps) {
   registerAuth(app, { db, config, hub: deps.hub });
   registerStream(app, deps.hub);
   registerAccountRoutes(app, { db, config, rpc: deps.rpc });
-  registerAdminRoutes(app, { db, adminToken: config.ADMIN_API_TOKEN });
+  registerAdminRoutes(app, { db, adminToken: config.ADMIN_API_TOKEN, sealer: createSealer(config.SESSION_SECRET) });
 
   app.get('/v1/health', async (_req, reply) => {
     const dbOk = await sql`select 1`.then(() => true, () => false);
