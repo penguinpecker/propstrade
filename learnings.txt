@@ -753,3 +753,31 @@ Facts:
            SDK 8/8, admin 6/6, server 99/99 + modules 62/62, app 105 unit + e2e + ui-review + review e2e + SIWS review,
            full-stack journey PASS. Live data 28/30: the two failures were network errors from GMTrade's public subsquid
            (flaky, 522s today); both pass on re-run (reconcile 6/7 runs, 8/8 fills exact whenever data arrived).
+2026-09-23 DEPLOYED (server + db + app; the props_vault program is NOT on mainnet yet, so evaluations/funded/payouts
+           show "not initialized" until docs/runbooks/launch.md sections 3-5 are done):
+           - App: https://propstrade.vercel.app (Vercel team penguinpeckers-projects, project propstrade
+             <vercel-project-id>, root dir app, Node 22.x, SSO protection off, external rewrite caching off).
+             Env VITE_API_URL, VITE_RPC_URL (= <app>/v1/rpc), VITE_CLUSTER, VITE_PROGRAM_ID: all type "sensitive".
+           - Server: Railway project propstrade (<railway-project-id>), env production, service server
+             (<railway-service-id>, https://server-production-fbe8.up.railway.app) + Postgres 18
+             (ghcr.io/railwayapp-templates/postgres-ssl:18). 12 service variables, ALL SEALED (dashboard only: neither the
+             CLI nor the public GraphQL API can seal). RPC_URL = public mainnet RPC until a Helius key is provided.
+           - Authority public keys (onchain registration pending the program deploy): risk 3jiQbU5QfVGdeSifbizs2717hMHGsDVETKPMq84mEHma,
+             KYC Deq2yrnLMhqpvt1K7C1DWQ95B5NN7mKzvmH2yNvfXMNh. Their secrets exist only as sealed Railway variables.
+           - Deployed with `railway up` / `vercel deploy --prod` from a clean `git archive HEAD` export (repo not on GitHub yet),
+             so no gitignored key or env file can be uploaded.
+           - Verified live: /v1/health all 4 modules running + keeper leader; 68 live markets through the app domain; SSE held
+             100 s through the Vercel rewrite (134 price batches); RPC relay returns the mainnet genesis hash and refuses
+             non-allowlisted methods; CSP connect-src = app origin only; a throwaway wallet signed in and a practice SOL
+             order filled within 0.015% of GMTrade's live price, then closed; charts load after market switches (0.8-2.8 s).
+
+Deployment learnings:
+- Railway: new services reject `railwayConfigFile` ("Config as Code is deprecated. Use .railway/railway.ts"); apply the
+  settings with the GraphQL serviceInstanceUpdate (builder, preDeployCommand, startCommand, healthcheck*, draining,
+  restartPolicy*). Seal is dashboard-only; sealing stages a change ("Apply N changes" -> Deploy) and does not redeploy;
+  a forced redeploy proved sealed values (incl. a ${{Postgres.DATABASE_URL}} reference) still reach the container.
+  Sealed values read back as empty strings from the API.
+- Vercel: the claude.ai Vercel connector got 403 on this team; the CLI's own token (REST) worked. *.vercel.app and
+  *.up.railway.app are different sites, so the API is proxied through the app's vercel.json rewrite (same-origin
+  cookies); TRUST_PROXY_HOPS=2 behind it. SSE survives the external rewrite.
+- The browser-side RPC is the server's allowlisted relay POST /v1/rpc, so no provider key ships in the bundle.
