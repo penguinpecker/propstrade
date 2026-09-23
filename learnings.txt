@@ -708,8 +708,9 @@ Facts:
            runbook command rehearsed on solana-test-validator (throwaway keys) and from a clean copy of the repo.
 - Mainnet rent on 2026-09-23 is ~5,080 lamports/byte (not 6,960): the 978,072-byte program = 4.9695 SOL, 5.4663 SOL at
   --max-len +10 %; a zero-data account's floor is 0.00065024 SOL (not 890,880 lamports). Check with `solana rent <bytes>`.
-- The server marks no market tradable until the program's Anchor IDL is onchain (`anchor idl init`, 13,804 B,
-  ~0.071 SOL): marketdata decodes MarketConfig with the IDL read from chain; the log says "has no Anchor IDL account".
+- (SUPERSEDED in round 3: marketdata now decodes MarketConfig with the IDL bundled in @props/sdk, see
+  server/src/modules/marketdata/allowlist.ts; an onchain IDL is optional, for explorers only.) Earlier: the server marked
+  no market tradable until the program's Anchor IDL was onchain (`anchor idl init`, 13,804 B, ~0.071 SOL).
 - solana-cli 3.1.14: `program deploy --buffer` drains the buffer to the payer before paying the program data, so the peak
   is ~1x rent; re-running `write-buffer` with the same buffer keypair writes only what is missing (nothing when complete);
   `write-buffer --buffer-authority X` needs X to sign (write, then `set-buffer-authority`); `program extend` needs the
@@ -886,4 +887,20 @@ Program deploy cost, rechecked 2026-09-23 (Anvil reviewed):
 - Further rent steps (2,575 -> 1,322 -> 696 lamports/byte) are planned but not scheduled on mainnet (feature accounts
   absent). At 696/byte the program costs ~0.69 SOL; an upgrade after that refunds the surplus (~4.3 SOL) to the payer.
   Loader-v4 is inactive on mainnet and would not save rent. Leads for a smaller binary (float/format code from a
-  dependency, ~80 KB) were not traced; every 100 KB is ~0.5 SOL. Keep event-cpi and the on-chain IDL.
+  dependency, ~80 KB) were not traced; every 100 KB is ~0.5 SOL. Keep event-cpi. The onchain IDL is optional (explorers
+  only; the server uses the IDL bundled in @props/sdk).
+
+Pinocchio evaluated (2026-09-23; measured in a scratch copy, 59/59 LiteSVM tests per variant):
+- Binary makeup (981,640 B): Anchor account validation 273 KB, our instruction bodies 145 KB, Anchor runtime 64 KB,
+  borsh 56 KB, gmsol-programs CPI builders 47 KB + our glue 37 KB, dispatch 33 KB, text formatting 32 KB, float
+  formatting 30 KB (pulled in only by initialize's bincode read of ProgramData), Anchor IDL instructions (no-idl -42 KB),
+  anchor-spl/token-2022 26 KB, relocation table 64 KB.
+- Keep-Anchor shrink options: A read the upgrade authority from ProgramData by offset -> 918,376 B (4.67 SOL);
+  A + no-idl + no-log-ix-name -> 873,360 B; + require macros without file/line -> 822,064 B (4.18 SOL, ~1 day, no
+  interface change); + patched anchor-lang error extras -> 715,856 B (3.64 SOL, vendored fork). Anchor 1.x is blocked:
+  gmsol-programs 0.10.0 needs anchor-lang ^0.31.1.
+- Pinocchio (anza-xyz/pinocchio 0.11.2, 2026-06; Zellic audit May-June 2025 at an older commit; p-token runs the Token
+  program on mainnet since epoch 971): a rewrite is estimated at 160-270 KB (0.8-1.4 SOL today, 0.1-0.2 SOL at 696/byte)
+  but means ~600 hand-written account checks, hand-built GMTrade CPIs (create_order_v2 has 25 accounts), 3-5 weeks and a
+  new audit. SPL Token -> p-token shrank only 19% (133,352 -> 108,600 B): logic-heavy code does not shrink much.
+  Anchor v2 on Pinocchio (anchor-lang 2.0.0-rc.1, otter-sec/anchor) is alpha and unaudited. Not now.
