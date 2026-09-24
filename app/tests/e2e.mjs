@@ -62,6 +62,8 @@ async function signedInContext(browser, key, options = {}) {
   return context;
 }
 const settle = page => page.waitForFunction(() => !document.querySelector('#main .spinner, #main .chart-skeleton'), null, { timeout: 8_000 }).catch(() => undefined);
+/** Forgets the candles this browser saved (lib/candles.ts): a copy younger than staleTime is shown without a fetch. */
+const forgetCandles = page => page.evaluate(() => { for (const key of Object.keys(localStorage)) if (key.startsWith('props.candles.')) localStorage.removeItem(key); });
 
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 let failures = 0;
@@ -427,6 +429,7 @@ try {
       await page.route('**/v1/candles?**', async route => { const response = await route.fetch(); await route.fulfill({ response, json: { ...await response.json(), freshness: 'delayed' } }); });
       try {
         await page.goto(`${siteUrl}/#/trade/practice`);
+        await forgetCandles(page);
         await page.reload(); // the same URL does not reload the app, and the candles must come through the route
         await page.locator('.chart-section .price-chart canvas').first().waitFor();
         const [bottom, positions] = await Promise.all([page.locator('.chart-section .tv-bottom').boundingBox(), page.locator('.positions-panel').boundingBox()]);
@@ -465,6 +468,7 @@ try {
     await check('chart: the saved market\'s candles and the chart\'s code are asked for before the catalog answers; a saved market that left the catalog falls back to BTC', async () => {
       await page.goto(`${siteUrl}/#/trade/practice`);
       await page.evaluate(() => localStorage.setItem('props.market', '"ETH"'));
+      await forgetCandles(page);
       await page.goto('about:blank');
       let candlesFor; let chartCode;
       const candles = new Promise(resolve => { candlesFor = resolve; });
@@ -494,6 +498,7 @@ try {
       try {
         await page.goto(`${siteUrl}/#/trade/practice`);
         await page.evaluate(() => localStorage.setItem('props.market', '"BTC"'));
+        await forgetCandles(page);
         await page.reload();
         const legend = page.locator('.tv-legend-main');
         await legend.getByText('BTC / USD · 1h · GMTrade').waitFor();
@@ -512,6 +517,48 @@ try {
         assert.equal(asked.filter(k => k === 'ETH 1h').length, 1, `ETH 1h was fetched more than once: ${asked}`);
       } finally {
         page.off('request', seen);
+      }
+    });
+
+    await check('chart: a return visit paints the saved candles before /v1/candles answers, then keeps what the fetch returned, and asks for the watchlist\'s only once it answered', async () => {
+      const key = 'props.candles.BTC.1h';
+      // Every copy is dated 20 s back: young enough to show (the bound is three days), old enough to be refetched at once
+      // (staleTime is 10 s); the watchlist's are refetched too, but not beside this chart's refetch.
+      const had = await page.evaluate(k => { let found = false; for (const name of Object.keys(localStorage)) { if (!name.startsWith('props.candles.')) continue; const saved = JSON.parse(localStorage.getItem(name)); saved.at -= 20_000; localStorage.setItem(name, JSON.stringify(saved)); found ||= name === k; } return found; }, key);
+      assert.ok(had, 'the last fetch of BTC 1h left no saved copy');
+      const candlesUrl = /\/v1\/candles\?symbol=BTC&interval=1h$/;
+      let served = null; // the JSON /v1/candles returned once the hold was over
+      let asked = 0;
+      await page.route(candlesUrl, async route => {
+        asked += 1;
+        await new Promise(resolve => setTimeout(resolve, 3_000));
+        const response = await route.fetch();
+        served = await response.json();
+        await route.fulfill({ response, json: served });
+      });
+      const others = []; // the watchlist's /v1/candles requests, each with whether this chart's refetch had answered by then
+      const seen = request => { const url = new URL(request.url()); if (url.pathname === '/v1/candles' && url.searchParams.get('symbol') !== 'BTC') others.push([url.searchParams.get('symbol'), served !== null]); };
+      page.on('request', seen);
+      try {
+        const reloadedAt = Date.now();
+        await page.reload();
+        await page.locator('.tv-legend-main .tv-ohlc').waitFor({ timeout: 2_500 });
+        // Candle bodies in the dark palette's up (#0ecb81) or down (#f6465d) colour, on any of the chart's canvases.
+        await page.waitForFunction(() => {
+          const candle = (d, i) => (Math.abs(d[i] - 14) < 4 && Math.abs(d[i + 1] - 203) < 4 && Math.abs(d[i + 2] - 129) < 4) || (Math.abs(d[i] - 246) < 4 && Math.abs(d[i + 1] - 70) < 4 && Math.abs(d[i + 2] - 93) < 4);
+          return [...document.querySelectorAll('.price-chart canvas')].some(c => { const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data; for (let i = 0; i < d.length; i += 4) if (candle(d, i)) return true; return false; });
+        }, null, { timeout: 2_000 });
+        assert.equal(served, null, 'the candles were painted only once /v1/candles answered');
+        assert.equal(asked, 1, 'the copy older than staleTime was not refetched');
+        await expectEventually(() => served !== null, 'the held candles were never served', 6_000);
+        await page.waitForFunction(([k, at]) => JSON.parse(localStorage.getItem(k) ?? '{}').at >= at, [key, reloadedAt]);
+        const stored = await page.evaluate(k => JSON.parse(localStorage.getItem(k)), key);
+        assert.deepEqual(stored.candles, served.candles.slice(-300).map(({ time, open, high, low, close }) => ({ time, open, high, low, close })));
+        await expectEventually(() => others.length >= 3, `the watchlist's candles were not refetched: ${others.map(([symbol]) => symbol)}`);
+        assert.ok(others.every(([, after]) => after), `the watchlist's candles were asked for beside this chart's refetch, not after it: ${others.filter(([, after]) => !after).map(([symbol]) => symbol)}`);
+      } finally {
+        page.off('request', seen);
+        await page.unroute(candlesUrl);
       }
     });
 
@@ -737,18 +784,27 @@ try {
       await row.getByText('$4,600.00 · $1,533.33 margin').waitFor();
     });
 
-    await check('stream outage: reconnecting, offline, trading paused, then recovery', async () => {
-      await page.goto(`${siteUrl}/#/trade/practice`);
-      const footer = page.locator('.app-footer');
-      await footer.getByText('Live data connected').waitFor();
-      state.streamUp = false;
-      for (const s of state.streams) s.res.destroy();
-      await footer.getByText('Reconnecting to live data…').waitFor();
-      await footer.getByText('Offline · retrying').waitFor({ timeout: 10_000 });
-      assert.ok(await page.locator('.order-submit').first().isDisabled(), 'orders can be submitted while offline');
-      await page.getByText('Price updates paused').first().waitFor();
-      state.streamUp = true;
-      await footer.getByText('Live data connected').waitFor({ timeout: 15_000 });
+    await check('stream outage: reconnecting, offline, trading paused, then recovery, which re-reads the market rows the outage missed', async () => {
+      const catalog = []; // /v1/markets requests: the rows only travel on the stream when they change, so one once it is back
+      const seen = request => { if (new URL(request.url()).pathname === '/v1/markets') catalog.push(Date.now()); };
+      page.on('request', seen);
+      try {
+        await page.goto(`${siteUrl}/#/trade/practice`);
+        const footer = page.locator('.app-footer');
+        await footer.getByText('Live data connected').waitFor();
+        state.streamUp = false;
+        for (const s of state.streams) s.res.destroy();
+        await footer.getByText('Reconnecting to live data…').waitFor();
+        await footer.getByText('Offline · retrying').waitFor({ timeout: 10_000 });
+        assert.ok(await page.locator('.order-submit').first().isDisabled(), 'orders can be submitted while offline');
+        await page.getByText('Price updates paused').first().waitFor();
+        const before = catalog.length; // whatever the page load asked for has long been sent
+        state.streamUp = true;
+        await footer.getByText('Live data connected').waitFor({ timeout: 15_000 });
+        await expectEventually(() => catalog.length === before + 1, `the market rows were not re-read once the stream was back (${catalog.length - before} requests)`);
+      } finally {
+        page.off('request', seen);
+      }
     });
 
     await check('a slow stream start waits for prices without calling them paused', async () => {

@@ -2,8 +2,9 @@ import { once } from 'node:events';
 import { get, request, type IncomingMessage } from 'node:http';
 import { setImmediate as tick, setTimeout as sleep } from 'node:timers/promises';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { StreamEvent } from '@props/shared';
+import type { PriceTick, StreamEvent } from '@props/shared';
 import type { Session } from '../src/auth/routes.js';
+import type { Services } from '../src/modules/types.js';
 import { createStreamHub } from '../src/stream.js';
 import { makeApp, signIn } from './helpers.js';
 
@@ -16,8 +17,8 @@ beforeAll(async () => {
 afterAll(async () => { await t.close(); });
 
 /** Opens GET /v1/stream on its own socket and collects parsed events until the server ends it. */
-async function openStream(cookie?: string) {
-  const req = get(`${base}/v1/stream`, { agent: false, headers: cookie ? { cookie } : {} });
+async function openStream(cookie?: string, from = base) {
+  const req = get(`${from}/v1/stream`, { agent: false, headers: cookie ? { cookie } : {} });
   const [res] = (await once(req, 'response')) as [IncomingMessage];
   const events: StreamEvent[] = [];
   let buffer = '';
@@ -68,6 +69,22 @@ describe('GET /v1/stream', () => {
     await Promise.all([a.close(), b.close(), anon.close()]);
     await until(() => t.hub.size === 0);
     expect(t.hub.size).toBe(0);
+  });
+
+  it('starts every stream with a heartbeat, then a frame with every market\'s latest price', async () => {
+    const tick = (symbol: string): PriceTick => ({ symbol, min: '1', max: '3', mid: '2', ts: 1, session: 'open' });
+    const marketdata = {
+      markets: () => [{ symbol: 'SOL' }, { symbol: 'NEW' }, { symbol: 'BTC' }],
+      price: (symbol: string) => (symbol === 'NEW' ? undefined : tick(symbol)), // no price yet: left out, not null
+    } as unknown as Services['marketdata'];
+    const own = await makeApp({ services: { marketdata } });
+    const url = await own.app.listen({ port: 0, host: '127.0.0.1' });
+    const stream = await openStream(undefined, url);
+    await until(() => stream.events.length >= 2);
+    expect(stream.events[0]!.type).toBe('heartbeat');
+    expect(stream.events[1]).toEqual({ type: 'price', ticks: [tick('SOL'), tick('BTC')] });
+    await stream.close();
+    await own.close();
   });
 
   it('ends open streams when the server shuts down', async () => {
@@ -155,6 +172,16 @@ describe('stream hub', () => {
     first.destroy();
     await until(() => hub.size === 2);
     expect(hub.connect('10.0.0.3', null)).not.toBeNull();
+    hub.close();
+  });
+
+  it('builds the first frame only for a stream it accepts', () => {
+    const hub = createStreamHub({ maxPerAddress: 1 });
+    let built = 0;
+    const snapshot = () => { built += 1; return null; };
+    expect(hub.connect('10.0.0.1', null, snapshot)).not.toBeNull();
+    expect(hub.connect('10.0.0.1', null, snapshot)).toBeNull();
+    expect(built).toBe(1);
     hub.close();
   });
 

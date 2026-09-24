@@ -74,13 +74,14 @@ export default function Trading() {
   const symbol = market?.symbol ?? marketSymbol;
   const candles = useCandles(symbol, interval);
   const warmed = useRef(null); // the interval the watchlist's candles were prefetched for
-  // Once this market's candles are in, the watchlist's for the same interval (at most 4 other markets), so a watchlist
-  // click paints from memory: once per interval, not on ticks or catalog updates; ones still fresh (staleTime) are skipped.
+  // Once this market's candles are in (a saved copy older than staleTime: once its refetch answered, so nothing queues
+  // ahead of that), the watchlist's for the same interval (at most 4 other markets), so a watchlist click paints from
+  // memory: once per interval, not on ticks or catalog updates; ones still fresh (staleTime) are skipped.
   useEffect(() => {
-    if (!candles.isSuccess || warmed.current === interval) return;
+    if (!candles.isSuccess || candles.isFetching || warmed.current === interval) return;
     warmed.current = interval;
     for (const other of favorites.filter(s => s !== symbol).slice(0, 4)) client.query(candlesOptions(other, interval)).catch(() => {});
-  }, [candles.isSuccess, interval]);
+  }, [candles.isSuccess, candles.isFetching, interval]);
   const marketTrades = useMarketTrades(market?.symbol ?? '');
   const quoteSize = useDebounced(Number(size) > 0 ? Number(size).toFixed(2) : null, 300);
   const quote = useQuote(market?.symbol ?? '', side, market ? quoteSize : null);

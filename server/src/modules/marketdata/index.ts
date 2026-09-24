@@ -29,7 +29,7 @@ const NOT_ENABLED_YET = 'Not yet enabled for funded trading';
 const NOT_ALLOWLISTED = 'Not available for funded trading';
 const NO_USDC_POOL = 'Not available for funded trading: GMTrade has no USDC-only pool for this market';
 
-const PRICE_FLUSH_MS = 250; // at most 4 'price' events per second
+const PRICE_FLUSH_MS = 100; // at most 10 'price' events per second, each carrying only the symbols whose price moved
 const MAX_CANDLES = 2_000;
 const TRADES_TTL_MS = 5_000;
 // How long a request waits for GMTrade when there is nothing at all to show. The call keeps going and fills the cache.
@@ -70,6 +70,37 @@ export function candleWindow(res: number, nowSec: number, from?: number, to?: nu
   return { start, end, nowBucket, latest: from === undefined && end === nowBucket };
 }
 export const candleKey = (symbol: string, res: number, w: { start: number; end: number }) => `${symbol}:${res}:${w.start}:${w.end}`;
+
+/** Same price and session: a tick that differs only by its timestamp changes nothing the app shows (staleness travels
+ *  in the market rows), so it is not sent. */
+const samePrice = (a: PriceTick, b: PriceTick) => a.min === b.min && a.max === b.max && a.session === b.session;
+
+/** How far a figure the app shows must move, since the row was last sent, for the row to be sent again: the 24h change
+ *  and the funding rate by their display precision (percent with 2 and 4 decimals), a USD figure (volume, OI, capacity,
+ *  pool liquidity) by 1 % (shown compact, "$1.2M", so a smaller move is rarely visible). Every other field (session,
+ *  freshness, tradable, leverage, pools...) counts on any change; price and updatedAt travel in the ticks and the
+ *  borrow rates are not shown. Measured 2026-09-25: without this, OI, capacity and liquidity drift re-sent all 68 rows
+ *  every 5 s. */
+const ROW_STEPS: Partial<Record<keyof Market, { abs: number } | { rel: number } | 'ignored'>> = {
+  price: 'ignored', updatedAt: 'ignored', borrowRateHourlyLong: 'ignored', borrowRateHourlyShort: 'ignored',
+  change24h: { abs: 0.01 }, fundingRateHourlyLong: { abs: 0.0001 },
+  volume24h: { rel: 0.01 }, openInterestLong: { rel: 0.01 }, openInterestShort: { rel: 0.01 },
+  capacityLong: { rel: 0.01 }, capacityShort: { rel: 0.01 }, poolLiquidity: { rel: 0.01 },
+};
+
+/** Whether the app would show `next` differently from `last`, the row it was last sent (see ROW_STEPS). */
+export function changedForDisplay(last: Market, next: Market): boolean {
+  for (const key of new Set([...Object.keys(last), ...Object.keys(next)]) as Set<keyof Market>) {
+    const step = ROW_STEPS[key];
+    if (step === 'ignored') continue;
+    const [a, b] = [last[key], next[key]];
+    if (!step) { if (JSON.stringify(a) !== JSON.stringify(b)) return true; continue; }
+    if (a == null || b == null) { if (a !== b) return true; continue; }
+    const [x, y] = [Number(a), Number(b)];
+    if (x !== y && Math.abs(y - x) >= ('abs' in step ? step.abs : step.rel * Math.abs(x))) return true;
+  }
+  return false;
+}
 
 class HttpError extends Error {
   readonly status: number;
@@ -116,7 +147,10 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
   let started = false;
   const bySymbol = new Map<string, Market>();
   const symbolByIndexToken = new Map<string, string>();
-  const published = new Map<string, string>();
+  /** The row each market was last sent as, and the tick each symbol was last sent in: only what moved past them
+   *  goes out. */
+  const published = new Map<string, Market>();
+  const sentTicks = new Map<string, PriceTick>();
   const pendingTicks = new Map<string, PriceTick>();
   const tickListeners = new Set<(tick: PriceTick) => void>();
   /** Prices pinned by the test hook below (NODE_ENV=test on localnet only), by symbol. */
@@ -210,10 +244,9 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
 
   function publishChangedMarkets(): void {
     for (const market of rebuild()) {
-      const { price: _p, change24h: _c, updatedAt: _u, ...slow } = market;
-      const signature = JSON.stringify(slow);
-      if (published.get(market.symbol) === signature) continue;
-      published.set(market.symbol, signature);
+      const last = published.get(market.symbol);
+      if (last && !changedForDisplay(last, market)) continue;
+      published.set(market.symbol, market);
       ctx.publish({ type: 'market', market });
     }
   }
@@ -399,8 +432,14 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     publishChangedMarkets();
     every(PRICE_FLUSH_MS, 'price publish', () => {
       if (!pendingTicks.size) return;
-      ctx.publish({ type: 'price', ticks: [...pendingTicks.values()] });
+      const ticks = [...pendingTicks.values()].filter((tick) => {
+        const last = sentTicks.get(tick.symbol);
+        return !last || !samePrice(last, tick);
+      });
       pendingTicks.clear();
+      if (!ticks.length) return;
+      for (const tick of ticks) sentTicks.set(tick.symbol, tick);
+      ctx.publish({ type: 'price', ticks });
     });
     every(5_000, 'market publish', publishChangedMarkets);
     every(60_000, 'market-info', refreshPairs, 3);
