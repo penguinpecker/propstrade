@@ -11,7 +11,7 @@ import {
 } from '../../../db/schema.ts';
 import { createIndexer } from '../indexer.ts';
 import { capitalSeries } from '../program.ts';
-import type { Notice } from '../projector.ts';
+import { project, type Notice } from '../projector.ts';
 import type { ChainReader } from '../reader.ts';
 import { freshDb, offlineClient, programTx, silentLog, simStub } from './support.ts';
 
@@ -206,4 +206,43 @@ test('a transaction that fails to project leaves the cursor before it, so it is 
   await assert.rejects(indexer.catchUp(), /unknown funded account/);
   assert.equal((await t.db.select().from(programEvents).where(eq(programEvents.signature, 'orphanOrder'))).length, 0, 'rolled back');
   assert.equal((await t.db.select().from(indexerCursors)).length, 0);
+});
+
+test('events of the permissionless cranks, and events this server does not know, never stall the indexer', async () => {
+  const programId = new PublicKey(key()); // its own cursor
+  const txs: FakeTx[] = [];
+  let slot = 200_000;
+  const tx = (events: [string, Record<string, unknown>][]) => {
+    const signature = Keypair.generate().publicKey.toBase58() + 'x';
+    txs.push({ signature, slot: slot++, err: null, tx: programTx(client, events), fee: 5000 });
+    return signature;
+  };
+  // Anyone can send close_empty_position and collect_claimable for any funded account.
+  const someFunded = key();
+  const closeEmpty = tx([['emptyPositionClosed', { funded: someFunded, position: key(), lamports: new BN(19_101_080), ts: ts() }]]);
+  const collect = tx([['claimableCollected', { funded: someFunded, account: key(), to: key(), amount: new BN(174_680_000), ts: ts() }]]);
+  const laterEvaluation = key();
+  const later = tx([
+    ['capitalDeposited', { amount: new BN(100_000_000), capitalVaultBalance: new BN(100_000_000), ts: ts() }],
+    ['evaluationPurchased', { evaluation: laterEvaluation, trader: key(), tierId: 1, tierVersion: 3, feePaid: new BN(79_000_000), ts: ts() }],
+  ]);
+  const { sim, created } = simStub();
+  const indexer = createIndexer({
+    db: t.db, rpc: fakeRpc(txs) as never, client, programId, log: silentLog, reader, sim, notify: async () => {}, onApplied() {},
+  });
+  assert.equal(await indexer.catchUp(), 3);
+  const [cursor] = await t.db.select().from(indexerCursors).where(eq(indexerCursors.program, programId.toBase58()));
+  assert.equal(cursor!.signature, later);
+  for (const [signature, name] of [[closeEmpty, 'emptyPositionClosed'], [collect, 'claimableCollected']]) {
+    assert.deepEqual((await t.db.select().from(programEvents).where(eq(programEvents.signature, signature!))).map((e) => e.name), [name]);
+  }
+  assert.deepEqual((await t.db.select().from(vaultLedger).where(eq(vaultLedger.signature, later))).map((l) => l.event).sort(), ['Capital deposited', 'Evaluation fee']);
+  assert.deepEqual(created.map((c) => c.evaluation), [laterEvaluation.toBase58()], 'the purchase after them reached the sim');
+
+  // A newer program's event: stored like any other, logged, not projected.
+  const errors: unknown[] = [];
+  const newer = { name: 'fromANewerProgram', data: {} } as unknown as Parameters<typeof project>[1];
+  const out = await t.db.transaction((dbTx) => project(dbTx, newer, 0, { signature: 'newer', slot: 1, fee: 0n }, { reader, log: { error: (o: unknown) => void errors.push(o) } }));
+  assert.deepEqual(out, []);
+  assert.deepEqual(errors, [{ event: 'fromANewerProgram', signature: 'newer' }]);
 });

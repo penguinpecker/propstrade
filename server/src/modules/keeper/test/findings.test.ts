@@ -381,7 +381,7 @@ test('finding 6: freeing an order slot for a session close cancels a pending inc
       ['ETH', { symbol: 'ETH', open: true, schedule: null, closedMaxLeverageBps: 0 }],
     ]),
   };
-  const step = planStep(view, { now: Date.parse('2026-09-23T19:50:00Z'), ownerSolMin: 50_000_000n, upgradePending: false });
+  const step = planStep(view, { now: Date.parse('2026-09-23T19:50:00Z'), ownerSolMin: 50_000_000n, tradingPaused: false, upgradePending: false });
   assert.equal(step?.kind, 'session');
   const cancelled = step!.actions.filter((a) => a.type === 'cancel').map((a) => (a as { order: string }).order);
   assert.ok(!cancelled.includes('slBtc'), `the keeper cancelled ${cancelled.join(', ')}: the open BTC position loses its stop-loss (the trader is not told) while a pending increase stays`);

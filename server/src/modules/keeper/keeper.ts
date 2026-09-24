@@ -223,7 +223,7 @@ export function createKeeper(d: KeeperDeps) {
     let breachSeen = false;
     let read = await readAccount(row.address, ctx.market);
     for (let i = 0; read && i < MAX_STEPS; i++) {
-      const step = planStep(read.view, { now: clock(), ownerSolMin: big(ctx.config.ownerSolMin), upgradePending: ctx.upgradePending, skip });
+      const step = planStep(read.view, { now: clock(), ownerSolMin: big(ctx.config.ownerSolMin), tradingPaused: ctx.config.paused.trading, upgradePending: ctx.upgradePending, skip });
       if (!step) break;
       if (step.actions.some((a) => a.type === 'markBreached') && !breachSeen) {
         // Marking an account breached ends it for good: act only when a second, fresh read agrees.

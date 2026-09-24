@@ -1,7 +1,7 @@
-use anchor_lang::prelude::*;
+use anchor_lang::{prelude::*, solana_program::program_option::COption, system_program};
 use anchor_spl::{
     associated_token::{get_associated_token_address, AssociatedToken},
-    token::{Mint, Token, TokenAccount},
+    token::{self, Mint, Token, TokenAccount, TransferChecked},
 };
 use gmsol_programs::gmsol_store::program::GmsolStore;
 
@@ -129,10 +129,15 @@ pub struct TopUpOwner<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/// Permissionless: refills the owner PDA's SOL float from the treasury once it drops below the minimum.
+/// Permissionless: refills the owner PDA's SOL float from the treasury once it drops below the minimum. Only an
+/// Active account, and only while trading is live: a restricted, payout-pending or breached account, or any account
+/// while trading is paused, keeps the float it has. GMTrade is upgradeable and the post-call bounds hold per call, so
+/// this caps what an upgraded GMTrade can take through the orders such an account may still place (closes,
+/// protection) at its float.
 pub(crate) fn top_up_owner(ctx: Context<TopUpOwner>) -> Result<()> {
     let a = &ctx.accounts;
-    require!(a.funded.is_open(), VaultError::InvalidAccountStatus);
+    require!(!a.config.paused.trading, VaultError::Paused);
+    require!(a.funded.status == FundedStatus::Active, VaultError::InvalidAccountStatus);
     require!(a.owner.lamports() < a.config.owner_sol_min, VaultError::OwnerFloatSufficient);
     let lamports = top_up_from_treasury(
         &a.system_program.to_account_info(),
@@ -196,5 +201,125 @@ pub(crate) fn close_completed_order(ctx: Context<CloseCompletedOrder>) -> Result
     close_order_cpi!(a).invoke(&[owner_seeds], "completed")?;
     ctx.accounts.funded.orders[idx] = TrackedOrder::default();
     emit_cpi!(CompletedOrderClosed { funded: funded_key, order, ts: now()? });
+    Ok(())
+}
+
+#[event_cpi]
+#[derive(Accounts)]
+pub struct CloseEmptyPosition<'info> {
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
+    #[account(seeds = [FUNDED_SEED, funded.evaluation.as_ref()], bump = funded.bump)]
+    pub funded: Box<Account<'info, FundedAccount>>,
+    #[account(mut, seeds = [OWNER_SEED, funded.key().as_ref()], bump = funded.owner_bump)]
+    pub owner: SystemAccount<'info>,
+    /// CHECK: pinned GMTrade store.
+    #[account(address = config.gmtrade_store)]
+    pub gm_store: UncheckedAccount<'info>,
+    /// CHECK: an empty GMTrade Position of the owner PDA (verified by its seeds in the handler) that no slot uses.
+    #[account(mut)]
+    pub gm_position: UncheckedAccount<'info>,
+    #[account(mut, seeds = [SOL_TREASURY_SEED], bump = config.sol_treasury_bump)]
+    pub sol_treasury: SystemAccount<'info>,
+    #[account(address = config.gmtrade_program)]
+    pub gmtrade_program: Program<'info, GmsolStore>,
+    pub system_program: Program<'info, System>,
+}
+
+/// Permissionless: closes an empty GMTrade Position of the owner PDA that no slot uses. An increase that never filled
+/// (cancelled by the trader, a risk authority or GMTrade) leaves its Position behind, holding the rent and liquidation
+/// reserve the owner PDA paid for it (~0.026 SOL); GMTrade closes an empty one only for its owner. Those lamports go
+/// back to the SOL treasury, which funds the owner PDA. Works on closed accounts too.
+pub(crate) fn close_empty_position(ctx: Context<CloseEmptyPosition>) -> Result<()> {
+    let a = &ctx.accounts;
+    let position = a.gm_position.key();
+    // A slot still using the position may have pending orders that need it (GMTrade cancels those once it is gone).
+    let size = gmtrade::verified_position_size(&a.gm_position, &a.config.gmtrade_program, &a.config.gmtrade_store, &a.owner.key())?;
+    require!(size == 0, VaultError::NotFlat);
+    require!(!a.funded.slots.iter().any(|s| !s.is_free() && s.gm_position == position), VaultError::NotFlat);
+    let owner = a.owner.to_account_info();
+    let before = owner.lamports();
+    let funded_key = a.funded.key();
+    let owner_seeds: &[&[u8]] = &[OWNER_SEED, funded_key.as_ref(), &[a.funded.owner_bump]];
+    gmtrade::close_empty_position(
+        a.gmtrade_program.to_account_info(),
+        owner.clone(),
+        a.gm_store.to_account_info(),
+        a.gm_position.to_account_info(),
+        &[owner_seeds],
+    )?;
+    let lamports = owner.lamports() - before;
+    if lamports > 0 {
+        system_program::transfer(
+            CpiContext::new_with_signer(
+                a.system_program.to_account_info(),
+                system_program::Transfer { from: owner, to: a.sol_treasury.to_account_info() },
+                &[owner_seeds],
+            ),
+            lamports,
+        )?;
+    }
+    emit_cpi!(EmptyPositionClosed { funded: funded_key, position, lamports, ts: now()? });
+    Ok(())
+}
+
+#[event_cpi]
+#[derive(Accounts)]
+pub struct CollectClaimable<'info> {
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Box<Account<'info, Config>>,
+    #[account(seeds = [FUNDED_SEED, funded.evaluation.as_ref()], bump = funded.bump)]
+    pub funded: Box<Account<'info, FundedAccount>>,
+    /// The owner PDA: the claimable account's delegate (it may hold nothing once the account is closed).
+    #[account(seeds = [OWNER_SEED, funded.key().as_ref()], bump = funded.owner_bump)]
+    pub owner: SystemAccount<'info>,
+    /// A GMTrade claimable account: token authority = the store, delegate = the owner PDA. Only GMTrade can approve a
+    /// delegate for its store's token account.
+    #[account(
+        mut,
+        constraint = claimable.mint == config.usdc_mint
+            && claimable.owner == config.gmtrade_store
+            && claimable.delegate == COption::Some(owner.key()) @ VaultError::NotClaimable,
+    )]
+    pub claimable: Box<Account<'info, TokenAccount>>,
+    /// The account's USDC ATA, or the capital vault once the account is closed.
+    #[account(
+        mut,
+        address = if funded.status == FundedStatus::Closed {
+            config.capital_vault
+        } else {
+            get_associated_token_address(&owner.key(), &config.usdc_mint)
+        },
+    )]
+    pub destination: Box<Account<'info, TokenAccount>>,
+    #[account(address = config.usdc_mint)]
+    pub usdc_mint: Box<Account<'info, Mint>>,
+    pub token_program: Program<'info, Token>,
+}
+
+/// Permissionless: moves the USDC GMTrade set aside for the owner PDA in one of its claimable accounts (the part of a
+/// decrease's negative price impact above GMTrade's cap) to the account's USDC, or to the capital vault once the account
+/// is closed. The owner PDA signs as the delegate a GMTrade keeper approved; nothing else can move it.
+pub(crate) fn collect_claimable(ctx: Context<CollectClaimable>) -> Result<()> {
+    let a = &ctx.accounts;
+    let amount = a.claimable.amount.min(a.claimable.delegated_amount);
+    require!(amount > 0, VaultError::InvalidAmount);
+    let funded_key = a.funded.key();
+    let owner_seeds: &[&[u8]] = &[OWNER_SEED, funded_key.as_ref(), &[a.funded.owner_bump]];
+    token::transfer_checked(
+        CpiContext::new_with_signer(
+            a.token_program.to_account_info(),
+            TransferChecked {
+                from: a.claimable.to_account_info(),
+                mint: a.usdc_mint.to_account_info(),
+                to: a.destination.to_account_info(),
+                authority: a.owner.to_account_info(),
+            },
+            &[owner_seeds],
+        ),
+        amount,
+        a.usdc_mint.decimals,
+    )?;
+    emit_cpi!(ClaimableCollected { funded: funded_key, account: a.claimable.key(), to: a.destination.key(), amount, ts: now()? });
     Ok(())
 }

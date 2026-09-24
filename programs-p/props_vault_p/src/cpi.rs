@@ -230,13 +230,16 @@ pub fn init_pda<'a, T: Data>(
     if_needed: bool,
     rent: &Rent,
 ) -> Result<(&'a mut T, u8)> {
-    let (data, bump) = init_pda_raw(payer, account, seeds, &T::DISC, T::SPACE, if_needed, rent)?;
-    // SAFETY: `init_pda_raw` returns the body of an account of at least T::SPACE bytes; T has alignment 1.
+    // SAFETY (the closure): `init_pda_raw` passes the body of an account of at least T::SPACE bytes; T has alignment 1.
+    let valid = |d: *mut u8| unsafe { &*(d as *const T) }.valid();
+    let (data, bump) = init_pda_raw(payer, account, seeds, &T::DISC, T::SPACE, if_needed, rent, valid)?;
+    // SAFETY: as above.
     Ok((unsafe { &mut *(data as *mut T) }, bump))
 }
 
-/// `init_pda` without the type (one copy of the code for every account type).
+/// `init_pda` without the type (one copy of the code for every account type). `valid` is `Data::valid` of the type.
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 fn init_pda_raw(
     payer: &AccountView,
     account: &AccountView,
@@ -245,6 +248,7 @@ fn init_pda_raw(
     space: usize,
     if_needed: bool,
     rent: &Rent,
+    valid: fn(*mut u8) -> bool,
 ) -> Result<(*mut u8, u8)> {
     let bump = init_address(account, seeds)?;
     let data = if !if_needed || account.owned_by(&SYSTEM_PROGRAM_ID) {
@@ -258,7 +262,10 @@ fn init_pda_raw(
             d.add(8)
         }
     } else {
-        load_raw(account, disc, space)?
+        // An existing account (init_if_needed) deserializes as with `load`, before the space / owner / rent checks.
+        let d = load_raw(account, disc, space)?;
+        require(valid(d), E::AccountDidNotDeserialize)?;
+        d
     };
     if if_needed {
         require(account.data_len() == space, E::ConstraintSpace)?;

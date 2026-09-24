@@ -25,6 +25,11 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"
 # programs/* only). Same release profile as the root; opt-level chosen by measurement (see PORTING.md).
 [workspace]
 
+# The Solana release whose Docker image `solana-verify build` uses (without it, it guesses 3.0.1 from Cargo.lock, whose
+# platform-tools cannot build pinocchio 0.11). 3.1.10 ships platform-tools v1.52 (Rust 1.89), as local builds use.
+[workspace.metadata.cli]
+solana = "3.1.10"
+
 [profile.release]
 overflow-checks = true
 lto = "fat"

@@ -1,5 +1,6 @@
 // An unreadable operator key file is refused without echoing any of the secret it holds. --print-for prints a transaction
-// Squads can import, and only when the dry run passes; a failing dry run exits non-zero.
+// Squads can import, and only when the dry run passes; a failing dry run exits non-zero. With --print-for, set-pauses
+// and set-params need every flag / parameter named, so no proposal carries a value read from the chain.
 import assert from 'node:assert/strict';
 import { execFile, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -9,9 +10,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
-import { Keypair, SystemInstruction, SystemProgram, Transaction, VersionedTransaction } from '@solana/web3.js';
+import { Connection, Keypair, SystemInstruction, SystemProgram, Transaction, VersionedTransaction } from '@solana/web3.js';
+import BN from 'bn.js';
 import bs58 from 'bs58';
-import { solTreasuryPda } from '@props/sdk';
+import { GMTRADE_PROGRAM_ID, PROPS_VAULT_PROGRAM_ID, PropsVaultClient, USDC_MINT, solTreasuryPda } from '@props/sdk';
 
 const script = new URL('./set-pauses.ts', import.meta.url).pathname;
 
@@ -81,6 +83,64 @@ test('--print-for prints an importable transaction for the vault, and nothing wh
     assert.match(failed.stdout, /dry run: FAILS/);
     assert.match(failed.stderr, /the dry run fails, so nothing was printed for signing/);
     assert.doesNotMatch(failed.stdout, /Import base58|dataBase58/);
+  } finally {
+    rpc.close();
+  }
+});
+
+test('--print-for: set-pauses and set-params refuse to copy an unnamed flag or parameter from the chain into a proposal', async () => {
+  // set_pauses / set_params overwrite every flag / parameter when they execute, and Squads executes an approved older
+  // proposal after a newer one: a value read from the chain at print time would undo whatever landed in between.
+  const client = new PropsVaultClient(new Connection('http://127.0.0.1:1'));
+  const n = (v: number) => new BN(v);
+  const key = () => Keypair.generate().publicKey;
+  // The chain now: payouts paused and principal cut to 1 USDC a day.
+  const config = await client.program.coder.accounts.encode('config', {
+    admin: key(), pendingAdmin: null, riskAuthorities: [], kycAuthority: key(), usdcMint: USDC_MINT, gmtradeProgram: GMTRADE_PROGRAM_ID,
+    gmtradeStore: key(), capitalVault: key(), traderShareBps: 8000, minPayout: n(50_000_000), ownerSolTarget: n(250_000_000),
+    ownerSolMin: n(100_000_000), maxDailyPrincipal: n(1_000_000), principalWindowStart: n(0), principalInWindow: n(0),
+    paused: { newEvaluations: false, trading: false, payouts: true }, feesCollected: n(0), allocatedPrincipal: n(0), payoutsPaid: n(0),
+    profitToVault: n(0), evaluationsSold: n(0), fundedActivated: n(0), fundedActive: 0, bump: 255, vaultBump: 255, feeVaultBump: 255, solTreasuryBump: 255,
+  });
+  const rpc = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => (body += chunk));
+    req.on('end', () => {
+      const { id, method } = JSON.parse(body) as { id: string; method: string };
+      const value = {
+        getAccountInfo: { data: [config.toString('base64'), 'base64'], executable: false, lamports: 1, owner: PROPS_VAULT_PROGRAM_ID.toBase58(), rentEpoch: 0, space: config.length },
+        getLatestBlockhash: { blockhash: 'GHtXQBsoZHVnNFa9YevAzFr17DJjgHXk3ycTKD5xD3Zi', lastValidBlockHeight: 1000 },
+        simulateTransaction: { err: null, logs: [], accounts: null, unitsConsumed: 150 },
+      }[method];
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify(value === undefined ? { jsonrpc: '2.0', id, error: { code: -32601, message: method } } : { jsonrpc: '2.0', id, result: { context: { slot: 1 }, value } }));
+    });
+  });
+  await new Promise<void>((resolve) => rpc.listen(0, '127.0.0.1', resolve));
+  const cluster = `http://127.0.0.1:${(rpc.address() as AddressInfo).port}`;
+  const run = (name: string, args: string[]) => promisify(execFile)(process.execPath, [new URL(name, import.meta.url).pathname, ...args,
+    '--print-for', Keypair.generate().publicKey.toBase58(), '--cluster', cluster], { encoding: 'utf8' });
+  const refused = (name: string, args: string[]) =>
+    run(name, args).then(() => assert.fail(`${name} ${args.join(' ')} printed a proposal`), (e: { code: number; stdout: string; stderr: string }) => e);
+  /** The data of the one instruction in the printed Squads transaction. */
+  const printed = (stdout: string) => Transaction.from(bs58.decode(stdout.trim().split('\n').at(-1)!)).instructions[0]!.data;
+  try {
+    const pauses = await refused('./set-pauses.ts', ['--trading', 'on']);
+    assert.equal(pauses.code, 1);
+    assert.match(pauses.stderr, /--print-for needs every flag: add --new-evaluations on\|off, --payouts on\|off/);
+    assert.doesNotMatch(pauses.stdout, /Import base58|dataBase58/);
+    const allPauses = await run('./set-pauses.ts', ['--new-evaluations', 'off', '--trading', 'on', '--payouts', 'off']);
+    assert.deepEqual(printed(allPauses.stdout),
+      client.program.coder.instruction.encode('setPauses', { paused: { newEvaluations: false, trading: true, payouts: false } }));
+
+    const params = await refused('./set-params.ts', ['--min-payout', '60']);
+    assert.equal(params.code, 1);
+    assert.match(params.stderr, /--print-for needs every parameter: add --trader-share-bps, --owner-sol-target, --owner-sol-min, --max-daily-principal/);
+    assert.doesNotMatch(params.stdout, /Import base58|dataBase58/);
+    const allParams = await run('./set-params.ts', ['--trader-share-bps', '8000', '--min-payout', '60', '--owner-sol-target', '0.25', '--owner-sol-min', '0.1', '--max-daily-principal', '1']);
+    assert.deepEqual(printed(allParams.stdout), client.program.coder.instruction.encode('setParams', {
+      params: { traderShareBps: 8000, minPayout: n(60_000_000), ownerSolTarget: n(250_000_000), ownerSolMin: n(100_000_000), maxDailyPrincipal: n(1_000_000) },
+    }));
   } finally {
     rpc.close();
   }

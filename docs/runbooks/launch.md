@@ -155,13 +155,23 @@ Railway. Keep `ADMIN_API_TOKEN` in the operators' password manager: every admin 
    cmp /tmp/props_vault.idl.json packages/sdk/src/idl/props_vault.json && echo "IDL matches"
    ```
 
+   `npm test --workspace tests/program` runs on LiteSVM 1.4 with mainnet's rent and every runtime feature that release
+   knows, among them SIMD-0459 (active on mainnet) and SIMD-0460 (pending), which police the account pointers and data
+   lengths a program passes to the runtime. `test:validator` runs on solana-test-validator 3.1 with mainnet's feature
+   set as far as 3.1 knows it: it predates both.
+
+   Every test file of both suites first prints the binary it loaded on stderr, `props_vault binary: <path> (<bytes>
+   bytes, executable hash <hash>)`, with the hash `solana-verify` computes (sha256 of the file minus its trailing
+   zeros): each of those hashes must equal `<EXECUTABLE_HASH>` from step 2, or the suites proved another file.
+
    Do not run `anchor build` after step 2: it would replace the verifiable binary.
 
 ## 4. Deploy the program and publish its IDL
 
 Rent is ≈ 5,080 lamports per byte on mainnet (2026-09-23). The program data account is sized with `--max-len`: 10 %
-headroom (≈ +0.5 SOL of rent) lets later, slightly larger releases upgrade without an `extend`, which after the handover
-needs a multisig round of its own.
+headroom (≈ +0.5 SOL of rent) lets later, slightly larger releases upgrade without an `extend`. After the handover the
+Squads vault cannot extend it, and which other route works depends on a pending loader feature (section 14.3), so choose
+`--max-len` for the largest release you expect to ship.
 
 ```sh
 SO=target/deploy/props_vault.so
@@ -232,8 +242,10 @@ Creates the Config, the fee vault and the capital vault, pins USDC and the GMTra
 spec §1 parameters (80 % trader share, 50 USDC minimum payout, owner float 0.25 SOL topped up below 0.1 SOL) and a
 daily principal cap of 2,500 USDC: `activate_funded` posts at most that much principal per day (the window opens with
 the first activation after the previous one ended). It bounds what a compromised risk or KYC key, or a tampered server
-database, can put at risk; raise it with `set-params.ts --max-daily-principal <USDC>` as the vault grows. All three
-pauses start **on**.
+database, can put at risk; raise it as the vault grows with
+`set-params.ts --trader-share-bps 8000 --min-payout 50 --owner-sol-target 0.25 --owner-sol-min 0.1 --max-daily-principal <USDC>`
+(every parameter named, as a Squads proposal needs after section 13: section 12; the other four are the current values,
+which `status.ts` prints). All three pauses start **on**.
 
 ```sh
 node scripts/admin/initialize.ts              # dry run: ok, ~86000 CU
@@ -643,7 +655,7 @@ Save draft → run the simulation → Initiate Transaction; the members approve 
 validator with a stand-in vault key, which signed and sent each printed transaction:
 
 ```sh
-node scripts/admin/set-pauses.ts --trading on --print-for <SQUADS_VAULT>
+node scripts/admin/set-pauses.ts --new-evaluations on --trading on --payouts on --print-for <SQUADS_VAULT>
 # set_pauses on mainnet-beta as <SQUADS_VAULT>: setPauses
 # dry run: ok, 15417 CU
 # instructions for <SQUADS_VAULT> to sign (program id, accounts, base58 data), for review:
@@ -652,13 +664,21 @@ node scripts/admin/set-pauses.ts --trading on --print-for <SQUADS_VAULT>
 # 4dc1C5oEagAwXJzX…ymbGLbEPuvkv
 ```
 
+Admin instructions overwrite everything they set (`set_pauses` all three flags, `set_params` all five parameters,
+`set_authorities` every authority, `upsert_*` a whole tier or market), and Squads executes an approved proposal whenever
+a member runs it, an older one after a newer one. So with `--print-for`, `set-pauses.ts` and `set-params.ts` refuse
+unless every flag (`--new-evaluations`, `--trading`, `--payouts`) or every parameter is named: a value filled in from the
+chain when the proposal is printed may be stale when it executes. And the members: reject every older pending proposal
+that sets the same thing as soon as a new one is created; before approving or executing one, compare what it sets (the
+`new` line the script printed) with `node scripts/admin/status.ts`.
+
 | Situation | Action |
 |---|---|
-| Stop new risk everywhere | `set-pauses.ts --new-evaluations on --trading on --payouts on` (`--execute`, or `--print-for` after handover). Pauses stop purchases, opens and activations, and payouts; closes, cancels and protective orders always work. |
+| Stop new risk everywhere | `set-pauses.ts --new-evaluations on --trading on --payouts on` (`--execute`, or `--print-for` after handover, then reject any older pending `set_pauses` proposal in Squads: executed later, it would undo this one). Pauses stop purchases, opens and activations, payouts and owner SOL top-ups; closes, cancels and protective orders always work. |
 | One account misbehaves | The keeper restricts accounts itself (equity at the floor, GMTrade upgrade). There is no operator route to restrict a single account by hand yet: pause trading for everyone, then investigate. |
 | Stop the keeper | Delete `RISK_AUTHORITY_KEYPAIR` from the Railway service (redeploys): the keeper keeps watching and alerting but sends nothing (`RISK_AUTHORITY_KEYPAIR is not set: the keeper watches and alerts but cannot act`), and evaluation results and payouts stay queued. That deletes the only copy of the risk key (its file went in 5.2 and a sealed value cannot be read back), and the SOL on it is lost with it, so starting the keeper again is a key rotation (5.2): `gen-authority-key.ts --role risk --out "$KEYS_DIR/risk-authority.json"`; `set-authorities.ts --risk <NEW_RISK_PUBKEY> --kyc <CURRENT_KYC_PUBKEY>` (the current KYC key from `status.ts`; `--print-for <SQUADS_VAULT>` after the handover, then Squads); fund the new key with 0.2 SOL; only then set it in Railway (`railway variable set RISK_AUTHORITY_KEYPAIR --stdin …`, redeploys), seal it and delete the file. The queued work then goes out. |
 | A hot key may be exposed | Generate a new one (`gen-authority-key.ts`), set it in Railway, then `set-authorities.ts` with the new public key: the old key loses its powers the moment that lands. |
-| GMTrade upgraded its program | The keeper alerts and restricts every active funded account. Review the release (`scripts/fixtures.sh` fails on the new hash; update the pin and run the suites against the new binary), then acknowledge it: `curl -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" https://api.<DOMAIN>/v1/admin/gmtrade-deploys/<SLOT>/acknowledge` → `{"slot":…,"acknowledgedAt":…}`. Update `GMTRADE_DEPLOY_SLOT` in Railway. |
+| GMTrade upgraded its program | The keeper alerts and restricts every active funded account. Restricted accounts get no SOL top-ups (nor does any account while trading is paused), so what the new release can take from an owner PDA is capped at its current float; if a keeper close then fails for lack of SOL, send that owner PDA some with a plain transfer (it goes back to the treasury at `close_funded`). Review the release (`scripts/fixtures.sh` fails on the new hash; update the pin and run the suites against the new binary), then acknowledge it: `curl -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" https://api.<DOMAIN>/v1/admin/gmtrade-deploys/<SLOT>/acknowledge` → `{"slot":…,"acknowledgedAt":…}`. Update `GMTRADE_DEPLOY_SLOT` in Railway. |
 | Lift restrictions | Per account, once its reason is gone: `curl -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" https://api.<DOMAIN>/v1/admin/funded/<FUNDED_ACCOUNT>/lift-restriction` → `{"id":…,"job":…}` (404 unknown account, 409 not restricted). Restricted accounts: `railway connect Postgres`, then `select address from funded_accounts where status = 'restricted';`. |
 | A chain job failed for good | Fix the cause, then `curl -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" https://api.<DOMAIN>/v1/admin/jobs/<JOB_ID>/retry` (id from the alert). |
 | RPC outage | Switch `RPC_URL` / `RPC_WS_URL` in Railway and `VITE_RPC_URL` in Vercel to another provider, redeploy both. |
@@ -736,8 +756,25 @@ node scripts/admin/fund-sol-treasury.ts --sol 0.000000001 --print-for <SQUADS_VA
    ```
 
 3. Create the upgrade in Squads from that buffer (Programs → upgrade). If the new binary is larger than the program's
-   data length (`solana program show`), extend it first — through Squads too, since the CLI requires the upgrade
-   authority, and not in the same slot as an upgrade.
+   data length (`solana program show`), the upgrade fails (`AccountDataTooSmall`): extend the program data first, not in
+   the same slot as an upgrade. Squads cannot do it (the loader refuses `ExtendProgram` as an inner instruction: "not
+   supported by inner instructions"), and `solana program extend` refuses any key but the upgrade authority. The route
+   depends on the loader feature ExtendProgramChecked (inactive on 2026-09-24):
+
+   ```sh
+   solana feature status 2oMRZEDWT2tqtYMofhmmfQ8SsjqUFzT6sYXppQDavxwz --url "$RPC_URL"
+   ```
+
+   - Inactive: any key may send a top-level `ExtendProgram` and pay the added rent. With the operator key:
+     `node scripts/admin/extend-program.ts --bytes <N>` (dry run), then the same with `--execute`.
+   - Active: `ExtendProgram` is refused everywhere ("ExtendProgram was superseded by ExtendProgramChecked"), and
+     `ExtendProgramChecked` needs the upgrade authority's signature; through Squads it adds at most 10,240 bytes per
+     execution. Either run one Squads execution per 10,240 bytes, or in one Squads transaction run the loader's
+     `SetAuthority` (allowed as an inner instruction) to hand the upgrade authority to the operator key, then
+     `solana program extend "$PROGRAM_ID" <N> --keypair "$OPERATOR_KEYPAIR" --url "$RPC_URL"` and at once
+     `solana program set-upgrade-authority "$PROGRAM_ID" --new-upgrade-authority <SQUADS_VAULT>
+     --skip-new-upgrade-authority-signer-check --keypair "$OPERATOR_KEYPAIR" --url "$RPC_URL"`. Check `solana program
+     show` names the vault again before creating the upgrade. Rehearse this on a local validator first.
 4. If the IDL changed: `anchor idl write-buffer --filepath packages/sdk/src/idl/props_vault.json "$PROGRAM_ID" …`,
    `anchor idl set-authority --program-id "$PROGRAM_ID" --new-authority <SQUADS_VAULT> <IDL_BUFFER> …`, then
    `anchor idl set-buffer --buffer <IDL_BUFFER> "$PROGRAM_ID" --print-only …` and execute the printed instruction

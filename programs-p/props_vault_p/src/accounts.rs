@@ -200,24 +200,43 @@ pub fn ata_address(wallet: &Address, mint: &Address) -> Address {
 
 // ---------- SPL Token accounts (anchor_spl::token::{TokenAccount, Mint}) ----------
 
+/// COption tag of spl-token's `Pack` layout: `[0, 0, 0, 0]` None, `[1, 0, 0, 0]` Some.
+pub const NONE: [u8; 4] = [0; 4];
+pub const SOME: [u8; 4] = [1, 0, 0, 0];
+
+fn coption_ok(tag: &[u8; 4]) -> bool {
+    *tag == NONE || *tag == SOME
+}
+
 #[repr(C)]
 pub struct TokenAccount {
     pub mint: Address,
     pub owner: Address,
     pub amount: U64,
-    _delegate: [u8; 36],
+    pub delegate_tag: [u8; 4],
+    pub delegate: Address,
     pub state: u8,
+    is_native_tag: [u8; 4],
+    _is_native: [u8; 8],
+    pub delegated_amount: U64,
+    pub close_authority_tag: [u8; 4],
+    _close_authority: [u8; 32],
 }
 
 #[repr(C)]
 pub struct Mint {
-    _mint_authority: [u8; 36],
+    mint_authority_tag: [u8; 4],
+    _mint_authority: [u8; 32],
     _supply: [u8; 8],
     pub decimals: u8,
     pub is_initialized: u8,
+    freeze_authority_tag: [u8; 4],
 }
 
-/// `Account<'info, TokenAccount>`: initialized, owned by SPL Token, `Account::unpack` (165 bytes, initialized).
+const _: () = assert!(core::mem::size_of::<TokenAccount>() == 165 && core::mem::size_of::<Mint>() == 50);
+
+/// `Account<'info, TokenAccount>`: initialized, owned by SPL Token, `Account::unpack` (165 bytes, every COption tag and
+/// the state valid, then initialized).
 /// The view reads live data: read `amount` before a CPI that moves it (Anchor keeps the value from load time).
 pub fn token_account(v: &AccountView) -> Result<&TokenAccount> {
     initialized_and_owned(v, &TOKEN_PROGRAM_ID)?;
@@ -226,6 +245,9 @@ pub fn token_account(v: &AccountView) -> Result<&TokenAccount> {
     }
     // SAFETY: 165 bytes, alignment 1.
     let t = unsafe { &*(v.data_ptr() as *const TokenAccount) };
+    if !(coption_ok(&t.delegate_tag) && coption_ok(&t.is_native_tag) && coption_ok(&t.close_authority_tag)) {
+        return Err(Error::INVALID_ACCOUNT_DATA);
+    }
     match t.state {
         0 => Err(Error::UNINITIALIZED_ACCOUNT),
         1 | 2 => Ok(t),
@@ -233,7 +255,8 @@ pub fn token_account(v: &AccountView) -> Result<&TokenAccount> {
     }
 }
 
-/// `Account<'info, Mint>`: initialized, owned by SPL Token, `Mint::unpack` (82 bytes, initialized).
+/// `Account<'info, Mint>`: initialized, owned by SPL Token, `Mint::unpack` (82 bytes, both COption tags and
+/// `is_initialized` valid, then initialized).
 pub fn mint_account(v: &AccountView) -> Result<&Mint> {
     initialized_and_owned(v, &TOKEN_PROGRAM_ID)?;
     if v.data_len() != 82 {
@@ -241,6 +264,9 @@ pub fn mint_account(v: &AccountView) -> Result<&Mint> {
     }
     // SAFETY: 82 bytes, alignment 1.
     let m = unsafe { &*(v.data_ptr() as *const Mint) };
+    if !(coption_ok(&m.mint_authority_tag) && coption_ok(&m.freeze_authority_tag)) {
+        return Err(Error::INVALID_ACCOUNT_DATA);
+    }
     match m.is_initialized {
         0 => Err(Error::UNINITIALIZED_ACCOUNT),
         1 => Ok(m),

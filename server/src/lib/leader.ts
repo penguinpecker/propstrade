@@ -6,6 +6,8 @@ import postgres from 'postgres';
 
 /** Advisory lock keys in use (one namespace for the whole app). */
 export const LOCK_KEYS = { keeper: 0x70726f70, sim: 0x73696d31, chain: 0x70726f71 } as const; // "prop", "sim1", "proq"
+/** Longest wait for any of the lock queries below; a leader that cannot get an answer in time acts as if it lost the lock. */
+const QUERY_TIMEOUT_MS = 5_000;
 
 export interface LeaderOptions {
   databaseUrl: string;
@@ -26,19 +28,30 @@ export async function runAsLeader({ databaseUrl, key, signal, log, intervalMs = 
   // The lock lives and dies with this one session, so the client must never recycle it on a timer: postgres-js
   // otherwise closes every connection after a random 30–60 min (max_lifetime), silently releasing the lock.
   const sql = postgres(databaseUrl, { max: 1, idle_timeout: 0, max_lifetime: null, onnotice: () => {} });
+  // postgres-js can lose a query issued in the instant after its session dies (it neither answers nor rejects; later
+  // queries work again), so every query here is bounded: a lost answer counts as "not held" / "not locked".
+  const bounded = async <T>(query: Promise<T>): Promise<T | undefined> => {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), QUERY_TIMEOUT_MS); });
+    try {
+      return await Promise.race([query, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   // Asks "does THIS session hold the lock", so a silent reconnect of the client cannot fake continued leadership.
   const held = async () => {
-    const [row] = await sql<{ held: boolean }[]>`
+    const rows = await bounded(sql<{ held: boolean }[]>`
       select exists (select 1 from pg_locks where locktype = 'advisory' and classid = 0 and objid = ${key}
-        and objsubid = 1 and granted and pid = pg_backend_pid()) as held`;
-    return row?.held === true;
+        and objsubid = 1 and granted and pid = pg_backend_pid()) as held`);
+    return rows?.[0]?.held === true;
   };
 
   try {
     while (!signal.aborted) {
       try {
-        const [row] = await sql<{ locked: boolean }[]>`select pg_try_advisory_lock(${key}::int) as locked`;
-        if (row?.locked) await lead();
+        const rows = await bounded(sql<{ locked: boolean }[]>`select pg_try_advisory_lock(${key}::int) as locked`);
+        if (rows?.[0]?.locked) await lead();
       } catch (err) {
         log.error({ err, key }, 'leader election failed');
       }
@@ -65,7 +78,7 @@ export async function runAsLeader({ databaseUrl, key, signal, log, intervalMs = 
     } finally {
       clearInterval(check);
       signal.removeEventListener('abort', stop);
-      await sql`select pg_advisory_unlock(${key}::int)`.catch(() => {});
+      await bounded(sql`select pg_advisory_unlock(${key}::int)`).catch(() => {});
       log.info({ key }, 'leadership released');
     }
   }

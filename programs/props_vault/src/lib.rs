@@ -163,4 +163,12 @@ pub mod props_vault {
     pub fn close_completed_order(ctx: Context<CloseCompletedOrder>) -> Result<()> {
         instructions::close_completed_order(ctx)
     }
+
+    pub fn close_empty_position(ctx: Context<CloseEmptyPosition>) -> Result<()> {
+        instructions::close_empty_position(ctx)
+    }
+
+    pub fn collect_claimable(ctx: Context<CollectClaimable>) -> Result<()> {
+        instructions::collect_claimable(ctx)
+    }
 }

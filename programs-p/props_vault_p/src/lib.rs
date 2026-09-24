@@ -87,6 +87,8 @@ pub mod disc {
     pub const SYNC: u64 = 0x58bd9d15a428db04;
     pub const TOP_UP_OWNER: u64 = 0xd37d3413550dd12e;
     pub const CLOSE_COMPLETED_ORDER: u64 = 0x9f2700ed03bb15b3;
+    pub const CLOSE_EMPTY_POSITION: u64 = 0x3bfaebed268a69af;
+    pub const COLLECT_CLAIMABLE: u64 = 0x803e6bea4c65abe0;
     /// anchor_lang::idl::IDL_IX_TAG: Anchor's onchain-IDL instructions (not provided, as with Anchor's `no-idl`).
     pub const IDL_IX_TAG: u64 = 0x0a69e9a778bcf440;
     /// anchor_lang::event::EVENT_IX_TAG: the event self-CPI.
@@ -130,6 +132,8 @@ fn dispatch(accounts: &[AccountView], data: &[u8]) -> Result {
         disc::SYNC => crank::sync(accounts, args),
         disc::TOP_UP_OWNER => crank::top_up_owner(accounts, args),
         disc::CLOSE_COMPLETED_ORDER => crank::close_completed_order(accounts, args),
+        disc::CLOSE_EMPTY_POSITION => crank::close_empty_position(accounts, args),
+        disc::COLLECT_CLAIMABLE => crank::collect_claimable(accounts, args),
         disc::EVENT_IX_TAG => events::receive(accounts),
         disc::IDL_IX_TAG => Err(E::IdlInstructionStub.into()),
         _ => Err(E::InstructionFallbackNotFound.into()),
@@ -193,6 +197,8 @@ mod tests {
             ("sync", SYNC),
             ("top_up_owner", TOP_UP_OWNER),
             ("close_completed_order", CLOSE_COMPLETED_ORDER),
+            ("close_empty_position", CLOSE_EMPTY_POSITION),
+            ("collect_claimable", COLLECT_CLAIMABLE),
         ];
         for (name, v) in ixs {
             assert_eq!(u64::from_le_bytes(sha8(&format!("global:{name}"))), v, "{name}");
@@ -219,8 +225,10 @@ mod tests {
             ("AccountRestricted", ev::ACCOUNT_RESTRICTED),
             ("CapitalDeposited", ev::CAPITAL_DEPOSITED),
             ("CapitalWithdrawn", ev::CAPITAL_WITHDRAWN),
+            ("ClaimableCollected", ev::CLAIMABLE_COLLECTED),
             ("CompletedOrderClosed", ev::COMPLETED_ORDER_CLOSED),
             ("ConfigChanged", ev::CONFIG_CHANGED),
+            ("EmptyPositionClosed", ev::EMPTY_POSITION_CLOSED),
             ("EvaluationPurchased", ev::EVALUATION_PURCHASED),
             ("EvaluationResolved", ev::EVALUATION_RESOLVED),
             ("FeesSwept", ev::FEES_SWEPT),
@@ -247,6 +255,7 @@ mod tests {
             ("create_order_v2", gmtrade::ix::CREATE_ORDER_V2),
             ("close_order_v2", gmtrade::ix::CLOSE_ORDER_V2),
             ("update_order_v2", gmtrade::ix::UPDATE_ORDER_V2),
+            ("close_empty_position", gmtrade::ix::CLOSE_EMPTY_POSITION),
         ];
         for (name, d) in gm {
             assert_eq!(sha8(&format!("global:{name}")), d, "{name}");

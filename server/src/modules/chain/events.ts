@@ -50,6 +50,8 @@ export type VaultEvent =
   | { name: 'completedOrderClosed'; data: { funded: Key; order: Key; ts: U64 } }
   | { name: 'synced'; data: { funded: Key; slots: SlotSnapshot[]; ordersDropped: Key[]; ts: U64 } }
   | { name: 'ownerToppedUp'; data: { funded: Key; lamports: U64; ts: U64 } }
+  | { name: 'emptyPositionClosed'; data: { funded: Key; position: Key; lamports: U64; ts: U64 } }
+  | { name: 'claimableCollected'; data: { funded: Key; account: Key; to: Key; amount: U64; ts: U64 } }
   | { name: 'payoutRequested'; data: {
     funded: Key; request: Key; seq: number; balance: U64; profit: U64; traderAmount: U64; vaultAmount: U64; ts: U64;
   } }

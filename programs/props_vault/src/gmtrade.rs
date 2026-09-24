@@ -1,12 +1,16 @@
 //! GMTrade (gmsol-store v0.10.0) integration: account layouts read by fixed offsets and the CPIs we make.
 //! Never call `gmsol_programs::gmsol_store::utils::Account::try_from` onchain (23 KB stack frame).
-use anchor_lang::{prelude::*, Discriminator};
-use anchor_spl::associated_token;
+//! GMTrade is upgradeable, so every CPI the owner PDA signs writable is bounded afterwards (`UnexpectedGmtradeEffect`):
+//! the owner PDA stays data-less and system-owned and loses at most the rent and fees the call is for, and the owner's
+//! USDC account, when GMTrade gets it, keeps its owner, gets no delegate or close authority, and changes only by the
+//! order's collateral.
+use anchor_lang::{prelude::*, solana_program::program_pack::Pack, Discriminator};
+use anchor_spl::{associated_token, token};
 use gmsol_programs::gmsol_store::{
     accounts::{Market, Order, Position},
     cpi::{
         self,
-        accounts::{CloseOrderV2, CreateOrderV2, PreparePosition, PrepareUser, UpdateOrderV2},
+        accounts::{CloseEmptyPosition, CloseOrderV2, CreateOrderV2, PreparePosition, PrepareUser, UpdateOrderV2},
     },
     types::{CreateOrderParams, DecreasePositionSwapType, OrderKind, UpdateOrderParams},
 };
@@ -42,6 +46,9 @@ pub mod layout {
     pub const POSITION_SIZE_IN_USD: usize = 216;
 
     pub const ORDER_LEN: usize = 2472;
+    /// UserHeader (`prepare_user`): 8 + `UserHeader::space(0)`.
+    pub const USER_LEN: usize = 520;
+    pub const TOKEN_ACCOUNT_LEN: usize = 165;
     pub const ORDER_ACTION_STATE: usize = 9;
     pub const ORDER_INITIAL_COLLATERAL_ESCROW: usize = 592;
     pub const ORDER_FINAL_OUTPUT_ESCROW: usize = 656;
@@ -66,6 +73,40 @@ fn u128_at(data: &[u8], offset: usize) -> u128 {
 
 fn is_absent(ai: &AccountInfo) -> bool {
     ai.owner == &System::id() && ai.data_is_empty()
+}
+
+/// Lamports one order takes from its owner: the escrow ATA and the Order account's rent, and the keeper's execution fee.
+/// It is also what GMTrade reserves in a new Position for a liquidation order (`Order::position_cut_rent`, pure market).
+fn order_cost(rent: &Rent) -> u64 {
+    rent.minimum_balance(TOKEN_ACCOUNT_LEN) + rent.minimum_balance(ORDER_LEN) + EXECUTION_LAMPORTS
+}
+
+/// The owner PDA after a GMTrade CPI it signed writable: still data-less and system-owned (a GMTrade that took it over
+/// would strand everything it controls) and at most `spend` lamports poorer.
+fn check_owner(owner: &AccountInfo, before: u64, spend: u64) -> Result<()> {
+    require!(
+        *owner.owner == System::id() && owner.data_is_empty() && owner.lamports() >= before.saturating_sub(spend),
+        VaultError::UnexpectedGmtradeEffect
+    );
+    Ok(())
+}
+
+/// The owner's USDC account after a GMTrade CPI that got it: still a USDC account of `owner`, with no delegate and no
+/// close authority, holding between `min` and `max`.
+fn check_usdc(ai: &AccountInfo, owner: &Pubkey, min: u64, max: u64) -> Result<()> {
+    let ok = *ai.owner == token::ID
+        && match token::spl_token::state::Account::unpack(&ai.try_borrow_data()?) {
+            Ok(t) => {
+                t.owner == *owner
+                    && t.delegate.is_none()
+                    && t.close_authority.is_none()
+                    && t.amount >= min
+                    && t.amount <= max
+            }
+            Err(_) => false,
+        };
+    require!(ok, VaultError::UnexpectedGmtradeEffect);
+    Ok(())
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
@@ -275,6 +316,13 @@ impl<'info> CreateOrderCpi<'info> {
     /// Creates the order. For increases, `source` is the owner's USDC account and the user and position
     /// accounts are prepared first. Receiver is always the owner PDA.
     pub fn invoke(&self, signer: &[&[&[u8]]], nonce: [u8; 32], params: CreateOrderParams, source: Option<AccountInfo<'info>>) -> Result<()> {
+        let lamports = self.owner.lamports();
+        let usdc = match &source {
+            Some(s) => token::accessor::amount(s)?,
+            None => 0,
+        };
+        let collateral = params.initial_collateral_delta_amount;
+        let source_after = source.clone();
         associated_token::create_idempotent(CpiContext::new_with_signer(
             self.associated_token_program.clone(),
             associated_token::Create {
@@ -353,7 +401,18 @@ impl<'info> CreateOrderCpi<'info> {
             nonce,
             params,
             None,
-        )
+        )?;
+
+        // An increase may also pay for the user account, the position and its liquidation reserve, and moves exactly the
+        // collateral out of the source.
+        let rent = Rent::get()?;
+        let mut spend = order_cost(&rent);
+        if let Some(s) = &source_after {
+            spend += order_cost(&rent) + rent.minimum_balance(USER_LEN) + rent.minimum_balance(POSITION_LEN);
+            let left = usdc.saturating_sub(collateral);
+            check_usdc(s, self.owner.key, left, left)?;
+        }
+        check_owner(&self.owner, lamports, spend)
     }
 }
 
@@ -387,6 +446,8 @@ impl<'info> CloseOrderCpi<'info> {
                 pubkey_at(&data, ORDER_FINAL_OUTPUT_ESCROW) != Pubkey::default(),
             )
         };
+        let lamports = self.owner.lamports();
+        let usdc = token::accessor::amount(&self.owner_usdc)?;
         let some = |ai: &AccountInfo<'info>, yes: bool| yes.then(|| ai.clone());
         cpi::close_order_v2(
             CpiContext::new_with_signer(
@@ -426,8 +487,29 @@ impl<'info> CloseOrderCpi<'info> {
                 signer,
             ),
             reason.to_string(),
-        )
+        )?;
+        // Closing only ever pays the owner: escrowed funds to its USDC account, rent to the PDA.
+        check_usdc(&self.owner_usdc, self.owner.key, usdc, u64::MAX)?;
+        check_owner(&self.owner, lamports, 0)
     }
+}
+
+/// `close_empty_position` as the owner PDA: GMTrade closes an empty Position of the owner (it refuses one that is not
+/// empty) and sends its lamports, rent and liquidation reserve, to the owner.
+pub fn close_empty_position<'info>(
+    program: AccountInfo<'info>,
+    owner: AccountInfo<'info>,
+    store: AccountInfo<'info>,
+    position: AccountInfo<'info>,
+    signer: &[&[&[u8]]],
+) -> Result<()> {
+    let lamports = owner.lamports();
+    cpi::close_empty_position(CpiContext::new_with_signer(
+        program,
+        CloseEmptyPosition { owner: owner.clone(), store, position },
+        signer,
+    ))?;
+    check_owner(&owner, lamports, 0)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -512,6 +594,54 @@ mod tests {
         let long = read_position_state(&fixture(positions[0])).unwrap();
         assert!(long.size_usd > 0 && long.collateral > 0, "the open fixture must be non-flat");
         assert_eq!(read_position_state(&fixture(positions[2])).unwrap(), PositionState::default());
+    }
+
+    /// A USDC token account image: owner field `owner`, `amount`, and the delegate / close authority tags given.
+    fn usdc_image(owner: &Pubkey, amount: u64, delegate: bool, close_authority: bool) -> Vec<u8> {
+        let mut d = vec![0u8; TOKEN_ACCOUNT_LEN];
+        d[32..64].copy_from_slice(owner.as_ref());
+        d[64..72].copy_from_slice(&amount.to_le_bytes());
+        d[72] = delegate as u8;
+        d[108] = 1; // initialized
+        d[129] = close_authority as u8;
+        d
+    }
+
+    #[test]
+    fn post_cpi_bounds_refuse_what_the_call_did_not_ask_for() {
+        let is_bad = |r: Result<()>| r == Err(error!(VaultError::UnexpectedGmtradeEffect));
+        let pda = Pubkey::new_from_array([9; 32]);
+        let (system, gmtrade_id) = (System::id(), gmsol_programs::gmsol_store::ID);
+
+        // The owner PDA: system-owned, no data, at most `spend` lamports poorer.
+        let (mut lamports, mut empty) = (1_000u64, vec![]);
+        let owner = AccountInfo::new(&pda, true, true, &mut lamports, &mut empty, &system, false, 0);
+        assert!(check_owner(&owner, 1_000, 0).is_ok());
+        assert!(check_owner(&owner, 1_300, 300).is_ok());
+        assert!(is_bad(check_owner(&owner, 1_301, 300)));
+        let (mut lamports, mut empty) = (0u64, vec![]);
+        let taken = AccountInfo::new(&pda, true, true, &mut lamports, &mut empty, &gmtrade_id, false, 0);
+        assert!(is_bad(check_owner(&taken, 0, u64::MAX)));
+        let (mut lamports, mut one) = (0u64, vec![0u8]);
+        let with_data = AccountInfo::new(&pda, true, true, &mut lamports, &mut one, &system, false, 0);
+        assert!(is_bad(check_owner(&with_data, 0, u64::MAX)));
+
+        // The owner's USDC account: the owner's, no delegate, no close authority, balance within bounds.
+        let key = Pubkey::new_from_array([8; 32]);
+        let check = |image: Vec<u8>, program: &Pubkey, owner: &Pubkey, min: u64, max: u64| {
+            let (mut lamports, mut data) = (0u64, image);
+            let ai = AccountInfo::new(&key, false, true, &mut lamports, &mut data, program, false, 0);
+            check_usdc(&ai, owner, min, max)
+        };
+        let token_id = token::ID;
+        assert!(check(usdc_image(&pda, 400, false, false), &token_id, &pda, 400, 400).is_ok());
+        assert!(check(usdc_image(&pda, 400, false, false), &token_id, &pda, 300, u64::MAX).is_ok());
+        assert!(is_bad(check(usdc_image(&pda, 400, false, false), &token_id, &pda, 401, u64::MAX)));
+        assert!(is_bad(check(usdc_image(&pda, 400, false, false), &token_id, &pda, 0, 399)));
+        assert!(is_bad(check(usdc_image(&pda, 400, false, false), &token_id, &Pubkey::new_from_array([1; 32]), 400, 400)));
+        assert!(is_bad(check(usdc_image(&pda, 400, true, false), &token_id, &pda, 400, 400)));
+        assert!(is_bad(check(usdc_image(&pda, 400, false, true), &token_id, &pda, 400, 400)));
+        assert!(is_bad(check(vec![], &system, &pda, 0, u64::MAX)));
     }
 
     #[test]

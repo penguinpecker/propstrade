@@ -2,6 +2,12 @@
 members = ["programs/*"]
 resolver = "2"
 
+# The Solana release whose Docker image `solana-verify build` uses (without it, it guesses 2.3.0 from Cargo.lock, whose
+# platform-tools cannot build this lockfile's edition-2024 crates). 3.1.10 ships platform-tools v1.52 (Rust 1.89), as
+# local builds use.
+[workspace.metadata.cli]
+solana = "3.1.10"
+
 [profile.release]
 overflow-checks = true
 lto = "fat"

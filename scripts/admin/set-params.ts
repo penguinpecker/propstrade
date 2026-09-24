@@ -1,20 +1,24 @@
-// Changes the Config parameters. Parameters not given keep their current onchain value. Evaluations and funded
-// accounts keep the terms pinned at purchase; the trader share of a funded account is part of those terms.
+// Changes the Config parameters. Parameters not given keep their current onchain value, except with --print-for:
+// set_params sets all five when it executes, and Squads executes an approved older proposal after a newer one, so a
+// value copied from the chain now could undo a later change (a lowered --max-daily-principal). There every parameter
+// must be named. Evaluations and funded accounts keep the terms pinned at purchase; the trader share of a funded
+// account is part of those terms.
 import BN from 'bn.js';
 import { formatUnits, fromMicro, parseUnits, toMicro } from '@props/sdk';
 import { main, setUp, submit } from './lib.ts';
 
+const PARAMS = ['trader-share-bps', 'min-payout', 'owner-sol-target', 'owner-sol-min', 'max-daily-principal'] as const;
+
 main(async () => {
   const ctx = setUp(
-    'node scripts/admin/set-params.ts [--trader-share-bps 8000] [--min-payout <USDC>] [--owner-sol-target <SOL>] [--owner-sol-min <SOL>] [--max-daily-principal <USDC>] [--cluster ...] [--execute]',
-    {
-      'trader-share-bps': { type: 'string' },
-      'min-payout': { type: 'string' },
-      'owner-sol-target': { type: 'string' },
-      'owner-sol-min': { type: 'string' },
-      'max-daily-principal': { type: 'string' },
-    },
+    'node scripts/admin/set-params.ts [--trader-share-bps 8000] [--min-payout <USDC>] [--owner-sol-target <SOL>] [--owner-sol-min <SOL>] [--max-daily-principal <USDC>] [--cluster ...] [--execute]\n' +
+      '  With --print-for, name all five: the proposal sets every parameter when it executes.',
+    Object.fromEntries(PARAMS.map((p) => [p, { type: 'string' as const }])),
   );
+  const missing = PARAMS.filter((p) => ctx.values[p] === undefined);
+  if (!ctx.operator && missing.length) {
+    throw new Error(`--print-for needs every parameter: add ${missing.map((p) => `--${p}`).join(', ')} (the proposal sets all five when it executes, whatever the chain says then)`);
+  }
   const config = await ctx.vault.fetchConfig();
   if (!config) throw new Error('props_vault is not initialized on this cluster');
   const value = (name: string) => (ctx.values[name] === undefined ? undefined : String(ctx.values[name]));

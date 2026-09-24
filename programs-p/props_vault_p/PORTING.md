@@ -14,15 +14,18 @@ same `emit_cpi!` events, same error numbers and error log lines. The IDL in `pac
 | `trader.rs` | `trader.rs` | buy_evaluation, activate_funded, request_payout, cancel_payout | ported |
 | `trading.rs` | `trading.rs` | open_position, close_position, set_protection, update_order, cancel_order | ported |
 | `risk.rs` | `risk.rs` | set_identity, record_evaluation_result, approve_payout, reject_payout, restrict, mark_breached, close_funded | ported |
-| `crank.rs` | `crank.rs` | sync, top_up_owner, close_completed_order | ported |
+| `crank.rs` | `crank.rs` | sync, top_up_owner, close_completed_order, close_empty_position, collect_claimable | ported |
 
-All 31 instructions are ported: `src/lib.rs` dispatches every discriminator, the event self-CPI and Anchor's IDL tag,
-and the suite passes 60/60 on this build as on the Anchor build.
+All 33 instructions are ported (the last two were added to both builds by the round-1 audit fixes): `src/lib.rs`
+dispatches every discriminator, the event self-CPI and Anchor's IDL tag, and the suite passes 76/76 on this build as on
+the Anchor build.
 
-Binary: 162,800 bytes (145,120 before the payout and risk actions, 88,856 before trading and the cranks, 64,128 with
-admin only; the Anchor build is 981,640 bytes). Trading brought in the GMTrade CPI builders (`CreateOrder::invoke`
-4.2 KB, `CloseOrder::invoke` 2.1 KB, `update_order` 1 KB); the largest handlers are sync 7.3 KB, open_position 6 KB,
-activate_funded 5.6 KB, update_order 4.9 KB and approve_payout 4.1 KB.
+Binary: 172,536 bytes (172,512 before the round-3 audit fixes, 172,496 before round 2, 162,800 before round 1, 145,120
+before the payout and risk actions, 88,856 before trading and the cranks, 64,128 with admin only; the Anchor build is
+1,021,016 bytes, 1,020,520 before round 3, 1,020,160 before round 2, 981,640 before the audit fixes).
+Trading brought in the GMTrade CPI builders (`CreateOrder::invoke` 4.2 KB, `CloseOrder::invoke` 2.1 KB, `update_order`
+1 KB); the largest handlers are sync 7.3 KB, open_position 6 KB, activate_funded 5.6 KB, update_order 4.9 KB and
+approve_payout 4.1 KB.
 
 ## Build, test, compare
 
@@ -31,11 +34,20 @@ export PATH=$HOME/.cargo/bin:$HOME/.local/share/solana/install/active_release/bi
 cargo build-sbf --manifest-path programs-p/props_vault_p/Cargo.toml --sbf-out-dir target/deploy   # → target/deploy/props_vault_p.so
 cargo test --manifest-path programs-p/props_vault_p/Cargo.toml     # every hard-coded discriminator and PDA vs its sha256 / find_program_address; GMTrade CPI helpers refuse any other program
 cd tests/program && PROPS_VAULT_SO=$PWD/../../target/deploy/props_vault_p.so npm test          # the suite on this build
-cd tests/program && npm test                                                                    # the suite on the Anchor build (60/60)
-node programs-p/props_vault_p/compare/admin.ts                    # byte-level diff against the Anchor build (needs both .so files); also trader.ts, risk.ts, trading.ts, crank.ts
-cd tests/program && PROPS_VAULT_SO=... npm run test:validator    # solana-test-validator, mainnet feature set (needs ports 18001/18899/19900)
+cd tests/program && npm test                                                                    # the suite on the Anchor build (76/76)
+node programs-p/props_vault_p/compare/admin.ts                    # byte-level diff against the Anchor build (needs both .so files; PROPS_VAULT_SO picks the Pinocchio side); also trader.ts, risk.ts, trading.ts, crank.ts, audit.ts
+node programs-p/props_vault_p/fuzz/run.ts                         # the differential fuzz campaign on both builds (fixed seeds, about an hour, PROPS_VAULT_SO picks the Pinocchio side, exit 1 on any difference or violation)
+cd tests/program && PROPS_VAULT_SO=... npm run test:validator    # solana-test-validator 3.1, mainnet's features as far as 3.1 knows them (needs ports 18001/18899/19900)
 rustfmt --edition 2021 --config max_width=120,use_small_heuristics=Max programs-p/props_vault_p/src/lib.rs
 ```
+
+The suite and the compare scenarios run on LiteSVM 1.4's runtime (`tests/program/src/env.ts` drives its native binding
+with the web3.js API the suites use) with every feature it knows and mainnet's Rent sysvar (5,080 lamports per byte).
+Two of those features police what this build does by hand, and neither litesvm 0.8 nor solana-test-validator 3.1 has
+them: SIMD-0459 (active on mainnet since slot 429,840,000) refuses CPI account infos whose pointers are not the input
+region's (`cpi::invoke` builds them only from `AccountView`s), and SIMD-0460 (pending) bounds every access to an
+account's data by its current length (a read past it fails instead of returning the zeros of the resize padding; the
+views' lengths are checked by `load_raw`, `Config::load` and `token_account`). `Env` refuses a LiteSVM without them.
 
 The crate has its own `[workspace]` so the Anchor build's `Cargo.toml`, `Cargo.lock` and output are untouched
 (`anchor build` still produces a byte-identical `props_vault.so`). Release profile as the root: `overflow-checks = true`,
@@ -49,8 +61,9 @@ inner instruction = events and CPIs: stack height, program, account list in orde
 (lamports, owner, data). The signer/writable flags of CPI accounts are not in the transaction metadata, so check those
 against the IDL by reading. Add
 `compare/<your file>.ts` for your instructions (copy `admin.ts`) and keep it at 0 differences. It prints compute units
-side by side. LiteSVM's `airdrop` below the zero-data rent minimum (890,880 lamports) fails without a word, so pre-fund a
-PDA with at least that to reach Anchor's transfer + allocate + assign path (1,000,000 is below every account's rent).
+side by side. LiteSVM's `airdrop` below the zero-data rent minimum (650,240 lamports at mainnet rent) fails without a
+word, so pre-fund a PDA with at least that to reach Anchor's transfer + allocate + assign path (1,000,000 is below the
+rent of every account of 69 bytes or more: all of ours but the 41-byte IdentityLock).
 `trading.ts` exports raw writers for state no instruction reaches directly (funded status, slot and order sums,
 `order_seq`, open interest, GMTrade order state; offsets checked against the IDL decoder) that `crank.ts`, `trader.ts`
 and `risk.ts` reuse. A `program` account (the last `#[event_cpi]` account) that is not this program makes the event
@@ -59,19 +72,59 @@ owner PDA's 0.25 SOL float covers about four GMTrade positions and four orders: 
 (custom error 1), so airdrop more to owners that open more. The SDK's `cancelOrder` / `updateOrder` builders throw for an
 order the account does not track: build those refusals by swapping the order key into a valid instruction.
 
+### Differential fuzzer
+
+`fuzz/run.ts` runs the two seeded differential fuzzers of the round-3 audit over a fixed seed list, two LiteSVM
+processes at a time (a job runs the Anchor child, then the Pinocchio child, on the same seed, deterministic keys and
+clock), writes every job's log and JSON summary to `FUZZ_LOG_DIR` (default: a temp dir it names), prints records,
+transactions sent, successes, per-action coverage, differences, violations and elapsed time, and exits 1 on any build
+difference, invariant violation or crashed job. `FUZZ_QUICK=1` runs the first job of each fuzzer (a minute) to check
+the wiring.
+
+- `fuzz/seqfuzz.ts` (`FIRST_SEED=<n> node programs-p/props_vault_p/fuzz/seqfuzz.ts <seeds> <steps>`): a stateful
+  sequence over all 33 instructions, committing SDK-built valid steps, hostile mutations (an account substituted from
+  every address the run has seen plus foreign lookalikes, a signer swapped for another key it holds, a writable flag
+  flipped, one account duplicated into another slot, remaining accounts appended or dropped, a data byte changed),
+  stranger donations, whole instructions built for someone else's accounts and signed by any held key, and GMTrade
+  keeper emulation (fills, GMTrade-side cancels and completions, liquidations, profit, claimable accounts). Per step it
+  compares the outcome, the inner instructions and a digest of every touched account across the builds, and checks an
+  authorization oracle (which signer may make each instruction succeed; round 3's `top_up_owner` rule: an Active
+  account only, never while trading is paused) and value-flow invariants (no lamport or USDC gain for a trader or
+  stranger except a payout's exact `trader_amount`; owner PDAs data-less and system-owned; the capital vault, fee
+  vault, SOL treasury and owner USDC lose value only in the instructions allowed to move it). `SANITY=1` proves the
+  detectors fire: 3 violations on each build (a real USDC transfer to a stranger, a gated success mislabelled
+  `close_funded`, a success mislabelled `top_up_owner`), exit 1.
+- `fuzz/invariants.ts` (`FUZZ_SEED=<n> FUZZ_STEPS=400 node programs-p/props_vault_p/fuzz/invariants.ts`): the
+  same-seed money run with invariants I1-I8 (per-transaction USDC and lamport conservation, the capital-vault ledger,
+  `allocated_principal` / `funded_active`, data-less owner PDAs, payouts only from realized profit and split as the
+  terms say, stranger and risk wallets never gain, trader ATAs gain only through `approve_payout` and by exactly
+  `payouts_paid`), a keeper emulation with liquidations and windfalls, and a byte-for-byte diff of every transaction
+  record and tracked account between the builds. `FUZZ_SELFTEST=1` proves the detectors fire (a wrong I3 expectation
+  at step 50 on both builds, one extra lamport on the Pinocchio side as a build difference), `FUZZ_CODES=1` prints the
+  error codes per action.
+
+The seed list is fixed in `run.ts`: seqfuzz seeds 1..1000 at 250 steps (five seeds per process: a child keeps about
+200 MB per seed it ran) and invariants seeds 1..600 at 400 steps: 340,780 transactions (179,485 succeeded) in 59 minutes
+on an M-series laptop with nothing else heavy running (a child takes up to 1 GB), 0 differences and 0 violations on
+2026-09-24 (run twice on the final binaries). To reproduce a failing seed, run that fuzzer
+alone with the seed the summary names (`FIRST_SEED=<seed> … seqfuzz.ts 1 250`, or `FUZZ_SEED=<seed> FUZZ_STEPS=400 …
+invariants.ts`): seqfuzz prints the first divergent step of the seed with its label and mutation, invariants the first
+five differing records. A hit is a harness bug or a program problem: triage it before touching production code (the one
+hit so far was the harness dropping the allowed payout amount under a mutation).
+
 ## Module map
 
 | File | What it holds |
 |---|---|
 | `src/lib.rs` | program id, entrypoint (pinocchio's input parser; the error code goes out as is), `process_instruction` (program id check, dispatch, one error log line), instruction discriminators, host test of every constant |
-| `src/error.rs` | `E` (every Anchor framework code we raise + `VaultError` 6000..6041), `Error` / `Result` (register-sized), `require`, the Anchor-format error log |
-| `src/state.rs` | seeds, limits, math helpers (`to_gm_usd`, `apply_bps`), LE field types, every account layout with its discriminator, `load::<T>`, the `Config` view, instruction arg structs (`ConfigParams`, `TierParams`, `MarketParams`, `Pauses`), enum constants, the Anchor state helpers (`FundedAccount::find_slot`, `track_order`, `Terms::loss_allowance`, `MarketConfig::apply_oi_change`, `ConfigTail::allocate_daily_principal`, ...) |
+| `src/error.rs` | `E` (every Anchor framework code we raise + `VaultError` 6000..6043), `Error` / `Result` (register-sized), `require`, the Anchor-format error log |
+| `src/state.rs` | seeds, limits, math helpers (`to_gm_usd`, `apply_bps`), LE field types, every account layout with its discriminator and `Data::valid` (the bool and enum bytes borsh accepts), `load::<T>`, the `Config` view, instruction arg structs (`ConfigParams`, `TierParams`, `MarketParams`, `Pauses`), enum constants, the Anchor state helpers (`FundedAccount::find_slot`, `track_order`, `Terms::loss_allowance`, `MarketConfig::apply_oi_change`, `ConfigTail::allocate_daily_principal`, ...) |
 | `src/accounts.rs` | program ids, singleton PDAs (`CONFIG_PDA`, `VAULT_PDA`, `FEE_VAULT_PDA`, `SOL_TREASURY_PDA`, `EVENT_AUTHORITY_PDA`), Anchor account types and constraints (`take`, `signer`, `system_account`, `program_account`, `mutable`, `keys_eq`, `singleton`, `seeds`, `find_seeds`, `check_event_authority`, `token_account`, `mint_account`, `token_constraint`, `associated_token_constraint`), PDA syscalls, `ata_address`, `now()`, `Rent`, the borsh reader `Args` |
 | `src/cpi.rs` | one `invoke` for every CPI, system/token/ATA instructions with the Anchor build's layouts, `top_up_from_treasury`, Anchor `init` / `init_if_needed` (`init_pda`, `init_token_pda`, `init_ata_if_needed`, `create_account_anchor`), the borsh writer `Buf` |
 | `src/events.rs` | event discriminators, `ConfigChange` indexes, `event::<N>(disc)`, `emit`, `receive` (the self-CPI's receiving end) |
-| `src/gmtrade.rs` | GMTrade layouts and readers (`position_state`, `check_position_identity`, `verified_position_size`, `is_pending_order`, `check_pure_usdc_market`), `order_params`, CPIs `CreateOrder::invoke` (escrow ATA + `prepare_user` + `prepare_position` + `create_order_v2`), `CloseOrder::invoke` (`close_order_v2`), `update_order` (`update_order_v2`) |
+| `src/gmtrade.rs` | GMTrade layouts and readers (`position_state`, `check_position_identity`, `verified_position_size`, `is_pending_order`, `check_pure_usdc_market`), `order_params`, CPIs `CreateOrder::invoke` (escrow ATA + `prepare_user` + `prepare_position` + `create_order_v2`), `CloseOrder::invoke` (`close_order_v2`), `update_order` (`update_order_v2`), `close_empty_position`, and the bounds checked after each CPI the owner PDA signs writable (`check_owner`, `check_usdc`) |
 | `src/ix/*.rs` | handlers, one file per Anchor instruction file |
-| `compare/` | the byte-level diff harness and one scenario per instruction file |
+| `compare/` | the byte-level diff harness, one scenario per instruction file, and `audit.ts` (the round-1 and round-2 audit fixes) |
 
 You should not need to edit the shared modules. If you must, add to them (do not reshape existing helpers) and say so,
 since three ports run in parallel.
@@ -122,8 +175,8 @@ the Anchor build's when several things are wrong at once.
 | `Signer<'info>` | `signer(v)?` | AccountNotSigner (3010) |
 | `SystemAccount<'info>` | `system_account(v)?` | AccountNotSystemOwned (3011) |
 | `Program<'info, T>` | `program_account(v, &ID)?` | InvalidProgramId (3008), InvalidProgramExecutable (3009) |
-| `Account<'info, T>` (ours; `Box` or not) | `load::<T>(v)?`, `Config::load(v)?` | AccountNotInitialized (3012), AccountOwnedByWrongProgram (3007), AccountDiscriminatorNotFound (3001), AccountDiscriminatorMismatch (3002), AccountDidNotDeserialize (3003) |
-| `Account<'info, TokenAccount>` / `Account<'info, Mint>` | `token_account(v)?` / `mint_account(v)?` | 3012, 3007, then runtime InvalidAccountData / UninitializedAccount (Anchor's `unpack`) |
+| `Account<'info, T>` (ours; `Box` or not) | `load::<T>(v)?`, `Config::load(v)?` | AccountNotInitialized (3012), AccountOwnedByWrongProgram (3007), AccountDiscriminatorNotFound (3001), AccountDiscriminatorMismatch (3002), AccountDidNotDeserialize (3003; also a bool byte above 1 or an enum byte past its last variant, `Data::valid`) |
+| `Account<'info, TokenAccount>` / `Account<'info, Mint>` | `token_account(v)?` / `mint_account(v)?` | 3012, 3007, then runtime InvalidAccountData (length, a COption tag other than None/Some, the state / is_initialized byte) / UninitializedAccount (Anchor's `unpack`, in that order) |
 | `UncheckedAccount`, `AccountInfo` | nothing | |
 | `init, payer, space, seeds = [..], bump` | `init_pda::<T>(payer, v, &[..], false, &rent)?` → `(&mut T, bump)` | ConstraintSeeds (2006), system program "already in use", TryingToInitPayerAsProgramAccount (4101), ConstraintMut (2000) |
 | `init_if_needed, ...` | `init_pda::<T>(payer, v, &[..], true, &rent)?` | the above + the load errors + ConstraintSpace (2019), ConstraintOwner (2004), ConstraintRentExempt (2005) |
@@ -154,7 +207,9 @@ the Anchor build's when several things are wrong at once.
 
 - `load::<T>(view)` returns `&mut T` over the account data (zero-copy, little-endian fields: `.get()` / `.set(v)`;
   bools are `Bool`, enums are `u8` with constants in `state::{evaluation_status, funded_status, order_type,
-  payout_status}`). `Config::load` gives a view whose fixed tail derefs to `ConfigTail` (`c.min_payout.get()`,
+  payout_status}`). It refuses the bool and enum bytes borsh refuses (`Data::valid`, AccountDidNotDeserialize), and so
+  does `init_pda` for an account that already exists; a new account type with a bool or enum field must override
+  `valid`. `Config::load` gives a view whose fixed tail derefs to `ConfigTail` (`c.min_payout.get()`,
   `c.paused`, ...); `c.admin()`, `c.pending_admin()`, `c.risk_authorities()`, `c.is_risk_authority(k)` read the
   variable part, and `set_admin`, `set_pending_admin`, `set_risk_authorities` rewrite it as Anchor's re-serialization
   does (bytes after the new end are left alone, like Anchor).
@@ -216,7 +271,15 @@ gmtrade::CreateOrder { owner, store: gm_store, market: gm_market, user: gm_user,
 The owner PDA signs these CPIs and is the authority of the account's USDC, so each helper first checks its `program`
 account is GMTrade (`program_account(program, &GMTRADE_PROGRAM_ID)`, Anchor's `Program<'info, GmsolStore>`): a
 handler that forgot its own check still cannot hand that signature to another program (`cargo test` proves the helpers
-refuse one). Still do the phase-1 `program_account(gmtrade_program, &GMTRADE_PROGRAM_ID)` in every handler: it decides
+refuse one). GMTrade is upgradeable, so every helper whose CPI gets the owner PDA writable also bounds what the call did
+(`UnexpectedGmtradeEffect`, same checks in the Anchor build): the owner PDA is still data-less and system-owned and lost
+at most the rent and fees of what was asked (an order: escrow ATA + Order rent + keeper fee; a first increase also the
+user account, the Position and its liquidation reserve; a close: nothing), and the owner's USDC account, when GMTrade
+got it, still belongs to the owner PDA with no delegate and no close authority, holding exactly its balance minus the
+collateral after an increase and at least its balance after a close. `update_order_v2` gets the owner read-only, so it
+needs no bound. `cargo test` covers each refusal; `tests/program/src/review.audit.test.ts` pins the bounds to GMTrade's
+real costs. The bounds hold per call, so `top_up_owner` refills only an Active account while trading is live (both
+builds, round 3): a restricted, breached or paused account can lose at most the float it has. Still do the phase-1 `program_account(gmtrade_program, &GMTRADE_PROGRAM_ID)` in every handler: it decides
 which error a transaction with several faults reports. `tests/program/src/review.cpi.test.ts` swaps `gmtrade_program`
 for SPL Token on all six GMTrade-CPI instructions (open_position, close_position, set_protection, update_order,
 cancel_order, close_completed_order) and expects `InvalidProgramId`, as the Anchor build answers; give each compare
@@ -240,13 +303,46 @@ SPL Token / ATA / System instruction builders by reading.
 5. Anchor's onchain-IDL instructions are not included (the IDL tag answers `IdlInstructionStub`, as with Anchor's
    `no-idl`), so every `anchor idl` command fails against this build. Kept out for size: the onchain IDL is optional
    (explorers only; server, app and SDK decode with the IDL bundled in `@props/sdk`, learnings.txt round 3). The launch
-   runbook is written for the Anchor build, so the change that switches the deploy to this build must also drop or
-   replace, in `docs/runbooks/launch.md`, §0 (IDL authority in the order), §4 (`anchor idl init`, `anchor idl
-   authority`), §13.2-13.3 (`anchor idl set-authority`, the `^idl` check), §14.4 (IDL write-buffer / set-buffer) and
-   the IDL row of §15 (and §3/§14 build `props_vault_p`, not `props_vault`); the `anchor idl init` recommendation in
-   `docs/ARCHITECTURE.md` §8 "Launch"; and the `idl` line and warning of `scripts/admin/status.ts` (its warning is
-   already stale). An IDL can still be published with a tool that needs no instruction in this program, e.g. the
-   Program Metadata program (`@solana-program/program-metadata` on npm); check what explorers read before relying on it.
+   runbook `docs/runbooks/launch.md` is written for the Anchor build: each section below names the Anchor crate, its
+   binary or its IDL tooling, or carries the size of the 978 KB Anchor binary it was rehearsed with, so the change that
+   switches the deploy to this build must change every one of them:
+   - §0: drop the IDL from the order (deploy + IDL, the IDL authority, the `anchor idl init` note).
+   - §2: check the `ID` bytes in `programs-p/props_vault_p/src/lib.rs` (it has no `declare_id!`); in the operator row,
+     drop the IDL and recompute its SOL (≈ 5.6 SOL spent, keep ≥ 10 SOL: the Anchor binary's rent) from §4's `MAX_LEN`
+     (below).
+   - §3.2: `solana-verify build programs-p/props_vault_p --library-name props_vault_p`; the binary lands in that
+     workspace's `target/deploy/`, `programs-p/props_vault_p/target/deploy/props_vault_p.so` (≈ 172.5 KB), which
+     `get-executable-hash` and `ls -l` then take.
+   - §3.3: every suite against that binary: `PROPS_VAULT_SO=<it>` for `npm test --workspace tests/program`, `npm run
+     test:validator`, the server module suites and `scripts/local-stack.ts`, which all default to the Anchor `.so`,
+     and for the six `compare/*.ts` scenarios, whose Pinocchio side defaults to `target/deploy/props_vault_p.so`;
+     `cargo test --manifest-path programs-p/props_vault_p/Cargo.toml`; and the compare scenarios at 0 differences,
+     which replace the `anchor idl build … cmp` check as the proof that the binary implements the SDK's IDL. Every
+     process prints `props_vault binary: <path> (<bytes> bytes, executable hash <hash>)` on stderr (round 4; the hash
+     `get-executable-hash` prints): each line must name `<it>` with the hash recorded in step 2, or that run proved
+     another file. Its closing warning becomes: after step 2, build nothing into
+     `programs-p/props_vault_p/target/deploy/` (a plain `cargo build-sbf` in that crate would replace the verifiable
+     binary; `--sbf-out-dir target/deploy` does not).
+   - §4: `SO=programs-p/props_vault_p/target/deploy/props_vault_p.so`. As written, `SO=target/deploy/props_vault.so`
+     sizes `MAX_LEN` from, and deploys, whatever Anchor build that path holds (any machine that ran `anchor build`):
+     `get-program-hash` catches it only after the deploy, and the ≈ 4.7 SOL of extra rent stays locked, since program
+     data never shrinks. Update the expected sizes, rent, write count and balance in its comments (≈ 0.97 SOL of
+     program data at +10 % for this binary). The 10 % `--max-len` headroom is only ≈ 17 KB here, and after the handover
+     the vault cannot extend through Squads (§14.3), so size it for the largest release to ship: a fallback to the
+     Anchor build needs ≈ +830 KB (≈ 5.7 SOL). Drop `anchor idl init` and `anchor idl authority`.
+   - §13.2-13.3: drop `anchor idl set-authority` and the `^idl` check.
+   - §13.4 and §14.5: `verify-from-repo … --library-name props_vault_p --mount-path programs-p/props_vault_p`.
+   - §14.2: `write-buffer programs-p/props_vault_p/target/deploy/props_vault_p.so`.
+   - §14.4: drop the IDL write-buffer / set-buffer.
+   - §15: recompute the program-data row (978,072 B binary), the deploy writes (≈ 1,000 for 978 KB, ≈ 180 here) and the
+     operator's SOL from the chosen `MAX_LEN` (keep about twice what the deploy locks); drop the IDL row.
+
+   Outside the runbook: the `anchor idl init` recommendation in `docs/ARCHITECTURE.md` §8 "Launch", and the `idl` line
+   and warning of `scripts/admin/status.ts` (its warning is already stale). Both workspaces pin the image
+   `solana-verify` builds with (`[workspace.metadata.cli] solana = "3.1.10"`); without it, it guessed 3.0.1 / 2.3.0
+   from the lockfiles, whose platform-tools (Rust 1.84) cannot build either lockfile. An IDL can still be published
+   with a tool that needs no instruction in this program, e.g. the Program Metadata program
+   (`@solana-program/program-metadata` on npm); check what explorers read before relying on it.
 6. Singleton PDAs (config, vault, fee_vault, sol_treasury, event authority) are constants checked by `cargo test`
    instead of `find_program_address` at runtime: same accept/reject set, far fewer compute units.
 7. Compute units are much lower (initialize 75.0k → 33.5k, upsert_tier 25.3k → 7.7k, deposit 22.1k → 3.6k, set_pauses
@@ -264,7 +360,8 @@ Leads not taken: integer and string formatting pulled in by panics with formatte
 costs ~3.7 KB (`core::fmt::num`, `pad_integral`, `do_count_chars`); pinocchio's unrolled input parser is 3.2 KB; the
 soft-float rent formula is ~2.5 KB but gives exactly solana-program 2.3's amounts under any Rent sysvar. pinocchio's
 own `Rent` (`lamports_per_byte × (128 + len)`) ignores `exemption_threshold`, so it agrees only while the sysvar holds
-threshold 1.0 (LiteSVM 0.8 reports 6960 / 1.0); switching to it saves the float code but ties rent amounts to that.
+threshold 1.0 (mainnet and the suites' LiteSVM hold 5,080 / 1.0); switching to it saves the float code but ties rent
+amounts to that.
 `apply_bps` divides a u128, which pulls in compiler_builtins' `u128_div_rem`, `__udivti3`, `__lshrti3` and `__ashlti3`
 (5.8 KB; activate_funded's `loss_allowance` is the first caller, request_payout and open_position need it too): with
 q, r = amount / 10⁴, amount % 10⁴, the checked u64 form q·bps + r·bps / 10⁴ gives the same results and errors without

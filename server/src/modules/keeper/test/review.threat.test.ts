@@ -11,7 +11,7 @@ import { planStep, type AccountView, type PlanContext } from '../rules.ts';
 
 const USD = 10n ** 20n;
 const SOL = 'SolMarketToken';
-const ctx: PlanContext = { now: Date.parse('2026-09-23T15:00:00Z'), ownerSolMin: 100_000_000n, upgradePending: false };
+const ctx: PlanContext = { now: Date.parse('2026-09-23T15:00:00Z'), ownerSolMin: 100_000_000n, tradingPaused: false, upgradePending: false };
 const actions = (v: AccountView) => planStep(v, ctx)?.actions.map((a) => a.type as string) ?? [];
 
 /** Long SOL worth nothing: equity is at the floor (V = 0). */

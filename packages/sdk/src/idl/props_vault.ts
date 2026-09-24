@@ -1446,6 +1446,157 @@ export type PropsVault = {
       "args": []
     },
     {
+      "name": "closeEmptyPosition",
+      "discriminator": [
+        175,
+        105,
+        138,
+        38,
+        237,
+        235,
+        250,
+        59
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "fundedAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  119,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              }
+            ]
+          }
+        },
+        {
+          "name": "gmStore"
+        },
+        {
+          "name": "gmPosition",
+          "writable": true
+        },
+        {
+          "name": "solTreasury",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  111,
+                  108,
+                  95,
+                  116,
+                  114,
+                  101,
+                  97,
+                  115,
+                  117,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "gmtradeProgram",
+          "address": "Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo"
+        },
+        {
+          "name": "systemProgram",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "eventAuthority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  95,
+                  95,
+                  101,
+                  118,
+                  101,
+                  110,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "closeFunded",
       "discriminator": [
         12,
@@ -1911,6 +2062,141 @@ export type PropsVault = {
           }
         }
       ]
+    },
+    {
+      "name": "collectClaimable",
+      "discriminator": [
+        224,
+        171,
+        101,
+        76,
+        234,
+        107,
+        62,
+        128
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "fundedAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner",
+          "docs": [
+            "The owner PDA: the claimable account's delegate (it may hold nothing once the account is closed)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  119,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              }
+            ]
+          }
+        },
+        {
+          "name": "claimable",
+          "docs": [
+            "A GMTrade claimable account: token authority = the store, delegate = the owner PDA. Only GMTrade can approve a",
+            "delegate for its store's token account."
+          ],
+          "writable": true
+        },
+        {
+          "name": "destination",
+          "docs": [
+            "The account's USDC ATA, or the capital vault once the account is closed."
+          ],
+          "writable": true
+        },
+        {
+          "name": "usdcMint"
+        },
+        {
+          "name": "tokenProgram",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "eventAuthority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  95,
+                  95,
+                  101,
+                  118,
+                  101,
+                  110,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
     },
     {
       "name": "depositCapital",
@@ -5065,6 +5351,19 @@ export type PropsVault = {
       ]
     },
     {
+      "name": "claimableCollected",
+      "discriminator": [
+        76,
+        25,
+        203,
+        177,
+        10,
+        215,
+        251,
+        108
+      ]
+    },
+    {
       "name": "completedOrderClosed",
       "discriminator": [
         82,
@@ -5088,6 +5387,19 @@ export type PropsVault = {
         77,
         78,
         192
+      ]
+    },
+    {
+      "name": "emptyPositionClosed",
+      "discriminator": [
+        1,
+        100,
+        57,
+        60,
+        215,
+        135,
+        241,
+        157
       ]
     },
     {
@@ -5509,6 +5821,16 @@ export type PropsVault = {
       "code": 6041,
       "name": "dailyPrincipalLimit",
       "msg": "Funded activations reached the vault's daily limit; try again later"
+    },
+    {
+      "code": 6042,
+      "name": "unexpectedGmtradeEffect",
+      "msg": "GMTrade changed the owner's USDC or SOL beyond what the call allows"
+    },
+    {
+      "code": 6043,
+      "name": "notClaimable",
+      "msg": "Not a GMTrade claimable account delegated to this account's owner"
     }
   ],
   "types": [
@@ -5611,6 +5933,40 @@ export type PropsVault = {
           },
           {
             "name": "capitalVaultBalance",
+            "type": "u64"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "claimableCollected",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "account",
+            "docs": [
+              "The GMTrade claimable token account."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "to",
+            "docs": [
+              "The account's USDC ATA, or the capital vault for a closed account."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
             "type": "u64"
           },
           {
@@ -5901,6 +6257,33 @@ export type PropsVault = {
               "tampered server database (evaluation results and identities are decided off-chain), can put at risk."
             ],
             "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "emptyPositionClosed",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "position",
+            "type": "pubkey"
+          },
+          {
+            "name": "lamports",
+            "docs": [
+              "Returned to the SOL treasury."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
           }
         ]
       }

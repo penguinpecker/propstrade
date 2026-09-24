@@ -2,6 +2,7 @@
 // payouts, vault_ledger, account_events). Runs inside the indexer's per-transaction database transaction, exactly
 // once per (signature, event index), so every write here is applied once and in chain order.
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import type { FastifyBaseLogger } from 'fastify';
 import type { Notification } from '@props/shared';
 import { CLOSE_ALL } from '@props/sdk';
 import { formatFixed } from '@props/gmtrade';
@@ -20,6 +21,7 @@ export interface ProjectDeps {
   reader: ChainReader;
   /** Absent when the sim module is not deployed: evaluations are then indexed but not tradable. */
   sim?: Pick<SimService, 'createEvaluation'>;
+  log?: Pick<FastifyBaseLogger, 'error'>;
 }
 export type Notice = { wallet: string } & Pick<Notification, 'title' | 'body' | 'href' | 'kind'>;
 
@@ -296,6 +298,12 @@ export async function project(tx: Tx, ev: VaultEvent, eventIndex: number, info: 
     case 'configChanged':
     case 'ownerToppedUp':
     case 'solTreasuryWithdrawn':
+    case 'emptyPositionClosed':
+    case 'claimableCollected':
       return []; // kept in program_events; no projection
+    default:
+      // An event this server does not know (a newer program): kept in program_events like the rest, never a stall.
+      deps.log?.error({ event: (ev as { name: string }).name, signature }, 'unknown props_vault event: stored, not projected');
+      return [];
   }
 }

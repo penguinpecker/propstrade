@@ -3,7 +3,8 @@
 // configs of the wrong market or type), GMTrade Position and Order accounts in every state (pending, filled, completed
 // or cancelled but left open, closed, refunded by a stranger, not a GMTrade account, truncated), slot release, open
 // interest moves, every checked-arithmetic limit (written directly), every account substitution and read-only flag, the
-// owner float at, just below and far below its minimum, and the gmtrade_program swapped for SPL Token.
+// owner float at, just below and far below its minimum, top-ups in every account status and while trading is paused,
+// and the gmtrade_program swapped for SPL Token.
 import { Keypair, PublicKey, SystemProgram, TransactionInstruction, type AccountMeta } from '@solana/web3.js';
 import { ASSOCIATED_TOKEN_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import {
@@ -201,16 +202,24 @@ await compare(async ({ env: { Env, MAINNET_POSITIONS, MARKETS, USD, swapKey, usd
   send(env, 'top up wrong system program', swapKey(t, SystemProgram.programId, TOKEN_PROGRAM_ID), [stranger]);
   send(env, 'top up wrong event authority', swapKey(t, eventAuthorityPda(), stranger.publicKey), [stranger]);
   send(env, 'top up wrong program account', at(t, 6, { pubkey: stranger.publicKey }), [stranger]);
-  setStatus(env, h.funded, STATUS.closed);
-  send(env, 'top up closed', t, [stranger]);
-  setStatus(env, h.funded, STATUS.breached);
+  // Only an active account while trading is live (round-3 audit fix).
+  for (const [name, status] of [['closed', STATUS.closed], ['restricted', STATUS.restricted], ['payout pending', STATUS.payoutPending], ['breached', STATUS.breached]] as const) {
+    setStatus(env, h.funded, status);
+    send(env, `top up ${name}`, t, [stranger]);
+  }
+  const pauseTrading = async (trading: boolean) =>
+    send(env, `trading ${trading ? 'paused' : 'live'}`, await v.setPauses({ admin: env.admin.publicKey, paused: { newEvaluations: false, trading, payouts: false } }), [env.admin]);
+  await pauseTrading(true);
+  send(env, 'top up breached while trading is paused', t, [stranger]);
+  setStatus(env, h.funded, STATUS.active);
+  send(env, 'top up while trading is paused', t, [stranger]);
+  await pauseTrading(false);
   const treasury = env.svm.getAccount(solTreasuryPda())!;
   env.svm.setAccount(solTreasuryPda(), { ...treasury, lamports: 100_000_000 });
   send(env, 'top up treasury short', t, [stranger]);
   env.svm.setAccount(solTreasuryPda(), treasury);
   send(env, 'top up funded readonly', at(t, 1, { isWritable: false }), [stranger]);
   env.remove(h.owner);
-  setStatus(env, h.funded, STATUS.restricted);
   send(env, 'top up an emptied owner', t, [stranger]);
   snap(env, 'emptied topped up', [h.funded, h.owner, solTreasuryPda()]);
 
