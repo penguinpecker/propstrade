@@ -1,5 +1,5 @@
-// Byte-level comparison of the Anchor build (target/deploy/props_vault.so) and the Pinocchio build
-// (target/deploy/props_vault_p.so): runs one scenario on each in LiteSVM (tests/program/src/env.ts, deterministic keys
+// Byte-level comparison of the Anchor build (target/deploy/props_vault.so) and the Pinocchio build (PROPS_VAULT_SO,
+// else target/deploy/props_vault_p.so): runs one scenario on each in LiteSVM (tests/program/src/env.ts, deterministic keys
 // and clock) and diffs every transaction outcome (success, Anchor error name, runtime error, every inner instruction's
 // stack height, program, account list and data, i.e. events and CPIs) and every snapshotted account (lamports, owner,
 // data). Compute units are printed, not compared, and so are log lines other than errors. The transaction metadata does
@@ -12,10 +12,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ComputeBudgetProgram, Keypair, PublicKey, Transaction, TransactionInstruction } from '@solana/web3.js';
-import { FailedTransactionMetadata } from 'litesvm';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
-const BUILDS = { anchor: join(ROOT, 'target/deploy/props_vault.so'), pinocchio: join(ROOT, 'target/deploy/props_vault_p.so') };
+const BUILDS = { anchor: join(ROOT, 'target/deploy/props_vault.so'), pinocchio: process.env.PROPS_VAULT_SO || join(ROOT, 'target/deploy/props_vault_p.so') };
 
 type EnvModule = typeof import('../../../tests/program/src/env.ts');
 export type Env = InstanceType<EnvModule['Env']>;
@@ -55,7 +54,7 @@ async function record(scenario: (h: Harness) => Promise<void>): Promise<Record[]
       tx.sign(...signers);
       const res = e.svm.sendTransaction(tx);
       e.svm.expireBlockhash();
-      const failed = res instanceof FailedTransactionMetadata;
+      const failed = res instanceof env.FailedTransactionMetadata;
       const meta = failed ? res.meta() : res;
       const logs = meta.logs();
       const keys = tx.compileMessage().accountKeys;

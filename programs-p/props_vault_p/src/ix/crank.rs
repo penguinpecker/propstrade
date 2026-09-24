@@ -1,22 +1,22 @@
 //! Port of programs/props_vault/src/instructions/crank.rs (see PORTING.md). Each handler validates in Anchor's order:
-//! account types in field order, then the remaining constraints in field order, then the handler body. All three are
+//! account types in field order, then the remaining constraints in field order, then the handler body. All five are
 //! permissionless.
 use pinocchio::{AccountView, Address};
 
 use super::trading::{check_close_order, funded_seeds, order_programs, owner_seeds, EV};
 use crate::{
     accounts::{
-        associated_token_constraint, check_event_authority, create_program_address, keys_eq, mint_account, mutable,
-        now, program_account, singleton, system_account, take, token_account, CONFIG_PDA, SOL_TREASURY_PDA,
-        SYSTEM_PROGRAM_ID,
+        associated_token_constraint, ata_address, check_event_authority, create_program_address, keys_eq, mint_account,
+        mutable, now, program_account, singleton, system_account, take, token_account, CONFIG_PDA, GMTRADE_PROGRAM_ID,
+        SOL_TREASURY_PDA, SOME, SYSTEM_PROGRAM_ID, TOKEN_PROGRAM_ID,
     },
-    cpi::top_up_from_treasury,
+    cpi::{top_up_from_treasury, transfer, transfer_checked},
     error::{require, Result, E},
     events::{disc, emit, event},
     gmtrade::{self, CloseOrder, PositionState},
     state::{
-        load, order_type, Config, FundedAccount, MarketConfig, TrackedOrder, MARKET_SEED, MAX_ORDERS, MAX_SLOTS,
-        OWNER_SEED,
+        funded_status, load, order_type, Config, FundedAccount, MarketConfig, TrackedOrder, MARKET_SEED, MAX_ORDERS,
+        MAX_SLOTS, OWNER_SEED,
     },
 };
 
@@ -134,7 +134,11 @@ pub fn sync(accounts: &[AccountView], _data: &[u8]) -> Result {
     emit(event_authority, &e)
 }
 
-/// Permissionless: refills the owner PDA's SOL float from the treasury once it drops below the minimum.
+/// Permissionless: refills the owner PDA's SOL float from the treasury once it drops below the minimum. Only an Active
+/// account, and only while trading is live: a restricted, payout-pending or breached account, or any account while
+/// trading is paused, keeps the float it has. GMTrade is upgradeable and the post-call bounds hold per call, so this
+/// caps what an upgraded GMTrade can take through the orders such an account may still place (closes, protection) at
+/// its float.
 pub fn top_up_owner(accounts: &[AccountView], _data: &[u8]) -> Result {
     let [config, funded, owner, sol_treasury, system_program, event_authority, _program] = take::<7>(accounts)?;
     let c = Config::load(config)?;
@@ -151,7 +155,8 @@ pub fn top_up_owner(accounts: &[AccountView], _data: &[u8]) -> Result {
     mutable(sol_treasury)?;
     check_event_authority(event_authority)?;
 
-    require(f.is_open(), E::InvalidAccountStatus)?;
+    require(!c.paused.trading.get(), E::Paused)?;
+    require(f.status == funded_status::ACTIVE, E::InvalidAccountStatus)?;
     require(owner.lamports() < c.owner_sol_min.get(), E::OwnerFloatSufficient)?;
     let lamports = top_up_from_treasury(sol_treasury, owner, c.sol_treasury_bump, c.owner_sol_target.get())?;
     let mut e = event::<EV>(disc::OWNER_TOPPED_UP);
@@ -209,5 +214,92 @@ pub fn close_completed_order(accounts: &[AccountView], _data: &[u8]) -> Result {
     f.orders[idx] = TrackedOrder::default();
     let mut e = event::<EV>(disc::COMPLETED_ORDER_CLOSED);
     e.key(funded.address()).key(gm_order.address()).i64(now()?);
+    emit(event_authority, &e)
+}
+
+/// Permissionless: closes an empty GMTrade Position of the owner PDA that no slot uses. An increase that never filled
+/// (cancelled by the trader, a risk authority or GMTrade) leaves its Position behind, holding the rent and liquidation
+/// reserve the owner PDA paid for it (~0.026 SOL); GMTrade closes an empty one only for its owner. Those lamports go
+/// back to the SOL treasury, which funds the owner PDA. Works on closed accounts too.
+pub fn close_empty_position(accounts: &[AccountView], _data: &[u8]) -> Result {
+    #[rustfmt::skip]
+    let [
+        config, funded, owner, gm_store, gm_position, sol_treasury, gmtrade_program, system_program, event_authority,
+        _program,
+    ] = take::<10>(accounts)?;
+    let c = Config::load(config)?;
+    let f = load::<FundedAccount>(funded)?;
+    system_account(owner)?;
+    system_account(sol_treasury)?;
+    program_account(gmtrade_program, &GMTRADE_PROGRAM_ID)?;
+    program_account(system_program, &SYSTEM_PROGRAM_ID)?;
+
+    singleton(config, c.bump, &CONFIG_PDA)?;
+    funded_seeds(funded, f)?;
+    owner_seeds(owner, funded, f)?;
+    mutable(owner)?;
+    keys_eq(gm_store.address(), &c.gmtrade_store, E::ConstraintAddress)?;
+    mutable(gm_position)?;
+    singleton(sol_treasury, c.sol_treasury_bump, &SOL_TREASURY_PDA)?;
+    mutable(sol_treasury)?;
+    keys_eq(gmtrade_program.address(), &c.gmtrade_program, E::ConstraintAddress)?;
+    check_event_authority(event_authority)?;
+
+    // A slot still using the position may have pending orders that need it (GMTrade cancels those once it is gone).
+    let size = gmtrade::verified_position_size(gm_position, &c.gmtrade_program, &c.gmtrade_store, owner.address())?;
+    require(size == 0, E::NotFlat)?;
+    require(!f.slots.iter().any(|s| !s.is_free() && s.gm_position == *gm_position.address()), E::NotFlat)?;
+    let before = owner.lamports();
+    let bump = [f.owner_bump];
+    let owner_signer: &[&[u8]] = &[OWNER_SEED, funded.address().as_ref(), &bump];
+    gmtrade::close_empty_position(gmtrade_program, owner, gm_store, gm_position, &[owner_signer])?;
+    let lamports = owner.lamports() - before;
+    if lamports > 0 {
+        transfer(owner, sol_treasury, lamports, &[owner_signer])?;
+    }
+    let mut e = event::<EV>(disc::EMPTY_POSITION_CLOSED);
+    e.key(funded.address()).key(gm_position.address()).u64(lamports).i64(now()?);
+    emit(event_authority, &e)
+}
+
+/// Permissionless: moves the USDC GMTrade set aside for the owner PDA in one of its claimable accounts (the part of a
+/// decrease's negative price impact above GMTrade's cap) to the account's USDC, or to the capital vault once the account
+/// is closed. The owner PDA signs as the delegate a GMTrade keeper approved; nothing else can move it.
+pub fn collect_claimable(accounts: &[AccountView], _data: &[u8]) -> Result {
+    #[rustfmt::skip]
+    let [
+        config, funded, owner, claimable, destination, usdc_mint, token_program, event_authority, _program,
+    ] = take::<9>(accounts)?;
+    let c = Config::load(config)?;
+    let f = load::<FundedAccount>(funded)?;
+    system_account(owner)?;
+    let t = token_account(claimable)?;
+    token_account(destination)?;
+    let decimals = mint_account(usdc_mint)?.decimals;
+    program_account(token_program, &TOKEN_PROGRAM_ID)?;
+
+    singleton(config, c.bump, &CONFIG_PDA)?;
+    funded_seeds(funded, f)?;
+    owner_seeds(owner, funded, f)?;
+    mutable(claimable)?;
+    // Only GMTrade can make the owner PDA a delegate of a token account of its store (the store signs the approval).
+    require(
+        t.mint == c.usdc_mint && t.owner == c.gmtrade_store && t.delegate_tag == SOME && t.delegate == *owner.address(),
+        E::NotClaimable,
+    )?;
+    mutable(destination)?;
+    let to =
+        if f.status == funded_status::CLOSED { c.capital_vault } else { ata_address(owner.address(), &c.usdc_mint) };
+    keys_eq(destination.address(), &to, E::ConstraintAddress)?;
+    keys_eq(usdc_mint.address(), &c.usdc_mint, E::ConstraintAddress)?;
+    check_event_authority(event_authority)?;
+
+    let amount = t.amount.get().min(t.delegated_amount.get());
+    require(amount > 0, E::InvalidAmount)?;
+    let bump = [f.owner_bump];
+    let owner_signer: &[&[u8]] = &[OWNER_SEED, funded.address().as_ref(), &bump];
+    transfer_checked(claimable, usdc_mint, destination, owner, amount, decimals, &[owner_signer])?;
+    let mut e = event::<EV>(disc::CLAIMABLE_COLLECTED);
+    e.key(funded.address()).key(claimable.address()).key(destination.address()).u64(amount).i64(now()?);
     emit(event_authority, &e)
 }

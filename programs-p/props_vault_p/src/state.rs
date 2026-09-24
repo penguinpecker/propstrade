@@ -74,6 +74,11 @@ impl Bool {
     pub fn set(&mut self, v: bool) {
         self.0 = v as u8;
     }
+    /// What borsh accepts for a bool.
+    #[inline(always)]
+    pub fn is_valid(&self) -> bool {
+        self.0 <= 1
+    }
 }
 
 const _: () = assert!(size_of::<Address>() == 32 && core::mem::align_of::<Address>() == 1);
@@ -85,6 +90,7 @@ pub mod evaluation_status {
     pub const PASSED: u8 = 1;
     pub const FAILED: u8 = 2;
     pub const FUNDED: u8 = 3;
+    pub const COUNT: u8 = 4;
 }
 pub mod funded_status {
     pub const ACTIVE: u8 = 0;
@@ -92,6 +98,7 @@ pub mod funded_status {
     pub const PAYOUT_PENDING: u8 = 2;
     pub const BREACHED: u8 = 3;
     pub const CLOSED: u8 = 4;
+    pub const COUNT: u8 = 5;
 }
 pub mod order_type {
     pub const MARKET: u8 = 0;
@@ -116,6 +123,7 @@ pub mod payout_status {
     pub const PAID: u8 = 1;
     pub const REJECTED: u8 = 2;
     pub const CANCELLED: u8 = 3;
+    pub const COUNT: u8 = 4;
 }
 
 // ---------- fixed-size accounts ----------
@@ -125,15 +133,22 @@ pub trait Data: Sized {
     const DISC: [u8; 8];
     /// Anchor `space` = 8 + INIT_SPACE.
     const SPACE: usize = 8 + size_of::<Self>();
+    /// Every bool is 0 or 1 and every enum a known variant, as borsh requires to deserialize the account.
+    fn valid(&self) -> bool {
+        true
+    }
 }
 
-/// Anchor `Account<'info, T>` (`Account::try_from`): initialized, owned by this program, discriminator, size.
+/// Anchor `Account<'info, T>` (`Account::try_from`): initialized, owned by this program, discriminator, size, and the
+/// bool and enum bytes borsh would refuse (`AccountDidNotDeserialize`).
 /// Returns a view into the account data (the runtime's input buffer, not the `AccountView`). Load each account at most
 /// once: two views of one account alias. PDA and discriminator checks make that impossible for distinct fields.
 #[allow(clippy::mut_from_ref)]
 pub fn load<T: Data>(view: &AccountView) -> Result<&mut T> {
     // SAFETY: T is repr(C) of alignment-1 fields and the data holds at least SPACE bytes.
-    Ok(unsafe { &mut *(load_raw(view, &T::DISC, T::SPACE)? as *mut T) })
+    let t = unsafe { &mut *(load_raw(view, &T::DISC, T::SPACE)? as *mut T) };
+    require(t.valid(), E::AccountDidNotDeserialize)?;
+    Ok(t)
 }
 
 /// `load` without the type (one copy of the code for every account type): the account body after the discriminator.
@@ -187,6 +202,9 @@ pub struct Tier {
 }
 impl Data for Tier {
     const DISC: [u8; 8] = [18, 149, 18, 34, 50, 201, 207, 55];
+    fn valid(&self) -> bool {
+        self.enabled.is_valid()
+    }
 }
 
 #[repr(C)]
@@ -208,6 +226,9 @@ pub struct MarketConfig {
 }
 impl Data for MarketConfig {
     const DISC: [u8; 8] = [119, 255, 200, 88, 252, 82, 128, 24];
+    fn valid(&self) -> bool {
+        self.enabled.is_valid() && self.session_restricted.is_valid()
+    }
 }
 impl MarketConfig {
     pub fn set_params(&mut self, p: &MarketParams) {
@@ -307,6 +328,9 @@ pub struct Evaluation {
 }
 impl Data for Evaluation {
     const DISC: [u8; 8] = [212, 70, 25, 106, 239, 24, 93, 220];
+    fn valid(&self) -> bool {
+        self.status < evaluation_status::COUNT
+    }
 }
 
 /// One GMTrade position (market, side) of a funded account. Free when `market_token` is default.
@@ -375,6 +399,11 @@ pub struct FundedAccount {
 }
 impl Data for FundedAccount {
     const DISC: [u8; 8] = [243, 213, 249, 109, 66, 122, 63, 208];
+    fn valid(&self) -> bool {
+        self.status < funded_status::COUNT
+            && self.slots.iter().all(|s| s.is_long.is_valid())
+            && self.orders.iter().all(|o| o.order_type < order_type::COUNT && o.placed_by_risk.is_valid())
+    }
 }
 impl FundedAccount {
     pub fn find_slot(&self, market_token: &Address, is_long: bool) -> Option<usize> {
@@ -448,6 +477,9 @@ pub struct PayoutRequest {
 }
 impl Data for PayoutRequest {
     const DISC: [u8; 8] = [182, 69, 255, 168, 65, 179, 121, 171];
+    fn valid(&self) -> bool {
+        self.status < payout_status::COUNT
+    }
 }
 
 // Anchor INIT_SPACE of each account (checked against the IDL-derived sizes in PORTING.md).
@@ -552,6 +584,11 @@ impl Config {
         let tail = list as u64 + 4 + 32 * n;
         require(tail + size_of::<ConfigTail>() as u64 <= len as u64, E::AccountDidNotDeserialize)?;
         c.tail = tail as usize;
+        let p = &c.paused;
+        require(
+            p.new_evaluations.is_valid() && p.trading.is_valid() && p.payouts.is_valid(),
+            E::AccountDidNotDeserialize,
+        )?;
         Ok(c)
     }
 

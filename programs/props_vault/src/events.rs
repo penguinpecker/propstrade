@@ -167,6 +167,26 @@ pub struct OwnerToppedUp {
 }
 
 #[event]
+pub struct EmptyPositionClosed {
+    pub funded: Pubkey,
+    pub position: Pubkey,
+    /// Returned to the SOL treasury.
+    pub lamports: u64,
+    pub ts: i64,
+}
+
+#[event]
+pub struct ClaimableCollected {
+    pub funded: Pubkey,
+    /// The GMTrade claimable token account.
+    pub account: Pubkey,
+    /// The account's USDC ATA, or the capital vault for a closed account.
+    pub to: Pubkey,
+    pub amount: u64,
+    pub ts: i64,
+}
+
+#[event]
 pub struct PayoutRequested {
     pub funded: Pubkey,
     pub request: Pubkey,

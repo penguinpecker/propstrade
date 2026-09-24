@@ -159,7 +159,8 @@ test('keeper against solana-test-validator: top-up, session-guard close with a c
   await funded(bob, 'person-b');
   await donate(bob, fundedB, '100');
   await send([await vault.requestPayout({ trader: bob.publicKey, funded: fundedB, payoutSeq: 0 })], [bob]);
-  // Owner floats below the new minimum, so the keeper must top both up.
+  // Owner floats below the new minimum, so the keeper must top both up (Bob's once his payout is paid: the program tops
+  // up active accounts only).
   await send([await vault.setParams({ admin: admin.publicKey, params: { ...CONFIG_PARAMS, ownerSolTarget: bn(0.5 * LAMPORTS_PER_SOL), ownerSolMin: bn(0.3 * LAMPORTS_PER_SOL) } })], [admin]);
 
   // ---- the server: core app + chain module (indexer, jobs) + keeper, with throwaway keys

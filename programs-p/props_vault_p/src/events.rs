@@ -18,8 +18,10 @@ pub mod disc {
     pub const ACCOUNT_RESTRICTED: [u8; 8] = [151, 99, 235, 224, 157, 128, 151, 4];
     pub const CAPITAL_DEPOSITED: [u8; 8] = [193, 124, 182, 129, 144, 1, 221, 53];
     pub const CAPITAL_WITHDRAWN: [u8; 8] = [202, 30, 139, 204, 45, 210, 182, 244];
+    pub const CLAIMABLE_COLLECTED: [u8; 8] = [76, 25, 203, 177, 10, 215, 251, 108];
     pub const COMPLETED_ORDER_CLOSED: [u8; 8] = [82, 165, 207, 110, 81, 70, 218, 68];
     pub const CONFIG_CHANGED: [u8; 8] = [147, 25, 86, 98, 98, 77, 78, 192];
+    pub const EMPTY_POSITION_CLOSED: [u8; 8] = [1, 100, 57, 60, 215, 135, 241, 157];
     pub const EVALUATION_PURCHASED: [u8; 8] = [236, 7, 10, 61, 193, 209, 76, 136];
     pub const EVALUATION_RESOLVED: [u8; 8] = [176, 38, 204, 76, 223, 133, 148, 143];
     pub const FEES_SWEPT: [u8; 8] = [96, 218, 115, 136, 74, 170, 202, 172];

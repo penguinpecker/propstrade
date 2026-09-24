@@ -362,8 +362,9 @@ pub fn set_protection(accounts: &[AccountView], data: &[u8]) -> Result {
     emit(d.event_authority, &e)
 }
 
-/// Updates a pending limit, take-profit or stop-loss order. A limit increase can be changed only while trading is live
-/// and the account is active (a new trigger can make it fill at once); resizing it re-applies all increase limits.
+/// Updates a pending limit, take-profit or stop-loss order. A limit increase can be changed only while trading is live,
+/// the account is active and its market enabled, and only within the market's current limits (any change can make it
+/// fill at once).
 pub fn update_order(accounts: &[AccountView], data: &[u8]) -> Result {
     let mut args = Args(data);
     let trigger_price = args.option_u128()?;
@@ -409,13 +410,11 @@ pub fn update_order(accounts: &[AccountView], data: &[u8]) -> Result {
     if increase {
         require(!c.paused.trading.get(), E::Paused)?;
         require(f.status == funded_status::ACTIVE, E::InvalidAccountStatus)?;
-    }
-    if let Some(size) = size_delta {
-        if increase {
-            check_increase(f, &slot, m, slot.is_long.get(), size, t.collateral.get(), t.size_usd.get())?;
-        } else {
-            require(size > 0, E::InvalidAmount)?;
-        }
+        require(m.enabled.get(), E::MarketDisabled)?;
+        let size = size_delta.unwrap_or(t.size_usd.get());
+        check_increase(f, &slot, m, slot.is_long.get(), size, t.collateral.get(), t.size_usd.get())?;
+    } else if let Some(size) = size_delta {
+        require(size >= gmtrade::MIN_DECREASE_USD, E::InvalidAmount)?;
     }
 
     let bump = [f.owner_bump];

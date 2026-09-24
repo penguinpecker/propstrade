@@ -86,4 +86,8 @@ pub enum VaultError {
     TierChanged,
     #[msg("Funded activations reached the vault's daily limit; try again later")]
     DailyPrincipalLimit,
+    #[msg("GMTrade changed the owner's USDC or SOL beyond what the call allows")]
+    UnexpectedGmtradeEffect,
+    #[msg("Not a GMTrade claimable account delegated to this account's owner")]
+    NotClaimable,
 }

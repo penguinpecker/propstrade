@@ -67,7 +67,7 @@ function account(over: Partial<AccountView> = {}): AccountView {
     ...over,
   };
 }
-const ctx = (over: Partial<PlanContext> = {}): PlanContext => ({ now: utc('2026-09-23T15:00'), ownerSolMin: 100_000_000n, upgradePending: false, ...over });
+const ctx = (over: Partial<PlanContext> = {}): PlanContext => ({ now: utc('2026-09-23T15:00'), ownerSolMin: 100_000_000n, tradingPaused: false, upgradePending: false, ...over });
 
 test('a healthy, synced account needs nothing', () => {
   assert.equal(planStep(account(), ctx()), null);
@@ -164,6 +164,12 @@ test('owner top-up comes first, and a failed step does not block the next one', 
   assert.deepEqual(planStep(low, ctx())?.actions, [{ type: 'topUp' }]);
   assert.equal(planStep(low, ctx({ skip: new Set(['topUp']) }))?.kind, 'breach');
   assert.equal(planStep(account({ status: 'closed', ownerLamports: 0n }), ctx()), null);
+  // The program refuses any other top-up (round-3 audit fix): the account keeps the float it has.
+  for (const status of ['restricted', 'payoutPending', 'breached'] as const) {
+    assert.equal(planStep(account({ status, ownerLamports: 99_999_999n }), ctx())?.kind ?? null, status === 'breached' ? 'breach' : null, status);
+  }
+  assert.equal(planStep(low, ctx({ tradingPaused: true }))?.kind, 'breach', 'no top-up while trading is paused');
+  assert.equal(planStep(account({ ownerLamports: 99_999_999n }), ctx({ upgradePending: true }))?.kind, 'upgrade', 'restricted first, not refilled');
 });
 
 test('upgrade watch: active accounts are restricted while an upgrade is being handled', () => {

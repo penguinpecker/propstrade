@@ -664,4 +664,46 @@ export class PropsVaultClient {
   closeCompletedOrder(p: { funded: PublicKey; order: PublicKey }): Promise<TransactionInstruction> {
     return this.program.methods.closeCompletedOrder().accountsStrict({ ...eventCpi(), ...this.closeOrderAccounts(p.funded, p.order) }).instruction();
   }
+
+  /**
+   * Closes an empty GMTrade Position of the owner PDA that no slot uses (an increase that never filled leaves one) and
+   * returns its rent and liquidation reserve to the SOL treasury. Closed accounts too.
+   */
+  closeEmptyPosition(p: { funded: PublicKey; position: PublicKey }): Promise<TransactionInstruction> {
+    return this.program.methods
+      .closeEmptyPosition()
+      .accountsStrict({
+        ...eventCpi(),
+        config: configPda(),
+        funded: p.funded,
+        owner: ownerPda(p.funded),
+        gmStore: GMTRADE_STORE,
+        gmPosition: p.position,
+        solTreasury: solTreasuryPda(),
+        gmtradeProgram: GMTRADE_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+  }
+
+  /**
+   * Moves the USDC of a GMTrade claimable account delegated to the owner PDA to the account's USDC, or to the capital
+   * vault once the funded account is closed (so `funded` must be current).
+   */
+  collectClaimable(p: { funded: FundedRef; claimable: PublicKey }): Promise<TransactionInstruction> {
+    const closed = enumName(p.funded.account.status) === 'closed';
+    return this.program.methods
+      .collectClaimable()
+      .accountsStrict({
+        ...eventCpi(),
+        config: configPda(),
+        funded: p.funded.address,
+        owner: ownerPda(p.funded.address),
+        claimable: p.claimable,
+        destination: closed ? capitalVaultAddress() : ownerUsdcAddress(p.funded.address),
+        usdcMint: USDC_MINT,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .instruction();
+  }
 }

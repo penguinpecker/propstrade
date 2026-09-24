@@ -57,6 +57,8 @@ export interface PlanContext {
   now: number;
   /** Config.owner_sol_min, lamports. */
   ownerSolMin: bigint;
+  /** Config.paused.trading: the program then tops up no owner PDA. */
+  tradingPaused: boolean;
   /** GMTrade was upgraded and no operator has acknowledged the new release yet: every active account is restricted. */
   upgradePending: boolean;
   /** Step kinds that already failed this tick. */
@@ -136,8 +138,10 @@ export function staleProtections(v: AccountView): OrderView[] {
 }
 
 const steps: Record<StepKind, (v: AccountView, c: PlanContext) => Step | null> = {
-  // A breached account that is flat is closed next, which returns its SOL: no top-up first.
-  topUp: (v, c) => (v.ownerLamports < c.ownerSolMin && !(v.status === 'breached' && isFlat(v))
+  // The program refills only active accounts while trading is live: any other account (a breached one's closes
+  // included) works with the float it has, so an upgraded GMTrade cannot drain the treasury through it. Nor does the
+  // keeper refill an account it is about to restrict for an unreviewed GMTrade upgrade.
+  topUp: (v, c) => (v.ownerLamports < c.ownerSolMin && v.status === 'active' && !c.tradingPaused && !c.upgradePending
     ? { kind: 'topUp', actions: [{ type: 'topUp' }], detail: `owner PDA holds ${formatFixed(v.ownerLamports, 9, 9)} SOL, below the ${formatFixed(c.ownerSolMin, 9, 9)} minimum` }
     : null),
 

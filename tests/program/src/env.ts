@@ -2,6 +2,7 @@
 // props_vault deployed as an upgradeable program whose upgrade authority is the test admin.
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import assert from 'node:assert/strict';
 import { AccountLayout, TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from '@solana/spl-token';
 import {
@@ -14,9 +15,9 @@ import {
   Transaction,
   TransactionInstruction,
 } from '@solana/web3.js';
+import type { AccountInfo } from '@solana/web3.js';
 import { BorshAccountsCoder } from '@coral-xyz/anchor';
 import BN from 'bn.js';
-import { Clock, FailedTransactionMetadata, LiteSVM } from 'litesvm';
 import {
   GMTRADE_PROGRAM_ID,
   GMTRADE_STORE,
@@ -35,10 +36,9 @@ import {
   traderProfilePda,
 } from '@props/sdk';
 import type { AccountName, FundedAccount, FundedRef, VaultEvent } from '@props/sdk';
+import { PROGRAM_SO } from './binary.ts';
 
 const FIXTURES = new URL('../fixtures/', import.meta.url);
-/** The props_vault binary under test: PROPS_VAULT_SO (absolute path), else the Anchor build. */
-const PROGRAM_SO = process.env.PROPS_VAULT_SO || new URL('../../../target/deploy/props_vault.so', import.meta.url).pathname;
 /** GMTrade's own IDL (gmsol-programs 0.10.0), used as an independent decoder of GMTrade accounts. */
 const gmCoder = new BorshAccountsCoder(JSON.parse(readFileSync(new URL('gmsol_store.idl.json', FIXTURES), 'utf8')));
 /** Store.last_restarted_slot (u64 at byte 4800), checked against the LastRestartSlot sysvar by GMTrade. */
@@ -81,6 +81,86 @@ export const TIERS = {
 };
 export const LEVERAGE = { crypto: 250_000, fx: 200_000, metals: 150_000, stocks: 80_000 };
 
+/**
+ * LiteSVM 1.4's runtime (its native binding: litesvm 1.x speaks @solana/kit, these suites web3.js 1.x, so the few calls
+ * they make are wrapped below as litesvm 0.8 did). Every feature it knows is on, among them the two that police the
+ * Pinocchio build's hand-built CPI account infos and raw account views, which litesvm 0.8 and solana-test-validator
+ * 3.1 lack: SIMD-0459 (active on mainnet since slot 429,840,000) and SIMD-0460 (pending). The Rent sysvar is mainnet's.
+ */
+const lite: typeof import('litesvm/dist/internal.js') = createRequire(import.meta.url)('litesvm/dist/internal.js');
+export const { FailedTransactionMetadata } = lite;
+const SIMD_0459_0460 = ['EDGMC5kxFxGk4ixsNkGt8bW7QL5hDMXnbwaZvYMwNfzF', '7VgiehxNxu53KdxgLspGQY8myE6f7UokaWa4jsGcaSz'];
+
+export class Svm {
+  private readonly inner = lite.LiteSvm.default();
+
+  constructor() {
+    const features = lite.FeatureSet.allEnabled();
+    for (const id of SIMD_0459_0460) assert.ok(features.isActive(new PublicKey(id).toBytes()), `this LiteSVM lacks feature ${id}`);
+    this.inner.setFeatureSet(features);
+    this.inner.setBuiltins();
+    this.inner.setLamports(1_000_000n * BigInt(LAMPORTS_PER_SOL));
+    this.inner.setSysvars();
+    this.inner.setPrecompiles();
+    this.inner.setDefaultPrograms();
+    this.inner.setSigverify(true);
+    this.inner.setBlockhashCheck(true);
+    // Mainnet's Rent sysvar (read 2026-09-24): 5,080 lamports per byte, threshold 1.0 (`solana rent 0 -um`: 0.00065024).
+    this.inner.setRent(new lite.Rent(5_080n, 1.0, 50));
+  }
+
+  getAccount(address: PublicKey): AccountInfo<Uint8Array> | null {
+    const a = this.inner.getAccount(address.toBytes());
+    return a && { executable: a.executable(), owner: new PublicKey(a.owner()), lamports: Number(a.lamports()), data: a.data(), rentEpoch: Number(a.rentEpoch()) };
+  }
+
+  setAccount(address: PublicKey, a: AccountInfo<Uint8Array>): void {
+    // A rent epoch read back as a number is u64::MAX rounded up to 2^64.
+    const rentEpoch = (a.rentEpoch ?? 0) >= 2 ** 64 ? 2n ** 64n - 1n : BigInt(a.rentEpoch ?? 0);
+    this.inner.setAccount(address.toBytes(), new lite.Account(BigInt(a.lamports), a.data, a.owner.toBytes(), a.executable, rentEpoch));
+  }
+
+  getBalance(address: PublicKey): bigint | null {
+    return this.inner.getBalance(address.toBytes());
+  }
+
+  airdrop(address: PublicKey, lamports: bigint) {
+    return this.inner.airdrop(address.toBytes(), lamports);
+  }
+
+  addProgramFromFile(programId: PublicKey, path: string): void {
+    this.inner.addProgramFromFile(programId.toBytes(), path);
+  }
+
+  sendTransaction(tx: Transaction) {
+    return this.inner.sendLegacyTransaction(tx.serialize());
+  }
+
+  latestBlockhash(): string {
+    return this.inner.latestBlockhash();
+  }
+
+  expireBlockhash(): void {
+    this.inner.expireBlockhash();
+  }
+
+  getClock() {
+    return this.inner.getClock();
+  }
+
+  setClock(clock: InstanceType<typeof lite.Clock>): void {
+    this.inner.setClock(clock);
+  }
+
+  getLastRestartSlot(): bigint {
+    return this.inner.getLastRestartSlot();
+  }
+
+  minimumBalanceForRentExemption(dataLen: bigint): bigint {
+    return this.inner.minimumBalanceForRentExemption(dataLen);
+  }
+}
+
 export interface TxResult {
   ok: boolean;
   logs: string[];
@@ -102,21 +182,21 @@ export function hash32(label: string): Uint8Array {
 }
 
 export class Env {
-  readonly svm: LiteSVM;
+  readonly svm: Svm;
   readonly vault: PropsVaultClient;
   readonly admin = Keypair.generate();
   readonly risk = Keypair.generate();
   readonly kyc = Keypair.generate();
 
   constructor() {
-    this.svm = new LiteSVM();
+    this.svm = new Svm();
     // Builders never touch the network; the connection only satisfies Anchor's provider type.
     this.vault = new PropsVaultClient(new Connection('http://127.0.0.1:1'));
     this.svm.addProgramFromFile(GMTRADE_PROGRAM_ID, new URL('gmsol_store.so', FIXTURES).pathname);
     this.svm.addProgramFromFile(PROPS_VAULT_PROGRAM_ID, PROGRAM_SO);
     this.setUpgradeAuthority(this.admin.publicKey);
     this.loadFixtures();
-    this.svm.setClock(new Clock(449_600_000n, 1_790_000_000n, 1040n, 1041n, BigInt(Math.floor(Date.now() / 1000))));
+    this.svm.setClock(new lite.Clock(449_600_000n, 1_790_000_000n, 1040n, 1041n, BigInt(Math.floor(Date.now() / 1000))));
     for (const k of [this.admin, this.risk, this.kyc]) this.svm.airdrop(k.publicKey, BigInt(100 * LAMPORTS_PER_SOL));
   }
 

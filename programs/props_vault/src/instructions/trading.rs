@@ -359,8 +359,8 @@ pub struct UpdateOrder<'info> {
 }
 
 /// Updates a pending limit, take-profit or stop-loss order. A limit increase can be changed only while
-/// trading is live and the account is active (a new trigger can make it fill at once); resizing it
-/// re-applies all increase limits.
+/// trading is live, the account is active and its market enabled, and only within the market's current
+/// limits (any change can make it fill at once).
 pub(crate) fn update_order(ctx: Context<UpdateOrder>, args: UpdateOrderArgs) -> Result<()> {
     let a = &ctx.accounts;
     let idx = a.funded.find_order(&a.gm_order.key()).ok_or(VaultError::OrderNotTracked)?;
@@ -379,13 +379,11 @@ pub(crate) fn update_order(ctx: Context<UpdateOrder>, args: UpdateOrderArgs) -> 
     if tracked.order_type.is_increase() {
         require!(!a.config.paused.trading, VaultError::Paused);
         require!(a.funded.status == FundedStatus::Active, VaultError::InvalidAccountStatus);
-    }
-    if let Some(size) = args.size_delta_usd {
-        if tracked.order_type.is_increase() {
-            check_increase(&a.funded, &slot, &a.market_config, slot.is_long, size, tracked.collateral, tracked.size_usd)?;
-        } else {
-            require!(size > 0, VaultError::InvalidAmount);
-        }
+        require!(a.market_config.enabled, VaultError::MarketDisabled);
+        let size = args.size_delta_usd.unwrap_or(tracked.size_usd);
+        check_increase(&a.funded, &slot, &a.market_config, slot.is_long, size, tracked.collateral, tracked.size_usd)?;
+    } else if let Some(size) = args.size_delta_usd {
+        require!(size >= gmtrade::MIN_DECREASE_USD, VaultError::InvalidAmount);
     }
 
     let funded_key = a.funded.key();

@@ -141,7 +141,9 @@ Trader (signer = trader wallet):
   MarketDecrease (u128::MAX size closes all; GMTrade caps to position size).
 - `set_protection(market_token, is_long, kind: TakeProfit|StopLoss, trigger_price, size_delta_usd)` — trader;
   LimitDecrease / StopLossDecrease.
-- `update_order(order, trigger_price, acceptable_price, size_delta_usd)` — trader; `update_order_v2`.
+- `update_order(order, trigger_price, acceptable_price, size_delta_usd)` — trader; `update_order_v2`. A limit increase
+  only while trading is live, the account `Active` and its market enabled, and within the market's current limits (any
+  change can make it fill at once).
 - `cancel_order(order)` — trader or risk authority; `close_order_v2` with executor = owner = receiver = rent_receiver =
   owner PDA; drops the order from tracking.
 - `request_payout()` — account Active; last sync shows all slots flat and no tracked orders; profit =
@@ -165,8 +167,16 @@ Permissionless cranks:
   Position accounts must be owned by the GMTrade program and match `["position", store, owner_pda, market_token, usdc, kind]`
   (kind 1 = long, 2 = short, per v0.10.0 IDL). Order accounts that no longer exist or are not owned by GMTrade are
   dropped. Updates slot size/collateral, frees flat slots, updates market OI, sets `last_sync_at`.
-- `top_up_owner(funded)` — owner lamports < owner_sol_min → transfer from sol_treasury up to owner_sol_target.
+- `top_up_owner(funded)` — owner lamports < owner_sol_min → transfer from sol_treasury up to owner_sol_target. Only
+  for an `Active` account while trading is not paused; any other account keeps the float it has (see §8, GMTrade
+  bounds).
 - `close_completed_order(funded, order)` — owner-signed `close_order_v2` for orders GMTrade left open (missing ATA case).
+- `close_empty_position(funded, position)` — owner-signed `close_empty_position` for an empty GMTrade Position of the
+  owner PDA that no slot uses (an increase that never filled leaves one, holding ≈ 0.026 SOL of rent and liquidation
+  reserve); the lamports go back to `sol_treasury`. Closed accounts too.
+- `collect_claimable(funded, claimable)` — moves the USDC GMTrade set aside for the owner PDA in a claimable account (a
+  decrease's negative price impact above the cap; token authority = the store, delegate = the owner PDA, approved by a
+  GMTrade keeper) to the owner ATA, or to `capital_vault` once the account is closed.
 
 Events for every state change (`EvaluationPurchased`, `EvaluationResolved`, `FundedActivated`, `OrderRequested`,
 `OrderCancelled`, `ProtectionSet`, `Synced`, `PayoutRequested`, `PayoutPaid`, `PayoutRejected`, `AccountRestricted`,
@@ -232,7 +242,8 @@ Per funded account, every tick (≤ 5 s) and on account change:
    slot released).
 3. Session guard: for session-restricted markets, 10 min before close, close positions whose leverage exceeds the
    closed-market cap.
-4. Cancel TP/SL orders whose position is gone; `close_completed_order` for stuck orders; `top_up_owner`.
+4. Cancel TP/SL orders whose position is gone; `close_completed_order` for stuck orders; `top_up_owner` (active
+   accounts, trading not paused).
 5. Payout review: flat, no linked opposite/correlated positions across accounts in the review window, identity
    verified → `approve_payout`, else hold for manual review (admin API) and alert.
 6. Watch the GMTrade program's upgrade slot; on change → set trading pause, alert.
@@ -288,8 +299,8 @@ Program (round 1, reviewed by two adversarial auditors, all findings fixed):
   addresses are rejected): the keeper passes SDK `fetchOwnerPositions()`.
 - Decrease orders need size ≥ $1 (GMTrade min) or CLOSE_ALL. Every non-protective order needs acceptable_price ≠ 0;
   TP/SL have none so they can always execute.
-- `initialize` starts with all pauses on; the trading pause also blocks `activate_funded`; pauses never block closes,
-  cancels or protective orders. Capital vault ATA is `init_if_needed` (front-running initialize is harmless).
+- `initialize` starts with all pauses on; the trading pause also blocks `activate_funded` and `top_up_owner`; pauses
+  never block closes, cancels or protective orders. Capital vault ATA is `init_if_needed` (front-running initialize is harmless).
 - Build: `opt-level = "s"` → 899 KB (rent ≈ 4.57 SOL; have ~10 SOL during deploy for the buffer). CU: open ≈ 166k,
   open + stop-loss in one v0 tx ≈ 283k (SDK default limit 400k). Owner PDA float target 0.25 SOL / min 0.05 SOL.
 - Round 2: events moved to `emit_cpi!` (every event-emitting instruction takes `event_authority` + `program`; the SDK
@@ -302,8 +313,21 @@ Program (round 1, reviewed by two adversarial auditors, all findings fixed):
 - Rent payers: trader pays Evaluation/TraderProfile/FundedAccount/PayoutRequest; sol_treasury pays owner float and
   payout ATAs; kyc authority pays IdentityLock.
 - Known, accepted: third-party USDC sent to an owner ATA counts as balance → the payout review must reconcile requested
-  profit against indexed GMTrade realized PnL before `approve_payout`. Execution-fee churn is bounded by the $1 minimum;
-  the keeper alerts on high order churn.
+  profit against indexed GMTrade realized PnL before `approve_payout`. Execution-fee churn is bounded by the $1 minimum
+  (`update_order` too); the keeper alerts on high order churn.
+- GMTrade is upgradeable, so every GMTrade CPI the owner PDA signs writable is bounded afterwards
+  (`UnexpectedGmtradeEffect`): the owner PDA stays data-less and system-owned and loses at most the rent and fees of
+  that call, and the owner ATA, when GMTrade gets it, keeps its owner, gets no delegate or close authority, and changes
+  only by the order's collateral (down on an increase, never down on a close). Those bounds hold per call, and closes
+  and protective orders stay open to restricted, breached and paused accounts, so `top_up_owner` refills only `Active`
+  accounts while trading is not paused: restricting an account (the keeper does it to every active one on a GMTrade
+  upgrade) or pausing trading caps what an upgraded GMTrade can take from it at its current SOL float. A forced close
+  that finds the float too thin fails and alerts; fund that owner PDA with a plain transfer (it returns to the
+  treasury at `close_funded`).
+- Gap: the keeper does not yet send `close_empty_position` (after the `sync` that frees a slot, and after
+  `close_funded`) or `collect_claimable` (after GMTrade unlocks a claimable account), and the funded valuation does not
+  count claimable USDC. Until it does, both are recoverable by hand (permissionless); the indexer stores their events
+  (`emptyPositionClosed`, `claimableCollected`) without projecting them.
 
 Data (round 1): 15m/4h candles come natively from GMTrade's candle service (verified equal to aggregates).
 `MarketState.raw` = raw base64 account images for the WASM model. The WASM model now runs GMTrade's
@@ -376,8 +400,10 @@ Chain module (round 2):
 - Indexer: the logs subscription only wakes a catch-up; the catch-up pages `getSignaturesForAddress` (confirmed) back to
   `indexer_cursors.signature` and applies transactions oldest-first. Each transaction's `program_events` rows, projections
   and cursor commit in one database transaction, so a replay or duplicate delivery applies nothing twice. A projection
-  error leaves the cursor before the transaction (retried with backoff), never skips it; the keeper alerts when a
-  props_vault transaction has waited more than 5 min to be indexed (checked once a minute against the chain).
+  error leaves the cursor before the transaction (retried with backoff), never skips it; an event the server does not
+  know (a program newer than the server) is stored in `program_events` and logged as an error, not projected; the
+  keeper alerts when a props_vault transaction has waited more than 5 min to be indexed (checked once a minute against
+  the chain).
 - Funded valuation: V = owner USDC + collateral escrowed in pending increase orders + Σ model net value (no debt);
   equity = S − L + V (allowance = V); realized = V − L − unrealized. A position the model cannot value counts at its
   collateral and the account's freshness is `unavailable`.
@@ -424,7 +450,8 @@ Keeper module (round 2):
 - Cleanup: finished-but-open orders → `close_completed_order` + `sync`; TP/SL whose position is gone → cancel, unless a
   pending increase on the slot is at least as old (placed together with an open). `sync` is sent exactly when it would
   change something (slot size/collateral/pending sum, a vanished order, an idle slot). `top_up_owner` below
-  `owner_sol_min`.
+  `owner_sol_min`, for active accounts while trading is not paused (the program refuses the rest) and no GMTrade
+  upgrade awaits review.
 - Payout review (requested, no decision job yet, payouts not paused): flat (no slot/order, every
   `fetchOwnerPositions` account size 0), identity verified onchain, requested profit ≤ realized P&L of indexed fills since
   the last paid payout + $0.01 per fill, and no other funded account added exposure (any increase fill, not only an
@@ -485,7 +512,8 @@ Launch (round 3, `docs/runbooks/launch.md` is the go-live procedure):
   needs `ws://localhost:*`, `http://localhost`, inline styles and Google Fonts, so those are allowed.
 - Admin scripts build for a multisig with `--print-for <ADMIN>` once the admin is the Squads vault: simulated with the
   vault as fee payer, then printed as an unsigned base58 legacy transaction for Squads' "Import base58 encoded tx". A
-  failing dry run exits 1 and prints nothing to import.
+  failing dry run exits 1 and prints nothing to import. There `set-pauses.ts` and `set-params.ts` need every flag or
+  parameter named: the instructions overwrite them all, and Squads may execute an older proposal after a newer one.
 - Identity hashes come only from `scripts/admin/identity-hash.ts`: HMAC-SHA256 under IDENTITY_SALT of one document in
   canonical form (`<ISSUER alpha-2>:<PASSPORT|ID_CARD>:<NUMBER A-Z0-9>`), so one document always gives one hash.
 

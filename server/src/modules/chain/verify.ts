@@ -25,6 +25,7 @@ const EVENT_TITLES: Record<string, string> = {
   payoutPaid: 'Payout paid', payoutRejected: 'Payout rejected', accountRestricted: 'Account restriction changed', accountBreached: 'Loss limit reached',
   accountClosed: 'Funded account closed', capitalDeposited: 'Capital deposited', capitalWithdrawn: 'Capital withdrawn', feesSwept: 'Fees moved to capital',
   configChanged: 'Program settings changed', identitySet: 'Identity verified', solTreasuryWithdrawn: 'SOL treasury withdrawal',
+  emptyPositionClosed: 'Empty GMTrade position closed', claimableCollected: 'GMTrade claimable USDC collected',
 };
 
 export function createVerify(d: { db: Db; rpc: Pick<Connection, 'getAccountInfo' | 'getTransaction'>; programId: PublicKey; cluster: AppConfig['cluster'] }) {

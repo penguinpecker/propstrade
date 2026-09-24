@@ -3,11 +3,16 @@
 //! tests/program/fixtures/gmsol_store.idl.json the way Anchor 0.31's `declare_program!` client builds them: IDL account
 //! order, IDL signer/writable flags, and an absent optional account passed as the GMTrade program id (readonly).
 //! Each CPI checks its `program` account is GMTrade before anything is signed (Anchor's `Program<'info, GmsolStore>`),
-//! so the owner PDA's signature can only ever reach GMTrade, even from a handler that forgot its own check.
+//! so the owner PDA's signature can only ever reach GMTrade, even from a handler that forgot its own check. GMTrade is
+//! upgradeable, so each CPI the owner PDA signs writable is also bounded afterwards (`UnexpectedGmtradeEffect`): the owner
+//! PDA stays data-less and system-owned and loses at most the rent and fees the call is for, and the owner's USDC account,
+//! when GMTrade gets it, keeps its owner, gets no delegate or close authority, and changes only by the order's collateral.
 use pinocchio::{AccountView, Address};
 
 use crate::{
-    accounts::{create_program_address, program_account, GMTRADE_PROGRAM_ID, SYSTEM_PROGRAM_ID},
+    accounts::{
+        create_program_address, program_account, token_account, Rent, GMTRADE_PROGRAM_ID, NONE, SYSTEM_PROGRAM_ID,
+    },
     cpi::{create_ata, invoke, r, w, ws, Buf, Meta, Seeds},
     error::{require, Result, E},
     state::order_type,
@@ -41,6 +46,9 @@ pub mod layout {
     pub const POSITION_SIZE_IN_USD: usize = 216;
 
     pub const ORDER_LEN: usize = 2472;
+    /// UserHeader (`prepare_user`): 8 + `UserHeader::space(0)`.
+    pub const USER_LEN: usize = 520;
+    pub const TOKEN_ACCOUNT_LEN: usize = 165;
     pub const ORDER_ACTION_STATE: usize = 9;
     pub const ORDER_INITIAL_COLLATERAL_ESCROW: usize = 592;
     pub const ORDER_FINAL_OUTPUT_ESCROW: usize = 656;
@@ -189,6 +197,38 @@ pub mod ix {
     pub const CREATE_ORDER_V2: [u8; 8] = [200, 157, 3, 182, 3, 164, 162, 240];
     pub const CLOSE_ORDER_V2: [u8; 8] = [213, 217, 98, 100, 225, 205, 76, 184];
     pub const UPDATE_ORDER_V2: [u8; 8] = [195, 175, 207, 33, 171, 246, 41, 176];
+    pub const CLOSE_EMPTY_POSITION: [u8; 8] = [175, 105, 138, 38, 237, 235, 250, 59];
+}
+
+/// Lamports one order takes from its owner: the escrow ATA and the Order account's rent, and the keeper's execution fee.
+/// It is also what GMTrade reserves in a new Position for a liquidation order (`Order::position_cut_rent`, pure market).
+fn order_cost(rent: &Rent) -> u64 {
+    rent.minimum_balance(TOKEN_ACCOUNT_LEN) + rent.minimum_balance(ORDER_LEN) + EXECUTION_LAMPORTS
+}
+
+/// The owner PDA after a GMTrade CPI it signed writable: still data-less and system-owned (a GMTrade that took it over
+/// would strand everything it controls) and at most `spend` lamports poorer.
+fn check_owner(owner: &AccountView, before: u64, spend: u64) -> Result {
+    require(
+        owner.owned_by(&SYSTEM_PROGRAM_ID) && owner.is_data_empty() && owner.lamports() >= before.saturating_sub(spend),
+        E::UnexpectedGmtradeEffect,
+    )
+}
+
+/// The owner's USDC account after a GMTrade CPI that got it: still a USDC account of `owner`, with no delegate and no
+/// close authority, holding between `min` and `max`.
+fn check_usdc(v: &AccountView, owner: &Address, min: u64, max: u64) -> Result {
+    let ok = match token_account(v) {
+        Ok(t) => {
+            t.owner == *owner
+                && t.delegate_tag == NONE
+                && t.close_authority_tag == NONE
+                && t.amount.get() >= min
+                && t.amount.get() <= max
+        }
+        Err(_) => false,
+    };
+    require(ok, E::UnexpectedGmtradeEffect)
 }
 
 /// `OrderKind` variant indexes.
@@ -302,6 +342,11 @@ impl CreateOrder<'_> {
     pub fn invoke(&self, signer: Seeds, nonce: [u8; 32], params: &OrderParams, source: Option<&AccountView>) -> Result {
         program_account(self.program, &GMTRADE_PROGRAM_ID)?;
         let program = self.program.address();
+        let lamports = self.owner.lamports();
+        let usdc = match source {
+            Some(s) => token_account(s)?.amount.get(),
+            None => 0,
+        };
         create_ata(
             self.owner,
             self.escrow,
@@ -368,7 +413,18 @@ impl CreateOrder<'_> {
             r(self.event_authority),
             r(self.program),
         ];
-        invoke(program, &metas, d.as_slice(), signer)
+        invoke(program, &metas, d.as_slice(), signer)?;
+
+        // An increase may also pay for the user account, the position and its liquidation reserve, and moves exactly the
+        // collateral out of the source.
+        let rent = Rent::get()?;
+        let mut spend = order_cost(&rent);
+        if let Some(s) = source {
+            spend += order_cost(&rent) + rent.minimum_balance(USER_LEN) + rent.minimum_balance(POSITION_LEN);
+            let left = usdc.saturating_sub(params.initial_collateral_delta_amount);
+            check_usdc(s, self.owner.address(), left, left)?;
+        }
+        check_owner(self.owner, lamports, spend)
     }
 }
 
@@ -399,6 +455,9 @@ impl CloseOrder<'_> {
         require(d.len() == ORDER_LEN && d[..8] == ORDER_DISC, E::InvalidOrderAccount)?;
         let has_initial = *address_at(d, ORDER_INITIAL_COLLATERAL_ESCROW) != Address::default();
         let has_final = *address_at(d, ORDER_FINAL_OUTPUT_ESCROW) != Address::default();
+
+        let lamports = self.owner.lamports();
+        let usdc = token_account(self.owner_usdc)?.amount.get();
 
         let none = r(self.program);
         let some = |m, yes| if yes { m } else { none };
@@ -436,8 +495,26 @@ impl CloseOrder<'_> {
             r(self.event_authority),
             r(self.program),
         ];
-        invoke(self.program.address(), &metas, data.as_slice(), signer)
+        invoke(self.program.address(), &metas, data.as_slice(), signer)?;
+        // Closing only ever pays the owner: escrowed funds to its USDC account, rent to the PDA.
+        check_usdc(self.owner_usdc, self.owner.address(), usdc, u64::MAX)?;
+        check_owner(self.owner, lamports, 0)
     }
+}
+
+/// `close_empty_position` as the owner PDA: GMTrade closes an empty Position of the owner (it refuses one that is not
+/// empty) and sends its lamports, rent and liquidation reserve, to the owner.
+pub fn close_empty_position(
+    program: &AccountView,
+    owner: &AccountView,
+    store: &AccountView,
+    position: &AccountView,
+    signer: Seeds,
+) -> Result {
+    program_account(program, &GMTRADE_PROGRAM_ID)?;
+    let lamports = owner.lamports();
+    invoke(program.address(), &[ws(owner), r(store), w(position)], &ix::CLOSE_EMPTY_POSITION, signer)?;
+    check_owner(owner, lamports, 0)
 }
 
 /// `update_order_v2` as the owner PDA (`UpdateOrderParams` with `min_output` and `valid_from_ts` None).
@@ -499,7 +576,7 @@ mod tests {
 
     const SIGNER: Seeds = &[&[b"owner", &[255]]];
 
-    fn create(program: &AccountView, order: &AccountView, any: &AccountView) -> Result {
+    fn create(program: &AccountView, order: &AccountView, any: &AccountView, usdc: &AccountView) -> Result {
         let params = order_params(order_type::MARKET, true, 1, 1, None, Some(1));
         CreateOrder {
             owner: any,
@@ -516,13 +593,13 @@ mod tests {
             associated_token_program: any,
             system_program: any,
         }
-        .invoke(SIGNER, [0; 32], &params, Some(any))
+        .invoke(SIGNER, [0; 32], &params, Some(usdc))
     }
 
-    fn close(program: &AccountView, order: &AccountView, any: &AccountView) -> Result {
+    fn close(program: &AccountView, order: &AccountView, any: &AccountView, usdc: &AccountView) -> Result {
         CloseOrder {
             owner: any,
-            owner_usdc: any,
+            owner_usdc: usdc,
             store: any,
             store_wallet: any,
             user: any,
@@ -552,13 +629,62 @@ mod tests {
         image[..8].copy_from_slice(&ORDER_DISC);
         let (_d, foreign_order) = account(Address::new_from_array([7; 32]), TOKEN_PROGRAM_ID, false, &image);
         let (_e, order) = account(Address::new_from_array([7; 32]), GMTRADE_PROGRAM_ID, false, &image);
+        // The owner's USDC account (owner = `any`), which the helpers read before and after their CPI.
+        let mut usdc_image = vec![0u8; TOKEN_ACCOUNT_LEN];
+        usdc_image[108] = 1; // initialized
+        let (_f, usdc) = account(Address::new_from_array([8; 32]), TOKEN_PROGRAM_ID, false, &usdc_image);
 
         let refused: Result = Err(E::InvalidProgramId.into());
-        assert_eq!(create(&other, &foreign_order, &any), refused);
-        assert_eq!(close(&other, &foreign_order, &any), refused);
+        assert_eq!(create(&other, &foreign_order, &any, &usdc), refused);
+        assert_eq!(close(&other, &foreign_order, &any, &usdc), refused);
         assert_eq!(update(&other, &foreign_order, &any), refused);
-        assert_eq!(create(&gmtrade, &order, &any), Ok(()));
-        assert_eq!(close(&gmtrade, &order, &any), Ok(()));
+        assert_eq!(close_empty_position(&other, &any, &any, &order, SIGNER), refused);
+        assert_eq!(create(&gmtrade, &order, &any, &usdc), Ok(()));
+        assert_eq!(close(&gmtrade, &order, &any, &usdc), Ok(()));
         assert_eq!(update(&gmtrade, &order, &any), Ok(()));
+        assert_eq!(close_empty_position(&gmtrade, &any, &any, &order, SIGNER), Ok(()));
+    }
+
+    /// A USDC token account image: owner field `owner`, `amount`, and the delegate / close authority tags given.
+    fn usdc_image(owner: &Address, amount: u64, delegate: bool, close_authority: bool) -> Vec<u8> {
+        let mut d = vec![0u8; TOKEN_ACCOUNT_LEN];
+        d[32..64].copy_from_slice(owner.as_ref());
+        d[64..72].copy_from_slice(&amount.to_le_bytes());
+        d[72] = delegate as u8;
+        d[108] = 1; // initialized
+        d[129] = close_authority as u8;
+        d
+    }
+
+    #[test]
+    fn post_cpi_bounds_refuse_what_the_call_did_not_ask_for() {
+        let bad: Result = Err(E::UnexpectedGmtradeEffect.into());
+        let pda = Address::new_from_array([9; 32]);
+
+        // The owner PDA: system-owned, no data, at most `spend` lamports poorer.
+        let (_a, mut owner) = account(pda, SYSTEM_PROGRAM_ID, false, &[]);
+        owner.set_lamports(1_000);
+        assert_eq!(check_owner(&owner, 1_000, 0), Ok(()));
+        assert_eq!(check_owner(&owner, 1_300, 300), Ok(()));
+        assert_eq!(check_owner(&owner, 1_301, 300), bad);
+        let (_b, taken) = account(pda, GMTRADE_PROGRAM_ID, false, &[]);
+        assert_eq!(check_owner(&taken, 0, u64::MAX), bad);
+        let (_c, with_data) = account(pda, SYSTEM_PROGRAM_ID, false, &[0]);
+        assert_eq!(check_owner(&with_data, 0, u64::MAX), bad);
+
+        // The owner's USDC account: the owner's, no delegate, no close authority, balance within bounds.
+        let usdc = |image: &[u8]| account(Address::new_from_array([8; 32]), TOKEN_PROGRAM_ID, false, image);
+        let (_d, fine) = usdc(&usdc_image(&pda, 400, false, false));
+        assert_eq!(check_usdc(&fine, &pda, 400, 400), Ok(()));
+        assert_eq!(check_usdc(&fine, &pda, 300, u64::MAX), Ok(()));
+        assert_eq!(check_usdc(&fine, &pda, 401, u64::MAX), bad);
+        assert_eq!(check_usdc(&fine, &pda, 0, 399), bad);
+        assert_eq!(check_usdc(&fine, &Address::new_from_array([1; 32]), 400, 400), bad);
+        let (_e, delegated) = usdc(&usdc_image(&pda, 400, true, false));
+        assert_eq!(check_usdc(&delegated, &pda, 400, 400), bad);
+        let (_f, closable) = usdc(&usdc_image(&pda, 400, false, true));
+        assert_eq!(check_usdc(&closable, &pda, 400, 400), bad);
+        let (_g, closed) = account(Address::new_from_array([8; 32]), SYSTEM_PROGRAM_ID, false, &[]);
+        assert_eq!(check_usdc(&closed, &pda, 0, u64::MAX), bad);
     }
 }
