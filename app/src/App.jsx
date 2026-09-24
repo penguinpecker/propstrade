@@ -74,6 +74,11 @@ export default function App() {
   useEffect(() => { document.documentElement.dataset.density = prefs.density.toLowerCase(); document.documentElement.dataset.motion = prefs.motion ? 'reduced' : 'normal'; }, [prefs]);
   useEffect(() => { document.documentElement.dataset.theme = theme; document.querySelector('meta[name="theme-color"]').content = theme === 'dark' ? '#131217' : '#f6f5f1'; }, [theme]);
   const market = markets.find(m => m.symbol === marketSymbol) ?? markets.find(m => m.symbol === 'BTC') ?? markets[0];
+  // A saved market the catalog does not have when it first arrives: the one shown in its place is saved instead, so the
+  // next visit starts there (its candles are asked for before the catalog). A market that leaves the catalog later is
+  // only shown in its place while it is gone.
+  const firstCatalog = useRef(true);
+  useEffect(() => { if (!market || !firstCatalog.current) return; firstCatalog.current = false; if (market.symbol !== marketSymbol) setMarketSymbol(market.symbol); }, [market?.symbol]);
   /** The account a stage works with: the one chosen in the switcher, else the newest current one, else the newest. */
   const accountFor = s => { const list = accounts.filter(a => a.stage === s).sort(newestFirst); return list.find(a => a.id === selected[s]) ?? list.find(a => isCurrent(a, accounts)) ?? list[0] ?? null; };
   const account = routeId ? routed : accountFor(stage);

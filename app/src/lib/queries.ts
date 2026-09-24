@@ -65,9 +65,14 @@ export const useMarkets = () => useQuery({ queryKey: keys.markets, queryFn: api.
 export const useMarket = (symbol: string) => useQuery({ queryKey: keys.market(symbol), queryFn: () => api.market(symbol) });
 export const useMarketTrades = (symbol: string) =>
   useQuery({ queryKey: keys.marketTrades(symbol), queryFn: () => api.marketTrades(symbol), enabled: symbol !== '', refetchInterval: 10_000 });
-/** Live ticks move the last candle between fetches (see Chart.jsx); the periodic refetch picks up GMTrade's own candles. */
-export const useCandles = (symbol: string, interval: CandleInterval) =>
-  useQuery({ queryKey: keys.candles(symbol, interval), queryFn: () => api.candles(symbol, interval), enabled: symbol !== '', refetchInterval: 60_000 });
+/**
+ * Live ticks move the last candle between fetches (see Chart.jsx); the periodic refetch picks up GMTrade's own candles.
+ * The trade page reads these from the saved symbol before the market catalog is in, and prefetches the watchlist's on
+ * the same keys, so a watchlist click paints from memory.
+ */
+export const candlesOptions = (symbol: string, interval: CandleInterval) =>
+  queryOptions({ queryKey: keys.candles(symbol, interval), queryFn: () => api.candles(symbol, interval), enabled: symbol !== '', refetchInterval: 60_000 });
+export const useCandles = (symbol: string, interval: CandleInterval) => useQuery(candlesOptions(symbol, interval));
 /**
  * Fees, price impact and execution price for an order size. While a new size loads, the previous size's quote stays
  * (same market and side only: another market's or side's figures are never shown for this one).

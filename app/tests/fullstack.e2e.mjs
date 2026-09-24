@@ -59,9 +59,10 @@ await context.addInitScript(installTestWallet, { accounts: [{ address: trader.ad
 const page = await context.newPage();
 const errors = [];
 // Expected: the signed-out /v1/me (401), and GMTrade's own candle and trade services failing upstream now and then (the
-// server answers 502 after its 15 s timeout; the app shows its unavailable state).
+// server answers 503 for candles it has nothing to show for after 4 s, 502 for trades after 5 s; the app shows its
+// unavailable state).
 const expected = msg => /status of 401/.test(msg.text()) && msg.location().url.endsWith('/v1/me')
-  || /status of 502/.test(msg.text()) && /\/v1\/(candles|markets\/\w+\/trades)\b/.test(msg.location().url);
+  || /status of 50[23]/.test(msg.text()) && /\/v1\/(candles|markets\/\w+\/trades)\b/.test(msg.location().url);
 page.on('console', msg => { if (msg.type() === 'error' && !expected(msg)) errors.push(`${msg.text()} (${msg.location().url})`); });
 page.on('pageerror', error => errors.push(error.message));
 const main = page.locator('#main');

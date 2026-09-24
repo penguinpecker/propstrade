@@ -7,9 +7,13 @@ import { Badge, Button, DataRow, Dialog, Empty, Field, FreshnessBadge, IconButto
 import { api } from './lib/api';
 import { INTERVAL_SECONDS } from './lib/candles';
 import { useChartSettings } from './chart/storage.js';
-import { useCancelSimOrder, useCandles, useCloseSimPosition, useHistory, useMarketTrades, useOrders, usePlaceSimOrder, usePositions, useQuote, useResetPractice, useSetSimProtection } from './lib/queries';
+import { candlesOptions, useCancelSimOrder, useCandles, useCloseSimPosition, useHistory, useMarketTrades, useOrders, usePlaceSimOrder, usePositions, useQuote, useResetPractice, useSetSimProtection } from './lib/queries';
 import { useWalletTransaction } from './lib/transactions';
-const ChartPanel = lazy(() => import('./Chart.jsx'));
+// The chart's code (lightweight-charts) downloads while the first API calls are in flight rather than once the market row
+// is in; a failed download surfaces where the chart renders (React.lazy), not as an unhandled rejection.
+const chartModule = import('./Chart.jsx');
+chartModule.catch(() => {});
+const ChartPanel = lazy(() => chartModule);
 
 const TRADABLE_STATUSES = ['active', 'near_limit'];
 const newId = () => crypto.randomUUID();
@@ -35,7 +39,7 @@ export function AccountStrip() {
 }
 
 export default function Trading() {
-  const { account, stage, market, markets, marketsQuery, theme, setModal, favorites, selectMarket, notify, streamStatus, openRecord, navigate, signedIn, accountsQuery } = useApp();
+  const { account, stage, market, marketSymbol, markets, marketsQuery, theme, setModal, favorites, selectMarket, notify, streamStatus, openRecord, navigate, signedIn, accountsQuery } = useApp();
   const client = useQueryClient();
   const chart = useChartSettings(market?.symbol ?? '');
   const { interval, showGuides } = chart;
@@ -66,7 +70,17 @@ export default function Trading() {
   const history = useHistory(accountId);
   const openOrders = (orders.data ?? []).filter(isOpenOrder);
   const bySymbol = useMemo(() => new Map(markets.map(m => [m.symbol, m])), [markets]);
-  const candles = useCandles(market?.symbol ?? '', interval);
+  // Candles are asked for from the saved symbol at mount, before the catalog is in; the chart mounts once both are.
+  const symbol = market?.symbol ?? marketSymbol;
+  const candles = useCandles(symbol, interval);
+  const warmed = useRef(null); // the interval the watchlist's candles were prefetched for
+  // Once this market's candles are in, the watchlist's for the same interval (at most 4 other markets), so a watchlist
+  // click paints from memory: once per interval, not on ticks or catalog updates; ones still fresh (staleTime) are skipped.
+  useEffect(() => {
+    if (!candles.isSuccess || warmed.current === interval) return;
+    warmed.current = interval;
+    for (const other of favorites.filter(s => s !== symbol).slice(0, 4)) client.query(candlesOptions(other, interval)).catch(() => {});
+  }, [candles.isSuccess, interval]);
   const marketTrades = useMarketTrades(market?.symbol ?? '');
   const quoteSize = useDebounced(Number(size) > 0 ? Number(size).toFixed(2) : null, 300);
   const quote = useQuote(market?.symbol ?? '', side, market ? quoteSize : null);
@@ -82,7 +96,10 @@ export default function Trading() {
   useEffect(() => { if ([tx.phase, openTx.phase].some(phase => phase === 'done' || phase === 'failed')) void refresh(); }, [tx.phase, openTx.phase]);
   useEffect(() => { tx.reset(); openTx.reset(); setActionError(null); }, [accountId]);
 
-  if (!market) return <><AccountStrip /><div className="page">{marketsQuery.isError ? <Unavailable title="Markets are unavailable" error={marketsQuery.error} retry={marketsQuery.refetch} /> : <Pending>Loading GMTrade markets…</Pending>}</div></>;
+  const watchlist = <div className="watchlist-bar"><button className="watchlist-title" onClick={() => navigate('/markets')}><Star size={12} /> Watchlist</button>{markets.filter(m => favorites.includes(m.symbol)).map(m => <button key={m.symbol} className={market?.symbol === m.symbol ? 'selected' : ''} onClick={() => selectMarket(m.symbol)}><span>{m.symbol}</span><span>{price(m.price, m.priceDecimals)}</span>{freshnessLabel(m) ? <FreshnessBadge market={m} /> : <small className={m.change24h > 0 ? 'positive' : 'negative'}>{percent(m.change24h)}</small>}</button>)}<IconButton icon={Plus} label="Add a market to your watchlist" onClick={() => navigate('/markets')} /><a href="#/markets">All markets <ArrowUpRight size={12} /></a></div>;
+  if (!market && marketsQuery.isError) return <><AccountStrip /><div className="page"><Unavailable title="Markets are unavailable" error={marketsQuery.error} retry={marketsQuery.refetch} /></div></>;
+  // The terminal's frame with the chart's skeleton in place while the catalog loads: the candles are already on their way.
+  if (!market) return <><AccountStrip />{watchlist}<div className="trading-layout"><section className="market-workspace"><div className="market-heading" /><div className="chart-and-feed"><div className="chart-section"><div className="chart-skeleton" /></div></div></section></div></>;
   const dec = market.priceDecimals;
   const paused = streamStatus === 'reconnecting' || streamStatus === 'offline';
   const stale = market.freshness === 'stale' || market.freshness === 'unavailable';
@@ -151,7 +168,7 @@ export default function Trading() {
 
   return <>
     <AccountStrip />
-    <div className="watchlist-bar"><button className="watchlist-title" onClick={() => navigate('/markets')}><Star size={12} /> Watchlist</button>{markets.filter(m => favorites.includes(m.symbol)).map(m => <button key={m.symbol} className={market.symbol === m.symbol ? 'selected' : ''} onClick={() => selectMarket(m.symbol)}><span>{m.symbol}</span><span>{price(m.price, m.priceDecimals)}</span>{freshnessLabel(m) ? <FreshnessBadge market={m} /> : <small className={m.change24h > 0 ? 'positive' : 'negative'}>{percent(m.change24h)}</small>}</button>)}<IconButton icon={Plus} label="Add a market to your watchlist" onClick={() => navigate('/markets')} /><a href="#/markets">All markets <ArrowUpRight size={12} /></a></div>
+    {watchlist}
     <div className="trading-layout">
       <section className="market-workspace">
         <div className="market-heading"><button className="market-select" onClick={() => setModal('markets')}><MarketIcon market={market} /><span><strong>{market.pair.split(' / ')[0]}<span className="quiet"> / {market.pair.split(' / ')[1]}</span></strong><small>{market.name} perpetual</small></span><ChevronDown size={15} /></button><div className="market-price"><strong>{price(market.price, dec)}</strong><span className={market.change24h > 0 ? 'positive' : 'negative'}>{percent(market.change24h)} <small>24h</small></span></div><div className="market-metric"><span>24h volume</span><strong>{compactUsd(market.volume24h)}</strong></div><div className="market-metric"><span>Open interest</span><strong>{compactUsd(openInterest)}</strong></div><div className="market-metric rate-metric"><span>Funding / hour</span><strong className={market.fundingRateHourlyLong == null ? '' : tone(market.fundingRateHourlyLong)} title="Paid by longs when positive, received when negative">{percent(market.fundingRateHourlyLong, 4)}</strong></div><Badge tone={sessionTone} dot title={market.sessionNote}>{sessionLabel}</Badge></div>

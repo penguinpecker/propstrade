@@ -7,7 +7,7 @@ import type {
 import {
   INTERVAL_SECONDS, KeeperFeed, PUBLIC_RPC, USD_DECIMALS, USD_UNIT, buildCatalog, fetchCandles, fetchCandlesBatch,
   fetchPairs, fetchTradeEvents, formatFixed, isMarketClosed, modelInput, parseFixed, priceString, priceTick, sessionOf,
-  usdString, type KeeperMarket, type Pair, type PropsLimits,
+  usdString, type FeedState, type KeeperMarket, type Pair, type PropsLimits,
 } from '@props/gmtrade';
 import { model } from '@props/gmsol-wasm';
 import { z } from 'zod';
@@ -32,10 +32,19 @@ const NO_USDC_POOL = 'Not available for funded trading: GMTrade has no USDC-only
 const PRICE_FLUSH_MS = 250; // at most 4 'price' events per second
 const MAX_CANDLES = 2_000;
 const TRADES_TTL_MS = 5_000;
-// How long a request waits for GMTrade before answering without it. The call keeps going and fills the cache.
+// How long a request waits for GMTrade when there is nothing at all to show. The call keeps going and fills the cache.
 const CANDLE_WAIT_MS = 4_000;
 const TRADES_WAIT_MS = 5_000;
 const MARKET_INFO_TIMEOUT_MS = 45_000; // a background refresh; the service has taken 20 s to answer
+// The pre-warm refreshes every market's latest window of every interval at least this often (a copy under two minutes
+// old answers 'live') and again this long after each bucket boundary, when the cache key rotates.
+const PREWARM_EVERY_S = 60;
+const PREWARM_AFTER_BOUNDARY_S = 2;
+// Index tokens per full-window batch: 8 × 300 candles answer in 0.1-4 s depending on the span, 17 take 3 s and all 68
+// time out (measured 2026-09-24); a 3-bucket patch for all 68 takes 0.1-0.3 s. Fill order: the app's default chart
+// interval first (a fresh process gets its 24h change from one small request ahead of the fills), then 5m.
+const PREWARM_CHUNK = 8;
+const PREWARM_ORDER: CandleInterval[] = ['1h', '5m', '15m', '4h', '1D'];
 
 /** What the service does while each outside source fails (reported by /v1/health). */
 const FALLBACKS: Record<string, string> = {
@@ -46,17 +55,31 @@ const FALLBACKS: Record<string, string> = {
   solanaRpc: 'The funded-trading allowlist keeps its last value.',
 };
 
-/** GMTrade keeps revising a candle for seconds after its bucket closes, so a range is cached for an
- *  hour only once its last bucket closed more than a minute ago. */
-export const candleCacheTtl = (end: number, res: number, nowSec: number) => (end + res <= nowSec - 60 ? 3_600_000 : 5_000);
+/** GMTrade keeps revising a candle for seconds after its bucket closes: a window is settled once its last bucket
+ *  closed more than a minute ago. */
+export const settled = (end: number, res: number, nowSec: number) => end + res <= nowSec - 60;
+/** A settled range is cached for an hour, any other for seconds. */
+export const candleCacheTtl = (end: number, res: number, nowSec: number) => (settled(end, res, nowSec) ? 3_600_000 : 5_000);
+
+/** The bucket-aligned window a request (or the pre-warm) asks GMTrade for, ending no later than the current bucket:
+ *  `latest` when it is the default 300 bars up to now. Its cache key rotates at every bucket boundary. */
+export function candleWindow(res: number, nowSec: number, from?: number, to?: number) {
+  const nowBucket = Math.floor(nowSec / res) * res;
+  const end = Math.min(Math.floor((to ?? nowBucket) / res) * res, nowBucket);
+  const start = Math.floor((from ?? end - (300 - 1) * res) / res) * res;
+  return { start, end, nowBucket, latest: from === undefined && end === nowBucket };
+}
+export const candleKey = (symbol: string, res: number, w: { start: number; end: number }) => `${symbol}:${res}:${w.start}:${w.end}`;
 
 class HttpError extends Error {
   readonly status: number;
   readonly code: string;
-  constructor(status: number, code: string, message: string) {
+  readonly headers: Record<string, string>;
+  constructor(status: number, code: string, message: string, headers: Record<string, string> = {}) {
     super(message);
     this.status = status;
     this.code = code;
+    this.headers = headers;
   }
 }
 const badRequest = (message: string) => new HttpError(400, 'bad_request', message);
@@ -67,10 +90,17 @@ function intParam(v: string | undefined, name: string): number | undefined {
   return Number(v);
 }
 
-export default async function register(ctx: ModuleContext): Promise<MarketDataService> {
+/** GMTrade's price feed and HTTP services, which marketdata.test.ts replaces with stubs. */
+export interface MarketDataOptions {
+  feed?: FeedState & Pick<KeeperFeed, 'onTick' | 'start' | 'stop'>;
+  gm?: { fetchPairs?: typeof fetchPairs; fetchCandles?: typeof fetchCandles; fetchCandlesBatch?: typeof fetchCandlesBatch };
+}
+
+export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptions = {}): Promise<MarketDataService> {
   const rpcUrl = ctx.env.RPC_URL || PUBLIC_RPC;
   const programId = ctx.env.PROGRAM_ID || undefined;
-  const feed = new KeeperFeed({ rpcUrl, log: ctx.log });
+  const feed = opts.feed ?? new KeeperFeed({ rpcUrl, log: ctx.log });
+  const gm = { fetchPairs, fetchCandles, fetchCandlesBatch, ...opts.gm };
   const timers: NodeJS.Timeout[] = [];
   const upstreams = createUpstreams(FALLBACKS, (name, s) => (s.state === 'down'
     ? ctx.log.warn({ upstream: name, since: s.since, error: s.lastError }, `marketdata: ${name} is down (${s.lastError}). ${s.fallback}`)
@@ -91,10 +121,15 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
   const tickListeners = new Set<(tick: PriceTick) => void>();
   /** Prices pinned by the test hook below (NODE_ENV=test on localnet only), by symbol. */
   const pinned = new Map<string, string>();
-  const candleCache = new Map<string, { at: number; ttl: number; candles: CandlesResponse['candles'] }>();
+  const candleCache = new Map<string, { at: number; ttl: number; candles: Candle[] }>();
   const tradeCache = new Map<string, { at: number; trades: MarketTrade[] }>();
-  /** The latest candles GMTrade returned for the current window, by symbol:resolution. */
-  const lastGood = new Map<string, Candle[]>();
+  /** The latest window GMTrade returned by symbol:resolution, with its cache key: the copy a later window of the same
+   *  series answers from at once, and what the pre-warm patches. */
+  const lastGood = new Map<string, { at: number; key: string; start: number; end: number; candles: Candle[] }>();
+  /** When each resolution was last pre-warmed (unix seconds) and the bucket it saw then. */
+  const warmed = new Map<number, { at: number; bucket: number }>();
+  /** The pre-warm batch GMTrade is answering, if any: a request's own fetch queues behind it. */
+  let filling: Promise<unknown> | null = null;
   const inflight = new Map<string, Promise<unknown>>();
 
   /** One upstream call per key at a time. It runs to the end even when no request waits for it any more. */
@@ -108,11 +143,39 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
     return p;
   }
 
+  /** One pre-warm batch. GMTrade's candle service serializes requests, so it is sent once no request's own candle
+   *  fetch is running (a batch ahead of one would hold that chart; a fresh process fills some 45) and exposed as
+   *  `filling` while it runs, for the fetches that queue behind it. The pre-warm can wait: under constant misses, the
+   *  requests keep the copies they ask for fresh themselves. */
+  async function fillBatch(call: () => Promise<Map<string, Candle[]>>) {
+    const running = () => [...inflight].flatMap(([key, p]) => (key.startsWith('candles:') ? [p] : []));
+    for (let busy = running(); busy.length; busy = running()) await Promise.allSettled(busy);
+    const batch = upstreams.track('candles', call);
+    filling = batch;
+    try {
+      return await batch;
+    } finally {
+      filling = null;
+    }
+  }
+
   function send(reply: FastifyReply, err: unknown) {
     if (!(err instanceof HttpError)) ctx.log.warn({ err }, 'marketdata upstream request failed');
     const e = err instanceof HttpError ? err : new HttpError(502, 'upstream_unavailable', 'GMTrade data is unavailable right now');
     const body: ApiError = { error: { code: e.code, message: e.message } };
-    return reply.code(e.status).send(body);
+    return reply.code(e.status).headers(e.headers).send(body);
+  }
+
+  /** Caches a window GMTrade returned. The latest window of a series also becomes its copy, evicting the key it
+   *  rotated from; a refresh that finished after the key rotated never replaces a newer copy. */
+  function remember(symbol: string, res: number, w: ReturnType<typeof candleWindow>, list: Candle[], nowSec: number) {
+    const key = candleKey(symbol, res, w);
+    if (candleCache.size >= 1_000) candleCache.delete(candleCache.keys().next().value!);
+    candleCache.set(key, { at: Date.now(), ttl: candleCacheTtl(w.end, res, nowSec), candles: list });
+    const prev = lastGood.get(`${symbol}:${res}`);
+    if (!w.latest || (prev && prev.end > w.end)) return;
+    if (prev && prev.key !== key) candleCache.delete(prev.key);
+    lastGood.set(`${symbol}:${res}`, { at: Date.now(), key, start: w.start, end: w.end, candles: list });
   }
 
   const limits = ({ category, marketToken, pureUsdc }: { category: MarketCategory; marketToken: string; pureUsdc: boolean }): PropsLimits => {
@@ -181,30 +244,100 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
   }
 
   async function refreshPairs() {
-    pairs = new Map((await upstreams.track('marketInfo', () => fetchPairs(undefined, MARKET_INFO_TIMEOUT_MS))).map((p) => [p.pool_id, p]));
+    pairs = new Map((await upstreams.track('marketInfo', () => gm.fetchPairs(undefined, MARKET_INFO_TIMEOUT_MS))).map((p) => [p.pool_id, p]));
   }
 
-  /** Price 24 h ago: close of the last 5-minute candle completed by then, or, for markets that were
-   *  closed at the time, of the last hourly candle in the 4 days before (covers weekends). */
-  async function refreshOpens24h() {
+  /** Every market's index token by symbol: the series the pre-warm keeps (each has a chart, tradable or not). */
+  const indexTokens = () => new Map(current().flatMap((row) => {
+    const token = feed.markets.get(row.marketToken)?.meta?.indexToken.pubkey;
+    return token ? [[row.symbol, token] as const] : [];
+  }));
+
+  /** Price 24 h ago: close of the last 5-minute candle completed by then, or, for markets that were closed at the
+   *  time, of the last hourly candle before. Read from the pre-warmed copies (the hourly one spans 12 days, so it
+   *  covers weekends), else kept from the last refresh (a failed fill leaves markets without a copy); markets without
+   *  a copy yet come from one small request when `fetchMissing`. */
+  async function refreshOpens24h(fetchMissing: boolean) {
     const t = Math.floor(Date.now() / 1000) - 86_400;
-    const closeBefore = (list: CandlesResponse['candles'] | undefined, res: number) => list?.filter((c) => c.time + res <= t).at(-1)?.close;
-    const tokens = [...new Set([...feed.markets.values()].flatMap((m) => (m.meta ? [m.meta.indexToken.pubkey] : [])))];
+    const closeBefore = (list: Candle[] | undefined, res: number) => list?.filter((c) => c.time + res <= t).at(-1)?.close;
     const next = new Map<string, number>();
-    const recent = await upstreams.track('candles', () => fetchCandlesBatch(tokens, 300, t - 3_600, t));
-    const missing = tokens.filter((k) => {
-      const close = closeBefore(recent.get(k), 300);
-      if (close !== undefined) next.set(k, close);
-      return close === undefined;
-    });
-    if (missing.length) {
-      const older = await upstreams.track('candles', () => fetchCandlesBatch(missing, 3_600, t - 4 * 86_400, t));
-      for (const k of missing) {
-        const close = closeBefore(older.get(k), 3_600);
+    const missing: string[] = [];
+    for (const [symbol, token] of indexTokens()) {
+      const copy = lastGood.get(`${symbol}:300`)?.candles;
+      if (!copy) missing.push(token);
+      const fromCopies = copy && (closeBefore(copy, 300) ?? closeBefore(lastGood.get(`${symbol}:3600`)?.candles, 3_600));
+      const close = fromCopies ?? opens24h.get(token);
+      if (close !== undefined) next.set(token, close);
+    }
+    if (fetchMissing && missing.length) {
+      const recent = await upstreams.track('candles', () => gm.fetchCandlesBatch(missing, 300, t - 3_600, t));
+      const closed = missing.filter((k) => {
+        const close = closeBefore(recent.get(k), 300);
         if (close !== undefined) next.set(k, close);
+        return close === undefined;
+      });
+      if (closed.length) {
+        const older = await upstreams.track('candles', () => gm.fetchCandlesBatch(closed, 3_600, t - 4 * 86_400, t));
+        for (const k of closed) {
+          const close = closeBefore(older.get(k), 3_600);
+          if (close !== undefined) next.set(k, close);
+        }
       }
     }
     opens24h = next;
+  }
+
+  /** Fills every market's latest `res` window: the whole window, in batches of a few tokens, for the series without a
+   *  usable copy (a fresh process, or after an outage); one batch of only the last three buckets (GMTrade still
+   *  revises a candle for a minute after its bucket closes) for the rest, spliced into their copies. A series the
+   *  batch left out keeps its own candles, or stays without a copy for a request to fetch. */
+  async function warm(res: number, nowSec: number) {
+    const w = candleWindow(res, nowSec);
+    const patchFrom = w.end - 2 * res;
+    const full: [string, string][] = [];
+    const patch: [string, string][] = [];
+    for (const [symbol, token] of indexTokens()) {
+      const copy = lastGood.get(`${symbol}:${res}`);
+      (copy && copy.start <= w.start && copy.end >= patchFrom ? patch : full).push([symbol, token]);
+    }
+    for (let i = 0; i < full.length; i += PREWARM_CHUNK) {
+      const chunk = full.slice(i, i + PREWARM_CHUNK);
+      const got = await fillBatch(() => gm.fetchCandlesBatch(chunk.map(([, token]) => token), res, w.start, w.end));
+      for (const [symbol, token] of chunk) {
+        const list = got.get(token);
+        if (list) remember(symbol, res, w, list, nowSec);
+      }
+    }
+    if (patch.length) {
+      const got = await fillBatch(() => gm.fetchCandlesBatch(patch.map(([, token]) => token), res, patchFrom, w.end));
+      for (const [symbol, token] of patch) {
+        const fresh = got.get(token);
+        const kept = lastGood.get(`${symbol}:${res}`)!.candles.filter((c) => c.time >= w.start && (!fresh || c.time < patchFrom));
+        remember(symbol, res, w, fresh ? kept.concat(fresh) : kept, nowSec);
+      }
+    }
+  }
+
+  /** Keeps every interval's latest window warm for every market, one resolution after another (GMTrade's candle
+   *  service serializes requests): each again about 2 s after its bucket boundary, when the key rotates, and at least
+   *  every minute. A failed run counts as a run (health records it); the copies stay, completed from the price
+   *  record by requests, until the next. The 24h change follows the copies; a fresh process gets it from one small
+   *  request ahead of the fills (so the app's default interval fills first), which take a minute when GMTrade is
+   *  slow. */
+  async function prewarm() {
+    const nowSec = Math.floor(Date.now() / 1000);
+    let first = true;
+    for (const interval of PREWARM_ORDER) {
+      const res = INTERVAL_SECONDS[interval];
+      const bucket = Math.floor((nowSec - PREWARM_AFTER_BOUNDARY_S) / res) * res;
+      const last = warmed.get(res);
+      if (last && nowSec - last.at < PREWARM_EVERY_S && last.bucket === bucket) continue;
+      warmed.set(res, { at: nowSec, bucket });
+      if (first && !opens24h.size) await refreshOpens24h(true).catch(() => {});
+      first = false;
+      await warm(res, nowSec).catch(() => {});
+      await refreshOpens24h(false);
+    }
   }
 
   async function refreshAllowlist() {
@@ -257,13 +390,11 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
     }
     if (ctx.signal.aborted) return feed.stop();
     started = true;
-    // Ready once prices flow: 24h change and volume fill in when GMTrade's stats answer (they can take many seconds,
-    // or fail), and nothing waits for them. The allowlist, which decides what can be traded, is read first.
+    // Ready once prices flow: volume fills in when GMTrade's market-info answers (it can take many seconds, or fail),
+    // 24h change and warm charts with the pre-warm, and nothing waits for them. The allowlist, which decides what can
+    // be traded, is read first.
     const initialFailed = (err: unknown) => ctx.log.warn({ err }, 'marketdata: initial refresh failed');
-    void Promise.allSettled([refreshPairs(), refreshOpens24h()]).then((results) => {
-      for (const r of results) if (r.status === 'rejected') initialFailed(r.reason);
-      publishChangedMarkets();
-    });
+    void refreshPairs().then(publishChangedMarkets, initialFailed);
     if (programId) await refreshAllowlist().catch(initialFailed);
     publishChangedMarkets();
     every(PRICE_FLUSH_MS, 'price publish', () => {
@@ -273,7 +404,7 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
     });
     every(5_000, 'market publish', publishChangedMarkets);
     every(60_000, 'market-info', refreshPairs, 3);
-    every(300_000, '24h change', refreshOpens24h, 3);
+    every(1_000, 'candle pre-warm', prewarm);
     if (programId) every(60_000, 'allowlist', refreshAllowlist, 3);
     every(60_000, 'price record', record.flush);
     every(3_600_000, 'price record pruning', record.prune);
@@ -290,34 +421,38 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
     if (!res) throw badRequest(`interval must be one of ${Object.keys(INTERVAL_SECONDS).join(', ')}`);
     const { row, pool } = preferredPool(symbol);
     const nowSec = Math.floor(Date.now() / 1000);
-    const nowBucket = Math.floor(nowSec / res) * res;
-    const end = Math.min(Math.floor((to ?? nowBucket) / res) * res, nowBucket);
-    const start = Math.floor((from ?? end - (300 - 1) * res) / res) * res;
-    if (start > end) throw badRequest('from must not be after to');
-    if ((end - start) / res + 1 > MAX_CANDLES) throw badRequest(`at most ${MAX_CANDLES} candles per request`);
-    const key = `${row.symbol}:${res}:${start}:${end}`;
-    const series = `${row.symbol}:${res}`;
+    const w = candleWindow(res, nowSec, from, to);
+    if (w.start > w.end) throw badRequest('from must not be after to');
+    if ((w.end - w.start) / res + 1 > MAX_CANDLES) throw badRequest(`at most ${MAX_CANDLES} candles per request`);
+    const key = candleKey(row.symbol, res, w);
     const cached = candleCache.get(key);
     const base = { symbol: row.symbol, interval, source: 'gmtrade' as const };
     if (cached && Date.now() - cached.at < cached.ttl) return { ...base, candles: cached.candles, freshness: 'live' };
-    const fetching = shared(`candles:${key}`, () => upstreams.track('candles', () => fetchCandles(pool.meta!.indexToken.pubkey, res, start, end))
-      .then((list) => {
-        if (candleCache.size >= 1_000) candleCache.delete(candleCache.keys().next().value!);
-        candleCache.set(key, { at: Date.now(), ttl: candleCacheTtl(end, res, nowSec), candles: list });
-        if (end === nowBucket) lastGood.set(series, list);
-        return list;
-      }));
-    // An expired copy answers at once while the refresh runs (live ticks move its last candle in the app).
-    if (cached) return { ...base, candles: cached.candles, freshness: Date.now() - cached.at < 120_000 ? 'live' : 'delayed' };
+    // One refresh of this exact window runs in the background whatever answers below; it caches only when it succeeds.
+    const fetching = shared(`candles:${key}`, () => upstreams.track('candles', () => gm.fetchCandles(pool.meta!.indexToken.pubkey, res, w.start, w.end))
+      .then((list) => (remember(row.symbol, res, w, list, nowSec), list)));
+    // A copy answers at once: this window's expired entry or the series' latest window (the bucket before this one,
+    // when the key has just rotated), whichever GMTrade returned last. It is 'live' for a settled window it reaches
+    // the end of (final candles) and, under two minutes old and ending at the current or previous bucket, for the
+    // latest one (live ticks move its last candle in the app); otherwise the price record completes it and it is
+    // 'delayed'.
+    const latest = lastGood.get(`${row.symbol}:${res}`);
+    const copy = latest && latest.start <= w.start && (!cached || latest.at > cached.at)
+      ? { at: latest.at, end: latest.end, candles: latest.candles.filter((c) => c.time >= w.start && c.time <= w.end) }
+      : cached && { at: cached.at, end: w.end, candles: cached.candles };
+    if (copy && ((settled(w.end, res, nowSec) && copy.end >= w.end) || (copy.end >= w.nowBucket - res && Date.now() - copy.at < 120_000))) {
+      return { ...base, candles: copy.candles, freshness: 'live' };
+    }
+    const recorded = await record.candles(row.symbol, res, w.start, w.end).catch(() => []);
+    const list = mergeCandles(copy?.candles ?? [], recorded);
+    if (list.length) return { ...base, candles: list, freshness: 'delayed' };
+    // Nothing to show at all (a window nobody asked for before, on a fresh process): wait for GMTrade, briefly, and
+    // first for the pre-warm batch it is answering, if any, which this fetch queues behind.
     try {
+      if (filling) await Promise.race([filling, fetching]).catch(() => {});
       return { ...base, candles: await within(fetching, CANDLE_WAIT_MS), freshness: 'live' };
-    } catch (err) {
-      // GMTrade's candle service is slow or down: the last copy of this chart, completed from the price record.
-      const copy = (lastGood.get(series) ?? []).filter((c) => c.time >= start && c.time <= end);
-      const recorded = await record.candles(row.symbol, res, start, end).catch(() => []);
-      const list = mergeCandles(copy, recorded);
-      if (!list.length) throw err;
-      return { ...base, candles: list, freshness: 'delayed' };
+    } catch {
+      throw new HttpError(503, 'unavailable', 'GMTrade candles are unavailable right now', { 'retry-after': '5' });
     }
   }
 
@@ -431,8 +566,17 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
     try {
       const { symbol, interval } = req.query;
       if (!symbol) throw badRequest('symbol is required');
-      return await candles(symbol, interval as CandleInterval, intParam(req.query.from, 'from'), intParam(req.query.to, 'to'));
+      const to = intParam(req.query.to, 'to');
+      const body = await candles(symbol, interval as CandleInterval, intParam(req.query.from, 'from'), to);
+      // A shared cache may keep a live latest window for seconds, a live settled window for an hour, a fallback never.
+      const res = INTERVAL_SECONDS[body.interval];
+      const nowSec = Math.floor(Date.now() / 1000);
+      const past = to !== undefined && settled(candleWindow(res, nowSec, undefined, to).end, res, nowSec);
+      reply.header('cache-control', body.freshness !== 'live' ? 'no-store'
+        : past ? 'public, s-maxage=3600, stale-while-revalidate=86400' : 'public, s-maxage=5, stale-while-revalidate=55');
+      return body;
     } catch (err) {
+      reply.header('cache-control', 'no-store');
       return send(reply, err);
     }
   });
@@ -485,4 +629,8 @@ export default async function register(ctx: ModuleContext): Promise<MarketDataSe
     quote,
     health,
   };
+}
+
+export default async function register(ctx: ModuleContext): Promise<MarketDataService> {
+  return createMarketData(ctx);
 }

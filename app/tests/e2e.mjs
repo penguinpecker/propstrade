@@ -38,9 +38,11 @@ const csp = contentSecurityPolicy(process.env);
 const site = await preview({ root: appDir, logLevel: 'error', build: { outDir }, preview: { host: '127.0.0.1', port: 4198, headers: { 'content-security-policy': csp } } });
 const siteUrl = site.resolvedUrls.local[0].replace(/\/$/, '');
 
-// Expected console noise, all caused on purpose by the stub: anonymous /v1/me (401) and the stream outage (503).
+// Expected console noise, all caused on purpose by the stub: anonymous /v1/me (401), the stream outage (503) and the
+// candles of a saved market that is not in the catalog (404).
 const expected = msg => /status of 401/.test(msg.text()) && msg.location().url.endsWith('/v1/me')
-  || /503|ERR_INCOMPLETE_CHUNKED_ENCODING/.test(msg.text()) && (msg.location().url.endsWith('/v1/stream') || /EventSource/.test(msg.text()));
+  || /503|ERR_INCOMPLETE_CHUNKED_ENCODING/.test(msg.text()) && (msg.location().url.endsWith('/v1/stream') || /EventSource/.test(msg.text()))
+  || /status of 404/.test(msg.text()) && msg.location().url.includes('/v1/candles?symbol=ZZZ');
 function watchConsole(page) {
   const errors = [];
   page.on('console', msg => { if (msg.type() === 'error' && !expected(msg)) errors.push(msg.text()); });
@@ -457,6 +459,59 @@ try {
       } finally {
         await page.unroute('**/v1/candles?**');
         await page.setViewportSize({ width: 1920, height: 1080 });
+      }
+    });
+
+    await check('chart: the saved market\'s candles and the chart\'s code are asked for before the catalog answers; a saved market that left the catalog falls back to BTC', async () => {
+      await page.goto(`${siteUrl}/#/trade/practice`);
+      await page.evaluate(() => localStorage.setItem('props.market', '"ETH"'));
+      await page.goto('about:blank');
+      let candlesFor; let chartCode;
+      const candles = new Promise(resolve => { candlesFor = resolve; });
+      const chart = new Promise(resolve => { chartCode = resolve; });
+      const seen = request => { const url = new URL(request.url()); if (url.pathname === '/v1/candles') candlesFor(url.searchParams.get('symbol')); else if (/\/Chart-[^/]*\.js$/.test(url.pathname)) chartCode(); };
+      page.on('request', seen);
+      // The catalog answers only once both were asked for: a chart that waited for it would wait forever here.
+      await page.route('**/v1/markets', async route => { await Promise.all([candles, chart]); await route.continue(); });
+      try {
+        await page.goto(`${siteUrl}/#/trade/practice`);
+        await page.locator('.tv-legend-main').getByText('ETH / USD · 1h · GMTrade').waitFor({ timeout: 8_000 });
+        assert.equal(await candles, 'ETH');
+        await page.evaluate(() => localStorage.setItem('props.market', '"ZZZ"'));
+        await page.reload();
+        await page.locator('.tv-legend-main').getByText('BTC / USD · 1h · GMTrade').waitFor();
+        assert.equal(await page.evaluate(() => localStorage.getItem('props.market')), '"BTC"');
+      } finally {
+        page.off('request', seen);
+        await page.unroute('**/v1/markets');
+      }
+    });
+
+    await check('chart: the watchlist\'s candles load right after this market\'s, once per interval and not on ticks, so a watchlist click paints from memory', async () => {
+      const asked = []; // the chart's own candle queries; the older history it loads as the view nears its first candle (`from`) is not one
+      const seen = request => { const url = new URL(request.url()); if (url.pathname === '/v1/candles' && !url.searchParams.has('from')) asked.push(`${url.searchParams.get('symbol')} ${url.searchParams.get('interval')}`); };
+      page.on('request', seen);
+      try {
+        await page.goto(`${siteUrl}/#/trade/practice`);
+        await page.evaluate(() => localStorage.setItem('props.market', '"BTC"'));
+        await page.reload();
+        const legend = page.locator('.tv-legend-main');
+        await legend.getByText('BTC / USD · 1h · GMTrade').waitFor();
+        await expectEventually(() => ['ETH 1h', 'SOL 1h', 'XAU 1h'].every(k => asked.includes(k)), `the watchlist's candles were not prefetched: ${asked}`);
+        stub.publish({ type: 'price', ticks: [{ symbol: 'BTC', min: '64650', max: '64650', mid: '64650', ts: Date.now() + 2_000, session: 'open' }] });
+        await legend.getByText('C64,650.00').waitFor();
+        const before = asked.length;
+        await page.locator('.watchlist-bar').getByRole('button', { name: /^ETH/ }).click();
+        await legend.getByText('ETH / USD · 1h · GMTrade').waitFor();
+        await page.locator('.watchlist-bar').getByRole('button', { name: /^BTC/ }).click();
+        await legend.getByText('BTC / USD · 1h · GMTrade').waitFor();
+        assert.equal(asked.length, before, `a tick or a watchlist click fetched candles again: ${asked.slice(before)}`);
+        await page.locator('.timeframes').getByRole('button', { name: '4h', exact: true }).click();
+        await legend.getByText('BTC / USD · 4h · GMTrade').waitFor();
+        await expectEventually(() => ['ETH 4h', 'SOL 4h', 'XAU 4h'].every(k => asked.includes(k)), `the watchlist's candles were not prefetched for the new interval: ${asked}`);
+        assert.equal(asked.filter(k => k === 'ETH 1h').length, 1, `ETH 1h was fetched more than once: ${asked}`);
+      } finally {
+        page.off('request', seen);
       }
     });
 

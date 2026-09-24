@@ -528,7 +528,8 @@ install command, built the app, and bundled `app/middleware.js` as an edge funct
 
 Until the domain is bought, the app runs at `https://propstrade.vercel.app` and the API at a `*.up.railway.app`
 domain. Those are different sites, so the session cookie would not flow. `app/vercel.json` therefore proxies
-`/v1/*` to the Railway service (uncached: `x-vercel-enable-rewrite-caching: 0` and the project's external rewrite
+`/v1/*` to the Railway service (uncached except `/v1/candles`, which the edge caches for the seconds the server's
+`cache-control` allows: `x-vercel-enable-rewrite-caching: 0` elsewhere and the project's external rewrite
 caching off), which makes the API same-origin with the app:
 
 | Where | Variable | Value |
