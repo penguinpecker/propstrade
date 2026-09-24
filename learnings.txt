@@ -778,7 +778,7 @@ Deployment learnings:
   restartPolicy*). Seal is dashboard-only; sealing stages a change ("Apply N changes" -> Deploy) and does not redeploy;
   a forced redeploy proved sealed values (incl. a ${{Postgres.DATABASE_URL}} reference) still reach the container.
   Sealed values read back as empty strings from the API.
-- Vercel: the claude.ai Vercel connector got 403 on this team; the CLI's own token (REST) worked. *.vercel.app and
+- Vercel: the hosted Vercel connector got 403 on this team; the CLI's own token (REST) worked. *.vercel.app and
   *.up.railway.app are different sites, so the API is proxied through the app's vercel.json rewrite (same-origin
   cookies); TRUST_PROXY_HOPS=2 behind it. SSE survives the external rewrite.
 - The browser-side RPC is the server's allowlisted relay POST /v1/rpc, so no provider key ships in the bundle.
