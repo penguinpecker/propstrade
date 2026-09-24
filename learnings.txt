@@ -938,3 +938,60 @@ Pinocchio evaluated (2026-09-23; measured in a scratch copy, 59/59 LiteSVM tests
            Verified live in the owner's browser (existing Privy session): auto sign-in completed, practice account loaded,
            no Buffer error. Only a real Google session can test this: Privy allows Google sign-in on the live domain only.
 - The owner asked for pushes and deploys on this project without confirmation from now on (scan, export, verify, log).
+
+2026-09-24 Pinocchio props_vault AUDITED and made deployable (branch p1-pinocchio, worktree ~/Projects/propstrade-wt/pino).
+           Four audit rounds, each with six independent lenses (accounts/authorization, Pinocchio memory + runtime,
+           money flows, GMTrade CPIs, external tools + public checklists, integration/ops), every finding attacked by
+           independent verifiers with runnable tests, one fixer per round; then a differential fuzz campaign. The first
+           run (6 h) crashed the machine in its final phase; the fuzzers were recovered from the agent transcripts and the
+           final gate re-run. 15 confirmed findings fixed, in BOTH builds where shared:
+           r1 (8): never-filled GMTrade Positions stranded ~0.026 SOL each and close_funded left them (new permissionless
+             close_empty_position, rent to sol_treasury); USDC GMTrade parks in claimable accounts was unrecoverable (new
+             collect_claimable, delegate transfer by the owner PDA); update_order shrank TP/SL below $1; an upgraded or
+             compromised GMTrade could drain owner_usdc through cancel_order / close_completed_order (every owner-signed
+             GMTrade CPI now bounded afterwards: UnexpectedGmtradeEffect 6042); solana-verify picked an image whose cargo
+             cannot read the lockfiles ([workspace.metadata.cli] solana = "3.1.10" in both manifests); PORTING's runbook
+             switch list incomplete; Pinocchio-only: SPL COption tags and bool/enum bytes now refused as Anchor's borsh.
+           r2 (4): update_order could re-trigger or grow a resting limit increase in a disabled market or above lowered
+             limits; HIGH: the server indexer stalled forever on the two new events (projector handles them, unknown
+             events are logged and skipped); tests ran on litesvm 0.8 without SIMD-0459/0460 and at 6,960 lamports/byte
+             (now litesvm 1.4.1, mainnet rent); runbook §14.3 "extend through Squads" is refused by the loader
+             (scripts/admin/extend-program.ts, runbook rewritten for both states of ExtendProgramChecked).
+           r3 (3): a compromised GMTrade could still drain the SOL treasury via restricted/paused accounts because
+             top_up_owner refilled any open account (now Active only, never while trading is paused; keeper rule too);
+             stale --print-for Squads proposals overwrote newer pauses/params (scripts refuse unnamed flags);
+             PORTING §4/§14.2/SOL rows.
+           r4 (3): root Cargo.toml carried [workspace.metadata.cli] twice (two fixers applied the pin) so every cargo /
+             anchor / solana-verify command on the Anchor workspace failed while all suites stayed green against the
+             prebuilt .so (porting.docs.test.ts now parses both manifests); the suites proved nothing about which binary
+             PROPS_VAULT_SO named (every process now prints path, size and solana-verify executable hash, relative paths
+             refused, compare harness and fuzzers honour PROPS_VAULT_SO); runbook §5.1 partial set-params line.
+           Refuted with evidence: dust increase orders (the keeper fee is per order regardless of size; bounded by the
+           order-rate alert and ending the account), a breached trader stalling close_funded (keeper sends cancel + sync
+           in one transaction), four "no fuzzer ran" coverage notes.
+           Differential fuzzer now in the repo: programs-p/props_vault_p/fuzz/{seqfuzz,invariants,run}.ts (all 33
+           instructions, hostile mutations, keeper emulation, authorization oracle, money invariants I1-I8, byte-for-byte
+           diff of both builds); campaign = 340,780 transactions / 59 min / 0 differences / 0 violations, run twice.
+           Final gate on the final binaries: cargo test 3/3 + 4/4; clippy 0 warnings; rustfmt clean; suite 76/76 on both
+           builds; compare 1,145 records / 0 differences; validator smoke 1/1; server modules 63/63 + vitest 109/109;
+           SDK 8/8; admin 7/7; app 118/118; full-stack Chrome journey 11/11; binary 172,536 B, byte-identical rebuild,
+           executable hash b08798d2…; ProgramData rent 0.877 SOL (0.965 SOL at +10 % max-len) vs 5.71 SOL for Anchor.
+           Static analyzers (Trail of Bits solana-lints, Radar, Pinocchio Sentinel, semgrep, sol-azy, Eloizer, SolAudit)
+           are blind to Pinocchio code: controls with deliberate bugs got 0 findings, so their silence proves nothing;
+           cargo audit 0 advisories; Miri clean on every unsafe view; sealevel-attacks / Neodyme / ToB / SlowMist / Zellic
+           checklists walked item by item.
+           The launch runbook was then switched to deploy this build (PORTING deviation 5 done).
+- LiteSVM keeps ~200 MB per fuzz seed (never freed): the first run stacked 6 fuzz processes on the suites and the 36 GB
+  Mac ran out of memory, rebooted and wiped /private/tmp. Rules now in PORTING: ≤ 2 LiteSVM processes, 5 seeds per
+  process, never beside a validator; keep audit tooling in the repo, not scratch.
+- postgres-js 3.4.9 (max 1): a query issued in the instant after its backend is killed is lost (never answers, never
+  rejects; later queries work). server/src/lib/leader.ts now bounds every lock query at 5 s (no answer = not held).
+  Found because the leader test hung only on embedded Postgres 18.4 (x86_64 under Rosetta widens the window); the docker
+  Postgres never hit it. Same class as the Railway failover case: a keeper tick awaiting `held()` would have hung for good.
+- solana-verify's executable hash is sha256 of the .so minus trailing zero bytes; tests print it so the tested and the
+  deployed binary can be matched. A solana-verify Docker build differs from a local cargo build-sbf by a few bytes: take
+  EXECUTABLE_HASH from the build that gets deployed, run the suites against that file.
+- docker props-pg is unusable until the colima disk is pruned (100 % full, Postgres "in recovery mode"). embedded-postgres
+  18.4.0-beta.17 in scratch (port 55499, user postgres) runs every server suite, including the validator e2e.
+- Anchor 0.31.1 has no duplicate-mutable-account check; the port matches (fuzzed: no duplicate substitution succeeds on
+  either build). GMTrade's UserHeader rent (0.0045 SOL per funded account) has no close instruction: permanent.
