@@ -1,7 +1,8 @@
 PROPS.TRADE — LEARNINGS
 =======================
 Onchain prop firm on Solana. Traders pass a challenge, then trade REAL perps on GMTrade with capital
-from a Props.trade vault program. Status: build in progress (2026-09-23); see section 12 and docs/ARCHITECTURE.md.
+from a Props.trade vault program. Status: app + server live, vault program audited and ready to deploy (2026-09-24);
+see HANDOFF.md, section 12 and docs/ARCHITECTURE.md.
 Times are UTC. Raw research with full evidence (file:line, tx signatures, commands): research/*.json
 
 Contents
