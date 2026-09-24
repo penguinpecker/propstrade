@@ -519,6 +519,7 @@ Launch (round 3, `docs/runbooks/launch.md` is the go-live procedure):
   canonical form (`<ISSUER alpha-2>:<PASSPORT|ID_CARD>:<NUMBER A-Z0-9>`), so one document always gives one hash.
 
 Deployment (2026-09-23): app on Vercel (`propstrade.vercel.app`), server + Postgres 18 on Railway. With no custom domain
-yet, the app's `vercel.json` proxies `/v1/*` to the Railway service (uncached), so the API is same-origin and the
+yet, the app's `vercel.json` proxies `/v1/*` to the Railway service (uncached, except `/v1/candles` which the edge
+caches for the seconds the server's `cache-control` allows), so the API is same-origin and the
 `__Host-` session cookie flows; `TRUST_PROXY_HOPS=2`. The browser's Solana RPC is the server's allowlisted relay
 `POST /v1/rpc` (`server/src/routes/rpc.ts`), so no RPC provider key ever ships in the bundle.

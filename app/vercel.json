@@ -16,11 +16,20 @@
   ],
   "headers": [
     {
-      "source": "/v1/:path*",
+      "source": "/v1/((?!candles$).*)",
       "headers": [
         {
           "key": "x-vercel-enable-rewrite-caching",
           "value": "0"
+        }
+      ]
+    },
+    {
+      "source": "/v1/candles",
+      "headers": [
+        {
+          "key": "x-vercel-enable-rewrite-caching",
+          "value": "1"
         }
       ]
     },
