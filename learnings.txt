@@ -1033,3 +1033,23 @@ Pinocchio evaluated (2026-09-23; measured in a scratch copy, 59/59 LiteSVM tests
 - The browser tests' extra tabs hit /v1/stream's per-IP cap (429 too_many_streams) after a few contexts; users behind
   one shared address (offices, carrier NAT) could lose live ticks the same way. Not changed; check the cap.
 - Anchor 0.31 / Node: the app's vitest baseline was 155, not the 118 an older note quoted; app e2e is 168 checks.
+
+2026-09-25 DEPLOYED bdd4015 (server 0cc97c19…, app dpl … 9z6l54w5a): chart paints from a saved copy, lighter live
+           stream. The browser keeps the last 300 bars of each market and interval viewed (12 pairs, 3 days, never older
+           than the window a fetch returns) and paints them before the candle request answers; tick frames apply with one
+           markets-cache write; a stream reconnect re-reads the market rows. Server: price frames every 100 ms with only
+           the symbols that moved, a full price frame on connect, market rows only on a material change; per-address
+           stream cap left at 10 (a 429 for the 11th; eviction would make the app's 1 s reopen rotate tabs). Measured
+           idle stream: ~194 → ~99 KB per 10 s. Live sample after cutover: 18 price frames + 2 market events in 12 s
+           (was ~17 + ~156). Review found and fixed: a 5m copy older than its own window spliced in front of fresh bars
+           with a hidden hole (now rejected on read), rows no longer self-healing after a reconnect (catalog invalidated
+           on reconnect), the watchlist prefetch firing at mount on a return visit, the connect snapshot built for
+           refused streams.
+- A server restart empties the in-memory candle copies; until the pre-warm refills them (55 s when GMTrade is quick,
+  many minutes when it answers in 10-15 s as it did at 04:48 IST) charts show only what price_bars holds (~35 h of
+  history since the record started on 09-23) marked 'delayed'. Next improvement if restarts matter: persist the warm
+  copies in Postgres (write-through on every warm, read at startup) so a restart costs nothing.
+- The live marketdata test's `hours.body.candles.length === 24` fails in the first minutes of an hour bucket (GMTrade
+  has not opened the bucket yet); boundary-sensitive, not a code fault.
+- Vercel deploy from the export succeeded first try this time (upload 'fetch failed' is intermittent); Railway showed
+  BUILDING for 5 min after the build log's healthcheck line.
