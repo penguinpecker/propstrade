@@ -11,14 +11,14 @@ import { inflateSync } from 'node:zlib';
 import BN from 'bn.js';
 import Fastify from 'fastify';
 import { Connection, PublicKey } from '@solana/web3.js';
-import type { ApiError, Candle, CandlesResponse, Market, MarketTrade, PriceImpactQuote, StreamEvent } from '@props/shared';
+import type { ApiError, Candle, CandlesResponse, Market, MarketTrade, PriceImpactQuote, PriceTick, StreamEvent } from '@props/shared';
 import {
   IdlCoder, INTERVAL_SECONDS, NO_ACCOUNT, USDC_MINT, base58Encode, decodeMarket, findProgramAddress, getMultipleAccounts, pubkeyBytes,
   type Idl, type KeeperMarket, type KeeperToken,
 } from '@props/gmtrade';
 import { PropsVaultClient } from '@props/sdk';
 import type { ModuleContext } from '../types.ts';
-import register, { candleCacheTtl, candleWindow, createMarketData, type MarketDataOptions } from './index.ts';
+import register, { candleCacheTtl, candleWindow, changedForDisplay, createMarketData, type MarketDataOptions } from './index.ts';
 import { fetchAllowlist, marketConfigAddress } from './allowlist.ts';
 
 const skip = process.env.PROPS_OFFLINE === '1';
@@ -115,12 +115,14 @@ const INDEX_ORDER = [...STUB_MARKETS].sort((a, b) => a.symbol.localeCompare(b.sy
 /** Resolutions in the order the pre-warm fills them (the app's default interval first, then 5m for the 24h change). */
 const PREWARM = [3_600, 300, 900, 14_400, 86_400];
 
-/** A feed already holding the two markets' metadata and one price each (unit prices: USD × 10^(20 − decimals)). */
-function stubFeed(nowSec: number): NonNullable<MarketDataOptions['feed']> {
+/** A feed already holding the markets' metadata and one price each (unit prices: USD × 10^(20 − decimals)); `tick`
+ *  delivers a new price for a market, as the keeper stream would. */
+function stubFeed(nowSec: number) {
   const tokens = new Map<string, KeeperToken>();
   const markets = new Map<string, KeeperMarket>();
+  const unitPrice = (m: (typeof STUB_MARKETS)[number], usd: bigint) => String(usd * 10n ** BigInt(20 - m.decimals));
   for (const m of STUB_MARKETS) {
-    const unit = String(m.usd * 10n ** BigInt(20 - m.decimals));
+    const unit = unitPrice(m, m.usd);
     tokens.set(m.index, {
       pubkey: m.index, price: { ts: nowSec, min: unit, max: unit, isOpen: true },
       meta: { name: m.symbol, decimals: m.decimals, precision: 4, isEnabled: true, isSynthetic: false, category: 'Layer 1 & 2', indexName: null, uiSymbol: m.symbol, uiName: null, launchTime: null, expectedProvider: 'pyth' },
@@ -130,7 +132,18 @@ function stubFeed(nowSec: number): NonNullable<MarketDataOptions['feed']> {
       meta: { name: `${m.symbol}/USD[USDC-USDC]`, isPure: true, isEnabled: true, indexToken: { pubkey: m.index }, longToken: { pubkey: USDC_MINT }, shortToken: { pubkey: USDC_MINT } },
     });
   }
-  return { tokens, markets, accounts: new Map(), mode: 'ws', onTick: () => () => {}, start: async () => {}, stop: () => {} };
+  const listeners = new Set<(token: KeeperToken) => void>();
+  const feed: NonNullable<MarketDataOptions['feed']> = {
+    tokens, markets, accounts: new Map(), mode: 'ws', onTick: (fn) => (listeners.add(fn), () => listeners.delete(fn)), start: async () => {}, stop: () => {},
+  };
+  const tick = (symbol: string, usd: bigint, isOpen = true) => {
+    const m = STUB_MARKETS.find((x) => x.symbol === symbol)!;
+    const token = tokens.get(m.index)!;
+    const unit = unitPrice(m, usd);
+    token.price = { ts: Math.floor(Date.now() / 1000), min: unit, max: unit, isOpen };
+    for (const fn of listeners) fn(token);
+  };
+  return { feed, tick };
 }
 
 /** A candle service that records every call and answers with synthetic candles whose `open` is the call's number (so a
@@ -191,11 +204,13 @@ async function stubbedStart(t: TestContext, nowSec: number) {
   const app = Fastify({ logger: false });
   const abort = new AbortController();
   const candles = stubCandles();
+  const events: StreamEvent[] = [];
   const ctx: ModuleContext = {
-    app, log: app.log, env: { PROGRAM_ID, RPC_URL: url }, services: {}, signal: abort.signal, publish: () => {},
+    app, log: app.log, env: { PROGRAM_ID, RPC_URL: url }, services: {}, signal: abort.signal, publish: (event) => events.push(event),
     config: {} as never, db: {} as never, sql: {} as never, rpc: {} as never, notify: async () => {},
   };
-  const service = await createMarketData(ctx, { feed: stubFeed(nowSec), gm: candles.gm });
+  const { feed, tick } = stubFeed(nowSec);
+  const service = await createMarketData(ctx, { feed, gm: candles.gm });
   await app.ready();
   await service.ready();
   t.after(async () => { abort.abort(); await app.close(); server.close(); });
@@ -206,7 +221,7 @@ async function stubbedStart(t: TestContext, nowSec: number) {
   const settle = () => new Promise((r) => setImmediate(r));
   /** Moves the clock ahead a second at a time, letting each timer's asynchronous work finish before the next second. */
   const advance = async (seconds: number) => { for (let i = 0; i < seconds; i++) { t.mock.timers.tick(1_000); await settle(); } };
-  return { get, candles, advance, settle, jump: (sec: number) => t.mock.timers.setTime(sec * 1000) };
+  return { get, candles, events, tick, advance, settle, jump: (sec: number) => t.mock.timers.setTime(sec * 1000) };
 }
 
 test('allowlist: MarketConfig PDAs are read and decoded with the IDL bundled in @props/sdk', async () => {
@@ -409,6 +424,72 @@ test('candles: a window with no copy waits for GMTrade, then answers 503 with re
   assert.deepEqual([bad.status, bad.headers['cache-control']], [400, 'no-store']);
 });
 
+test('price frames: every 100 ms, only the symbols whose price or session moved; a new timestamp alone sends nothing', async (t) => {
+  const { tick, events, settle } = await stubbedStart(t, 1_800_000_539);
+  const frames = () => events.flatMap((e) => (e.type === 'price' ? [e.ticks.map((x) => `${x.symbol}:${Number(x.mid)}:${x.session}`)] : []));
+  tick('SOL', 201n);
+  tick('BTC', 100_000n); // the price the feed started with, but never sent: it goes out
+  t.mock.timers.tick(99);
+  await settle();
+  assert.deepEqual(frames(), [], 'nothing before the flush');
+  t.mock.timers.tick(1);
+  await settle();
+  assert.deepEqual(frames(), [['SOL:201:open', 'BTC:100000:open']]);
+  t.mock.timers.tick(1_000); // the keeper repeats a price under a new timestamp about once a second
+  await settle();
+  tick('SOL', 201n);
+  tick('BTC', 100_001n);
+  t.mock.timers.tick(100);
+  await settle();
+  assert.deepEqual(frames().slice(1), [['BTC:100001:open']], 'only the symbol that moved');
+  tick('SOL', 201n);
+  t.mock.timers.tick(100);
+  await settle();
+  assert.equal(frames().length, 2, 'a new timestamp alone: no frame');
+  tick('SOL', 201n, false); // the session closed at the same price
+  t.mock.timers.tick(100);
+  await settle();
+  assert.deepEqual(frames().slice(2), [['SOL:201:closed']]);
+  const last = events.flatMap((e) => (e.type === 'price' ? e.ticks : [])).at(-1)!;
+  assert.deepEqual(Object.keys(last).sort(), ['max', 'mid', 'min', 'session', 'symbol', 'ts'], 'the tick shape is unchanged');
+});
+
+const ROW: Market = {
+  symbol: 'SOL', pair: 'SOL / USD', name: 'Solana', category: 'Crypto', subcategory: 'Layer 1 & 2', marketToken: SOL_POOL,
+  pools: [{ marketToken: SOL_POOL, name: 'SOL/USD[USDC-USDC]', pure: true, longToken: USDC_MINT, shortToken: USDC_MINT }],
+  tradable: true, price: '200', priceDecimals: 2, indexTokenDecimals: 9, change24h: 1.23, volume24h: '1000.00',
+  openInterestLong: '1000.00', openInterestShort: '1000.00', fundingRateHourlyLong: 0.001, borrowRateHourlyLong: 0.002, borrowRateHourlyShort: 0.002,
+  capacityLong: '1000.00', capacityShort: '1000.00', poolLiquidity: '1000.00', maxLeverage: 20, closedMaxLeverage: null,
+  session: 'open', freshness: 'live', updatedAt: 1_800_000_000_000,
+};
+
+test('market rows: re-sent only when a figure the app shows moved past its display precision (1 % for USD figures), always on a flag change', async (t) => {
+  const changed = (patch: Partial<Market>) => changedForDisplay(ROW, { ...ROW, ...patch });
+  assert.equal(changed({}), false);
+  assert.equal(changed({ price: '201', updatedAt: ROW.updatedAt! + 1 }), false, 'price and updatedAt travel in the ticks');
+  assert.equal(changed({ borrowRateHourlyLong: 0.9, borrowRateHourlyShort: 0.9 }), false, 'borrow rates are not shown');
+  assert.deepEqual([changed({ change24h: 1.239 }), changed({ change24h: 1.24 })], [false, true], '24h change: 2 decimals');
+  assert.deepEqual([changed({ fundingRateHourlyLong: 0.00109 }), changed({ fundingRateHourlyLong: 0.0011 })], [false, true], 'funding: 4 decimals');
+  for (const key of ['volume24h', 'openInterestLong', 'openInterestShort', 'capacityLong', 'capacityShort', 'poolLiquidity'] as const) {
+    assert.deepEqual([changed({ [key]: '1009.99' }), changed({ [key]: '1010.00' }), changed({ [key]: null })], [false, true, true], key);
+  }
+  for (const patch of [{ session: 'closed' }, { freshness: 'stale' }, { tradable: false, unavailableReason: 'Not available' }, { maxLeverage: 10 }, { closedMaxLeverage: 8 }] as const) {
+    assert.equal(changed(patch), true, JSON.stringify(patch));
+  }
+
+  const { tick, events, advance } = await stubbedStart(t, 1_800_000_539);
+  const rows = () => events.flatMap((e) => (e.type === 'market' ? [`${e.market.symbol}:${e.market.session}`] : []));
+  assert.deepEqual(rows().slice(9), ['SOL:open'], 'every market once at start, then SOL again once the allowlist made it tradable');
+  await advance(5); // the pre-warm lands the 24h change (a figure appearing): every row again at the 5 s scan
+  assert.equal(rows().length, 19);
+  tick('SOL', 201n); // a price move: the tick carries it; the 24h change moves far below its display precision
+  await advance(5);
+  assert.equal(rows().length, 19, 'no row for a price move');
+  tick('SOL', 201n, false);
+  await advance(5);
+  assert.deepEqual(rows().slice(19), ['SOL:closed'], 'a session change sends that row');
+});
+
 test('live: fetchAnchorIdl reads the IDL GMTrade publishes onchain, identical to the vendored v0.10.0 IDL', { skip, timeout: 30_000 }, async () => {
   const onchain = await fetchAnchorIdl('https://api.mainnet-beta.solana.com', 'Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo');
   const vendored = JSON.parse(readFileSync(new URL('../../../../packages/gmtrade/idl/gmsol_store-0.10.0.json', import.meta.url), 'utf8')) as Idl;
@@ -494,8 +575,18 @@ test('live: routes, stream events and service API without a deployed program', {
     assert.ok(heard.length > 0, 'onTick listeners hear ticks');
     assert.match(service.price('sol')!.mid, DECIMAL);
     const priceEvents = events.filter((e) => e.at >= since && e.event.type === 'price');
-    assert.ok(priceEvents.length >= 2 && priceEvents.length <= 25, `${priceEvents.length} price events in 6 s (max 4/s)`);
-    for (let i = 1; i < priceEvents.length; i++) assert.ok(priceEvents[i]!.at - priceEvents[i - 1]!.at >= 200);
+    assert.ok(priceEvents.length >= 2 && priceEvents.length <= 61, `${priceEvents.length} price events in 6 s (max 10/s)`);
+    // A symbol is in a frame only with a price or session it was not sent with before (a new timestamp alone is not).
+    const sent = new Map<string, PriceTick>();
+    for (const { event } of priceEvents) {
+      if (event.type !== 'price') continue;
+      assert.ok(event.ticks.length > 0, 'no empty frames');
+      for (const tick of event.ticks) {
+        const last = sent.get(tick.symbol);
+        assert.ok(!last || last.min !== tick.min || last.max !== tick.max || last.session !== tick.session, `${tick.symbol} re-sent unchanged`);
+        sent.set(tick.symbol, tick);
+      }
+    }
     const marketEvents = events.filter((e) => e.event.type === 'market');
     assert.ok(marketEvents.length >= rows.length, 'every market published once at start');
   } finally {

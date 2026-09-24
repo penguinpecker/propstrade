@@ -8,7 +8,7 @@ import { AccountsPage, AccountPage, PerformancePage, ActivityPage, MarketsPage }
 import { FundingPage, ProgramPage, ConnectPage, CheckoutPage, PaymentPage, ResultPage, ActivationPage } from './Onboarding.jsx';
 import { PayoutsPage, PayoutReview, PayoutReceipt, VerifyPage, VaultPage, SettingsPage } from './Money.jsx';
 import { env } from './lib/env';
-import { applyStreamEvent, useAccounts, useConfig, useMarkets, useNotifications, useReadNotifications } from './lib/queries';
+import { applyStreamEvent, keys, useAccounts, useConfig, useMarkets, useNotifications, useReadNotifications } from './lib/queries';
 import { GOOGLE_ONLY } from './lib/privy';
 import { useSession } from './lib/session';
 import { useStream } from './lib/stream';
@@ -55,6 +55,10 @@ export default function App() {
     if (event.type === 'notification' && showsNotification(event.notification)) notify(event.notification.title, event.notification.body);
   });
   const live = streamStatus === 'connected';
+  // The server sends a market row only when it changed, so a stream that dropped (a deploy, sleep and wake, 20 s of
+  // silence) has missed the rows sent meanwhile: the catalog is re-read once it is back. A first connection missed nothing.
+  const lastStreamStatus = useRef(streamStatus);
+  useEffect(() => { const was = lastStreamStatus.current; lastStreamStatus.current = streamStatus; if (streamStatus === 'connected' && (was === 'reconnecting' || was === 'offline')) void queryClient.invalidateQueries({ queryKey: keys.markets }); }, [streamStatus]);
   const config = useConfig();
   const marketsQuery = useMarkets();
   const markets = marketsQuery.data ?? [];

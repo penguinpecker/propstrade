@@ -6,6 +6,7 @@ import type { FastifyInstance } from 'fastify';
 import type { StreamEvent } from '@props/shared';
 import type { Session } from './auth/routes.js';
 import { ApiError } from './errors.js';
+import type { Services } from './modules/types.js';
 
 const HEARTBEAT_MS = 15_000;
 /** A client that lets this much pile up unread is dropped; its EventSource reconnects and the app refetches. */
@@ -33,11 +34,13 @@ export function createStreamHub({
     else client.out.write(frame);
   }
 
+  const frame = (event: StreamEvent) => `data: ${JSON.stringify(event)}\n\n`;
+
   function publish(event: StreamEvent, audience?: { wallet?: string }) {
-    const frame = `data: ${JSON.stringify(event)}\n\n`;
+    const data = frame(event);
     for (const client of clients) {
       // An audience whose wallet is missing reaches nobody: a scoped event must never fall back to broadcast.
-      if (!audience || (client.session !== null && client.session.wallet === audience.wallet)) send(client, frame);
+      if (!audience || (client.session !== null && client.session.wallet === audience.wallet)) send(client, data);
     }
   }
 
@@ -46,8 +49,10 @@ export function createStreamHub({
 
   return {
     publish,
-    /** Registers a connection; the returned stream is the response body. Null when the address or the hub is full. */
-    connect(address: string, session: Session | null): PassThrough | null {
+    /** Registers a connection; the returned stream is the response body, which starts with a heartbeat and then
+     *  `snapshot()`, the state later events only carry changes to, built only for a connection that is accepted. Null
+     *  when the address or the hub is full. */
+    connect(address: string, session: Session | null, snapshot?: () => StreamEvent | null): PassThrough | null {
       let fromAddress = 0;
       for (const client of clients) if (client.address === address) fromAddress++;
       if (fromAddress >= maxPerAddress || clients.size >= maxClients) return null;
@@ -60,7 +65,9 @@ export function createStreamHub({
         clients.delete(client);
         clearTimeout(expiry);
       });
-      send(client, `data: ${JSON.stringify({ type: 'heartbeat', ts: Date.now() } satisfies StreamEvent)}\n\n`);
+      send(client, frame({ type: 'heartbeat', ts: Date.now() }));
+      const first = snapshot?.();
+      if (first) send(client, frame(first));
       return client.out;
     },
     /** Closes every stream opened with this session; the app's EventSource reconnects without it. */
@@ -78,9 +85,21 @@ export function createStreamHub({
   };
 }
 
-export function registerStream(app: FastifyInstance, hub: StreamHub) {
+/** Every market's latest price, for a stream's first frame: the 'price' frames after it carry only what moved. */
+function priceSnapshot(services?: Services): StreamEvent | null {
+  const marketdata = services?.marketdata;
+  const ticks = marketdata ? marketdata.markets().flatMap((m) => marketdata.price(m.symbol) ?? []) : [];
+  return ticks.length ? { type: 'price', ticks } : null;
+}
+
+export function registerStream(app: FastifyInstance, hub: StreamHub, services?: Services) {
+  // Limits: MAX_PER_ADDRESS (10) open streams per client address (req.ip: the address behind the trusted proxy hops),
+  // MAX_CLIENTS (2,000) in total, MAX_BUFFERED_BYTES (256 KB) unread per stream. One past the address cap is refused
+  // with 429 rather than evicting the oldest: the app reopens an ended stream within a second and resets its backoff
+  // once open, so an eviction would rotate through every tab of that address once a second (a session lookup and a
+  // full snapshot each time), while a refused tab retries at its 30 s backoff.
   app.get('/v1/stream', async (req, reply) => {
-    const out = hub.connect(req.ip, await app.session(req));
+    const out = hub.connect(req.ip, await app.session(req), () => priceSnapshot(services));
     if (!out) throw new ApiError(429, 'too_many_streams', 'Too many open live connections, close another tab');
     // The subscriber lives exactly as long as its response, also when the client left during the session lookup or
     // Fastify discards the body (HEAD), where nothing else would ever close it.

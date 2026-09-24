@@ -4,6 +4,7 @@ import type {
   SimOrderRequest, SimOrderResponse, SimProtectionRequest, StreamEvent,
 } from '@props/shared';
 import { api, ApiRequestError, isNotLive, isUnauthorized } from './api';
+import { readCandleSnapshot, writeCandleSnapshot } from './candles';
 
 export const keys = {
   config: ['config'] as const,
@@ -68,10 +69,21 @@ export const useMarketTrades = (symbol: string) =>
 /**
  * Live ticks move the last candle between fetches (see Chart.jsx); the periodic refetch picks up GMTrade's own candles.
  * The trade page reads these from the saved symbol before the market catalog is in, and prefetches the watchlist's on
- * the same keys, so a watchlist click paints from memory.
+ * the same keys, so a watchlist click paints from memory. The last live copy is kept in this browser and is the query's
+ * first data on the next visit, dated by its fetch: a copy older than staleTime is refetched at once and replaced.
  */
-export const candlesOptions = (symbol: string, interval: CandleInterval) =>
-  queryOptions({ queryKey: keys.candles(symbol, interval), queryFn: () => api.candles(symbol, interval), enabled: symbol !== '', refetchInterval: 60_000 });
+export const candlesOptions = (symbol: string, interval: CandleInterval) => {
+  let saved: ReturnType<typeof readCandleSnapshot> | undefined; // read once, when the query is created without data
+  const snapshot = () => (saved === undefined ? (saved = symbol === '' ? null : readCandleSnapshot(symbol, interval)) : saved);
+  return queryOptions({
+    queryKey: keys.candles(symbol, interval),
+    queryFn: async () => { const response = await api.candles(symbol, interval); writeCandleSnapshot(symbol, interval, response); return response; },
+    enabled: symbol !== '',
+    refetchInterval: 60_000,
+    initialData: () => snapshot()?.response,
+    initialDataUpdatedAt: () => snapshot()?.at,
+  });
+};
 export const useCandles = (symbol: string, interval: CandleInterval) => useQuery(candlesOptions(symbol, interval));
 /**
  * Fees, price impact and execution price for an order size. While a new size loads, the previous size's quote stays
@@ -182,14 +194,24 @@ function patchMarket(client: QueryClient, symbol: string, update: (market: Marke
 /** Applies one server-sent event to the query cache. */
 export function applyStreamEvent(client: QueryClient, event: StreamEvent) {
   switch (event.type) {
-    case 'price':
-      for (const tick of event.ticks) {
-        patchMarket(client, tick.symbol, market =>
-          market.updatedAt !== null && market.updatedAt > tick.ts
-            ? market // older than what we already show
-            : { ...market, price: tick.mid, session: tick.session, updatedAt: tick.ts, freshness: 'live' });
+    case 'price': {
+      const ticks = new Map(event.ticks.map(tick => [tick.symbol, tick]));
+      const patch = (market: Market): Market => {
+        const tick = ticks.get(market.symbol);
+        return !tick || (market.updatedAt !== null && market.updatedAt > tick.ts)
+          ? market // not in this frame, or older than what we already show
+          : { ...market, price: tick.mid, session: tick.session, updatedAt: tick.ts, freshness: 'live' };
+      };
+      // One list write per frame, however many ticks it carries: the list's subscribers (the terminal, the watchlist,
+      // the picker) render once per frame, not once per tick.
+      client.setQueryData<Market[]>(keys.markets, list => list && list.map(patch));
+      // A single market's row exists only where one was loaded (['market', symbol], not its trades).
+      for (const [queryKey, market] of client.getQueriesData<Market>({ queryKey: ['market'] })) {
+        const next = queryKey.length === 2 && market ? patch(market) : market;
+        if (next !== market) client.setQueryData<Market>(queryKey, next);
       }
       return;
+    }
     case 'market':
       patchMarket(client, event.market.symbol, () => event.market);
       return;

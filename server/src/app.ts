@@ -66,7 +66,7 @@ export async function buildApp(deps: AppDeps) {
   await app.register(cookie);
 
   registerAuth(app, { db, config, hub: deps.hub });
-  registerStream(app, deps.hub);
+  registerStream(app, deps.hub, deps.services);
   registerAccountRoutes(app, { db, config, rpc: deps.rpc });
   registerAdminRoutes(app, { db, adminToken: config.ADMIN_API_TOKEN, sealer: createSealer(config.SESSION_SECRET) });
   registerRpcRelay(app, { rpcUrl: config.RPC_URL });
