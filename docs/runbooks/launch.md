@@ -8,10 +8,13 @@ or a log; they are referred to by variable name only.
 Every command below was run on 2026-09-23 against a local `solana-test-validator` (the mainnet GMTrade binary and cloned
 mainnet accounts, throwaway keys), with the server started by the exact Railway commands and the app built by the exact
 Vercel commands from a clean copy of the repo. Expected output below is from that rehearsal; addresses and signatures
-differ on mainnet.
+differ on mainnet. On 2026-09-24 the deploy switched to the Pinocchio build of the program (`programs-p/props_vault_p`,
+its `PORTING.md` deliberate difference 5): the order in section 0 and the id check, build, deploy, handover, upgrade
+and cost steps of sections 2–4 and 13–15 changed with it, and the binary's size, rent and hash come from the
+`solana-verify` build in section 3.2 (`<SO_SIZE>`, `<EXECUTABLE_HASH>`), not from that rehearsal.
 
 Contents: [1 Prerequisites](#1-prerequisites) · [2 Keys](#2-keys) · [3 Build](#3-build-and-verify-the-binary) ·
-[4 Deploy](#4-deploy-the-program-and-publish-its-idl) · [5 Configure](#5-configure-the-program-everything-stays-paused) ·
+[4 Deploy](#4-deploy-the-program) · [5 Configure](#5-configure-the-program-everything-stays-paused) ·
 [6 Server](#6-server-on-railway) · [7 App](#7-app-on-vercel) · [8 Verify](#8-post-deploy-verification) ·
 [9 Smoke test](#9-small-money-mainnet-smoke-test) · [10 Go live](#10-go-live) · [11 Monitoring](#11-monitoring-and-alerts) ·
 [12 Emergencies](#12-emergency-procedures) · [13 Squads](#13-hand-over-to-squads) · [14 Upgrades](#14-later-upgrades) ·
@@ -20,13 +23,13 @@ Contents: [1 Prerequisites](#1-prerequisites) · [2 Keys](#2-keys) · [3 Build](
 ## 0. Order and why
 
 ```
-build → deploy + IDL → initialize (all paused) → authorities → tiers → markets → capital → SOL treasury
+build → deploy → initialize (all paused) → authorities → tiers → markets → capital → SOL treasury
       → server (Railway) → app (Vercel) → verify → smoke test with a tiny tier → restore tiers, real capital
-      → unpause → monitor → Squads handover (admin, upgrade authority, IDL authority) last
+      → unpause → monitor → Squads handover (admin, upgrade authority) last
 ```
 
-- `initialize` must be signed by the program's upgrade authority, and `anchor idl init` needs it too, so both run
-  before the upgrade authority moves to Squads.
+- `initialize` must be signed by the program's upgrade authority, so it runs before the upgrade authority moves to
+  Squads. There is no IDL step: the onchain IDL is optional and this build has no IDL instructions (section 4).
 - `initialize` starts with every pause on. Nothing a trader can do works until step 10 lifts them, so the program can
   be configured in public without anyone buying into a half-configured vault.
 - Authorities before anything is sold (the risk key records evaluation results, the KYC key verifies identities);
@@ -99,20 +102,25 @@ block-height or timeout error, run `status.ts` before retrying: the transaction 
 
 | Key | Signs | Kept | SOL it needs |
 |---|---|---|---|
-| Operator (`OPERATOR_KEYPAIR`) | program deploy (upgrade authority), IDL, every admin instruction until section 13 | offline, encrypted; cold storage after handover | ≈ 5.6 SOL spent by the deploy (section 15); keep **≥ 10 SOL** on it while deploying, plus what you send on to the treasury and authorities |
+| Operator (`OPERATOR_KEYPAIR`) | program deploy (upgrade authority), every admin instruction until section 13 | offline, encrypted; cold storage after handover | ≈ 0.97 SOL spent by the deploy at the default `--max-len` (section 15; ≈ 5.7 SOL when sized for an Anchor fallback, section 4); keep **≥ 2 SOL** (≥ 12 SOL for the fallback sizing) on it while deploying, plus what you send on to the treasury and authorities |
 | Program keypair (`PROGRAM_KEYPAIR`) | only the first deploy (it creates the program address) | offline | none |
 | Deploy buffer keypair | the deploy's write buffer (makes an interrupted deploy resumable) | next to the operator key; delete after the deploy | none |
 | Risk authority (`RISK_AUTHORITY_KEYPAIR`) | keeper transactions, `record_evaluation_result`, payouts, restrictions | **only** as a Railway variable (hot) | 0.2 SOL (≈ 0.00003 SOL per keeper transaction at the server's fixed priority fee) |
 | KYC authority (`KYC_AUTHORITY_KEYPAIR`) | `set_identity` | **only** as a Railway variable (hot) | 0.1 SOL (≈ 0.002 SOL of rent per verified trader) |
 | Squads vault (`<SQUADS_VAULT>`) | admin and upgrades after section 13 | Squads members' devices | ≥ 0.01 SOL: the `--print-for` dry runs simulate with the vault as fee payer and fail if it holds nothing; a new tier or market config's rent (≈ 0.0014 SOL) comes out of it |
 
-Create the operator key on the offline machine and check the program key matches the code:
+Create the operator key on the offline machine and check the program key matches the code.
+`programs-p/props_vault_p/src/lib.rs` holds the id as the 32 bytes of `ID` (no `declare_id!`); the crate's
+`constants_match_anchor` test asserts they equal `7qYRWwpmj3j3exVoBUJHzigcWmMN8ruPEdZdZrGzTJ7`, and every instruction
+and account discriminator and PDA with them:
 
 ```sh
 solana-keygen new -o "$OPERATOR_KEYPAIR"            # write the seed phrase on paper; never type it anywhere else
 chmod 600 "$OPERATOR_KEYPAIR"
 solana-keygen pubkey "$PROGRAM_KEYPAIR"             # must print 7qYRWwpmj3j3exVoBUJHzigcWmMN8ruPEdZdZrGzTJ7
-grep -n declare_id programs/props_vault/src/lib.rs  # declare_id!("7qYRWwpmj3j3exVoBUJHzigcWmMN8ruPEdZdZrGzTJ7");
+cargo test --manifest-path programs-p/props_vault_p/Cargo.toml constants_match_anchor
+# test tests::constants_match_anchor ... ok
+# test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
 ```
 
 The risk and KYC keys are generated in section 5.2 by `gen-authority-key.ts`, which writes the key to a new file with
@@ -135,24 +143,40 @@ Railway. Keep `ADMIN_API_TOKEN` in the operators' password manager: every admin 
    ```
 
 2. Build the binary you will deploy with `solana-verify` (Docker; the first run pulls a multi-GB image), so anyone can
-   reproduce it from the public repo, and record its hash:
+   reproduce it from the public repo, and record its hash and size. The crate is `programs-p/props_vault_p`, its own
+   Cargo workspace, so the binary lands in that workspace's `target/deploy/`. Give `build` the crate as an absolute
+   path: `solana-verify` hands it to `docker run -v` verbatim, and Docker reads a relative path as a volume name:
 
    ```sh
-   solana-verify build --library-name props_vault
-   solana-verify get-executable-hash target/deploy/props_vault.so     # record <EXECUTABLE_HASH>
-   ls -l target/deploy/props_vault.so                                  # ~978 KB at 2026-09-23
+   solana-verify build "$PWD/programs-p/props_vault_p" --library-name props_vault_p
+   solana-verify get-executable-hash programs-p/props_vault_p/target/deploy/props_vault_p.so  # record <EXECUTABLE_HASH>
+   wc -c programs-p/props_vault_p/target/deploy/props_vault_p.so                              # record <SO_SIZE>: ≈ 172.5 KB
    ```
 
-3. Run the suites **against that binary** (they load `target/deploy/props_vault.so`), and check the IDL the SDK ships
-   equals the program's:
+   `<SO_SIZE>` and `<EXECUTABLE_HASH>` are what this build printed, and every size and rent figure below follows from
+   `<SO_SIZE>`: a local `cargo build-sbf` of the same source gave 172,536 bytes on 2026-09-24 and the pinned Docker
+   image a few bytes less in an earlier round, so never take either from a number written here.
+
+3. Run the suites **against that binary**. Every process that loads the program (the LiteSVM suite, the validator
+   smoke, the server module suites, `scripts/local-stack.ts` under the full-stack browser test, the Pinocchio side of
+   the compare scenarios and of the fuzzers) takes it from `PROPS_VAULT_SO`, an absolute path; without it they load the
+   Anchor build, `target/deploy/props_vault.so`. The six compare scenarios run every instruction on both builds and
+   diff every outcome, inner instruction and account byte for byte: at 0 differences they are the proof that this
+   binary implements the IDL the SDK ships (Anchor generates that IDL from the reference crate). They and the fuzzers
+   need the Anchor reference binary, the one place `anchor build` still runs: it writes `target/deploy/props_vault.so`
+   at the repo root, not the file being deployed.
 
    ```sh
-   cargo test --manifest-path programs/props_vault/Cargo.toml
+   export PROPS_VAULT_SO=$PWD/programs-p/props_vault_p/target/deploy/props_vault_p.so
+   cargo test --manifest-path programs-p/props_vault_p/Cargo.toml       # every hard-coded discriminator and PDA
    npm test --workspace packages/sdk
    npm test --workspace tests/program
    npm run test:validator --workspace tests/program
-   anchor idl build -p props_vault -o /tmp/props_vault.idl.json
-   cmp /tmp/props_vault.idl.json packages/sdk/src/idl/props_vault.json && echo "IDL matches"
+   TEST_DATABASE_URL=postgres://…/props_server_test npm run test:modules --workspace server
+   LOCAL_STACK_DATABASE_URL=postgres://…/props_fullstack_test node app/tests/fullstack.e2e.mjs   # runs scripts/local-stack.ts
+   anchor build                                                          # the Anchor reference binary, for the two lines below only
+   for s in admin trader risk trading crank audit; do node programs-p/props_vault_p/compare/$s.ts; done   # each ends "<n> records, 0 differences"
+   FUZZ_QUICK=1 node programs-p/props_vault_p/fuzz/run.ts                # ends "… 0 differences, 0 violations, 0 crashed, <n> min"; the full campaign takes an hour
    ```
 
    `npm test --workspace tests/program` runs on LiteSVM 1.4 with mainnet's rent and every runtime feature that release
@@ -160,25 +184,37 @@ Railway. Keep `ADMIN_API_TOKEN` in the operators' password manager: every admin 
    lengths a program passes to the runtime. `test:validator` runs on solana-test-validator 3.1 with mainnet's feature
    set as far as 3.1 knows it: it predates both.
 
-   Every test file of both suites first prints the binary it loaded on stderr, `props_vault binary: <path> (<bytes>
-   bytes, executable hash <hash>)`, with the hash `solana-verify` computes (sha256 of the file minus its trailing
-   zeros): each of those hashes must equal `<EXECUTABLE_HASH>` from step 2, or the suites proved another file.
+   Every process above that loads the program (each test file, the validator smoke, the server module suites, the
+   local stack, each side of a compare scenario or fuzz job) first prints the binary it loaded on stderr,
+   `props_vault binary: <path> (<bytes> bytes, executable hash <hash>)`, with the hash `solana-verify` computes (sha256
+   of the file minus its trailing zeros): every line must name `$PROPS_VAULT_SO` with `<SO_SIZE>` bytes and
+   `<EXECUTABLE_HASH>` from step 2, except the Anchor side of the compare scenarios and fuzzers
+   (`target/deploy/props_vault.so`), or that run proved another file.
 
-   Do not run `anchor build` after step 2: it would replace the verifiable binary.
+   After step 2, build nothing into `programs-p/props_vault_p/target/deploy/`: a plain `cargo build-sbf` in that crate
+   would replace the verifiable binary (`PORTING.md`'s `--sbf-out-dir target/deploy` form writes to the repo root's
+   `target/deploy/` and does not; neither does `anchor build`).
 
-## 4. Deploy the program and publish its IDL
+## 4. Deploy the program
 
-Rent is ≈ 5,080 lamports per byte on mainnet (2026-09-23). The program data account is sized with `--max-len`: 10 %
-headroom (≈ +0.5 SOL of rent) lets later, slightly larger releases upgrade without an `extend`. After the handover the
-Squads vault cannot extend it, and which other route works depends on a pending loader feature (section 14.3), so choose
-`--max-len` for the largest release you expect to ship.
+Rent is ≈ 5,080 lamports per byte on mainnet (2026-09-23): the program data costs (`MAX_LEN` + 173) × 5,080 lamports,
+and program data never shrinks. It is sized with `--max-len`; choose between:
+
+- the default, 10 % headroom (≈ 17 KB, ≈ +0.09 SOL of rent; ≈ 0.965 SOL in all at 172,536 B): later, slightly larger
+  releases of this build upgrade without an `extend`;
+- sizing for a fallback to the Anchor build (`anchor build` gives 1,021,016 B on 2026-09-24; its +10 % is
+  `MAX_LEN=1123117`, ≈ 5.7 SOL locked from the first day for a binary you may never deploy).
+
+After the handover the Squads vault cannot extend it, and which other route works depends on a pending loader feature
+(section 14.3; while ExtendProgramChecked is inactive, `scripts/admin/extend-program.ts` grows it with the operator
+key), so choose `--max-len` for the largest release you expect to ship.
 
 ```sh
-SO=target/deploy/props_vault.so
-SO_SIZE=$(wc -c < "$SO" | tr -d ' ')
-MAX_LEN=$(( SO_SIZE + SO_SIZE / 10 ))
-solana rent $(( MAX_LEN + 45 )) --url "$RPC_URL"         # Rent-exempt minimum: 5.46634416 SOL (for 978,072 B)
-solana balance "$(solana-keygen pubkey "$OPERATOR_KEYPAIR")" --url "$RPC_URL"   # ≥ 10 SOL
+SO=programs-p/props_vault_p/target/deploy/props_vault_p.so   # the solana-verify build of section 3.2, not the Anchor build
+SO_SIZE=$(wc -c < "$SO" | tr -d ' ')                         # = <SO_SIZE>
+MAX_LEN=$(( SO_SIZE + SO_SIZE / 10 ))                        # the default; MAX_LEN=1123117 for the Anchor fallback sizing
+solana rent $(( MAX_LEN + 45 )) --url "$RPC_URL"         # Rent-exempt minimum: ≈ 0.965 SOL (0.96500696 for 172,536 B; ≈ 5.7 for the fallback sizing)
+solana balance "$(solana-keygen pubkey "$OPERATOR_KEYPAIR")" --url "$RPC_URL"   # ≥ 2 SOL (≥ 12 SOL for the fallback sizing)
 ```
 
 Write the program into a buffer. The buffer keypair makes the write resumable: if it stops half-way (congestion, a
@@ -190,9 +226,9 @@ solana-keygen new --no-bip39-passphrase -o "$KEYS_DIR/deploy-buffer.json" && chm
 solana program write-buffer "$SO" --buffer "$KEYS_DIR/deploy-buffer.json" --max-len "$MAX_LEN" \
   --keypair "$OPERATOR_KEYPAIR" --url "$RPC_URL" \
   --with-compute-unit-price 100000 --max-sign-attempts 50 --use-rpc
-# Buffer: <BUFFER_ADDRESS>                 (≈ 1,000 write transactions; ≈ 0.0054 SOL of fees at this priority fee)
+# Buffer: <BUFFER_ADDRESS>                 (≈ 180 write transactions; ≈ 0.001 SOL of fees at this priority fee)
 solana program show "$(solana-keygen pubkey "$KEYS_DIR/deploy-buffer.json")" --url "$RPC_URL"
-# Authority: <OPERATOR>, Data Length: 978072 (…) bytes
+# Authority: <OPERATOR>, Data Length: <SO_SIZE> (…) bytes
 ```
 
 Deploy from the buffer (the buffer's lamports become the program data's rent; the buffer is consumed):
@@ -202,8 +238,8 @@ solana program deploy --buffer "$(solana-keygen pubkey "$KEYS_DIR/deploy-buffer.
   --program-id "$PROGRAM_KEYPAIR" --upgrade-authority "$OPERATOR_KEYPAIR" --keypair "$OPERATOR_KEYPAIR" \
   --max-len "$MAX_LEN" --url "$RPC_URL" --with-compute-unit-price 100000 --use-rpc
 # Signature: <SIGNATURE>
-# solana-verify and anchor read finalized state, which trails the deploy by ≈ 15 s (until then they say the program
-# "is not deployed"). Wait for it before checking the hash and publishing the IDL:
+# solana-verify reads finalized state, which trails the deploy by ≈ 15 s (until then it says the program
+# "is not deployed"). Wait for it before checking the hash:
 until solana program show "$PROGRAM_ID" --url "$RPC_URL" --commitment finalized >/dev/null 2>&1; do sleep 2; done
 solana program show "$PROGRAM_ID" --url "$RPC_URL"
 # Program Id: 7qYRWwpmj3j3exVoBUJHzigcWmMN8ruPEdZdZrGzTJ7
@@ -216,21 +252,16 @@ rm "$KEYS_DIR/deploy-buffer.json"
 An abandoned buffer is closed (rent back to the operator) with
 `solana program close <BUFFER_ADDRESS> --keypair "$OPERATOR_KEYPAIR" --url "$RPC_URL"`.
 
-Publish the program's Anchor IDL onchain so explorers, wallets and anyone verifying can decode its instructions (the
-server does not read it: it uses the IDL bundled in `@props/sdk`, which the build check in section 3 compares with the
-deployed binary). It costs ≈ 0.071 SOL (13,804-byte account).
-
-```sh
-anchor idl init --filepath packages/sdk/src/idl/props_vault.json "$PROGRAM_ID" \
-  --provider.cluster "$RPC_URL" --provider.wallet "$OPERATOR_KEYPAIR"
-# Idl account created: CjZsvaPGt5HdaJq2pXquWf3Ww4fxtRzyb5CUk2iHm8we
-anchor idl authority "$PROGRAM_ID" --provider.cluster "$RPC_URL" --provider.wallet "$OPERATOR_KEYPAIR"   # <OPERATOR>
-```
+No IDL is published: the onchain IDL is optional (the server, app and SDK decode with the IDL bundled in `@props/sdk`,
+which the compare scenarios in section 3 proved this binary implements), and this build has no IDL instructions
+(`programs-p/props_vault_p/PORTING.md`, deliberate difference 5), so every `anchor idl` command fails against it.
+Explorers can be served later by a tool that needs no instruction in the program, e.g. the Program Metadata program
+(`@solana-program/program-metadata` on npm); check what the explorer reads before relying on it.
 
 ```sh
 node scripts/admin/status.ts
 # program       upgrade authority <OPERATOR>, last deployed at slot <SLOT>
-# idl           CjZsvaPGt5HdaJq2pXquWf3Ww4fxtRzyb5CUk2iHm8we authority <OPERATOR>     ("missing" + a warning before idl init)
+# idl           CjZsvaPGt5HdaJq2pXquWf3Ww4fxtRzyb5CUk2iHm8we missing (optional: the server decodes with the IDL bundled in @props/sdk)
 # config        6QjJWNQWg43efdr7qTrrqW2GqLETJcGJoHzBc8qYmc9q does not exist: run scripts/admin/initialize.ts
 ```
 
@@ -686,7 +717,7 @@ that sets the same thing as soon as a new one is created; before approving or ex
 
 ## 13. Hand over to Squads
 
-Only after section 10 has run cleanly for a while. Three authorities move to `<SQUADS_VAULT>`.
+Only after section 10 has run cleanly for a while. Two authorities move to `<SQUADS_VAULT>`.
 
 First prove the import path with nothing at stake, since every emergency action after the handover goes through it:
 send 1 lamport from the vault to the SOL treasury (the vault needs a little SOL, section 2) as in section 12, and check
@@ -717,13 +748,7 @@ node scripts/admin/fund-sol-treasury.ts --sol 0.000000001 --print-for <SQUADS_VA
    Import the printed `accept_admin` transaction into Squads (section 12), approve and execute it. `status.ts` then
    shows `admin <SQUADS_VAULT>` with no pending admin.
 
-2. IDL authority (so IDL upgrades go through Squads too):
-
-   ```sh
-   anchor idl set-authority --program-id "$PROGRAM_ID" --new-authority <SQUADS_VAULT> \
-     --provider.cluster "$RPC_URL" --provider.wallet "$OPERATOR_KEYPAIR"            # Authority update complete.
-   anchor idl authority "$PROGRAM_ID" --provider.cluster "$RPC_URL" --provider.wallet "$OPERATOR_KEYPAIR"   # <SQUADS_VAULT>
-   ```
+2. IDL authority: nothing to move. This build publishes no onchain IDL and has no IDL instructions (section 4).
 
 3. Program upgrade authority:
 
@@ -731,25 +756,25 @@ node scripts/admin/fund-sol-treasury.ts --sol 0.000000001 --print-for <SQUADS_VA
    solana program set-upgrade-authority "$PROGRAM_ID" --new-upgrade-authority <SQUADS_VAULT> \
      --skip-new-upgrade-authority-signer-check --keypair "$OPERATOR_KEYPAIR" --url "$RPC_URL"
    solana program show "$PROGRAM_ID" --url "$RPC_URL" | grep Authority    # Authority: <SQUADS_VAULT>
-   node scripts/admin/status.ts | grep -E 'upgrade authority|^idl|  admin'  # all three <SQUADS_VAULT>
+   node scripts/admin/status.ts | grep -E 'upgrade authority|  admin'  # both <SQUADS_VAULT>
    ```
 
 4. Publish the verification: `solana-verify verify-from-repo -um --program-id "$PROGRAM_ID" <PUBLIC_REPO_URL>
-   --commit-hash <RELEASE_COMMIT> --library-name props_vault --mount-path .`; with the upgrade authority on Squads,
-   create the verification PDA through Squads (`solana-verify export-pda-tx …`) and submit it with `--remote` so
-   explorers show the program as verified.
+   --commit-hash <RELEASE_COMMIT> --library-name props_vault_p --mount-path programs-p/props_vault_p`; with the upgrade
+   authority on Squads, create the verification PDA through Squads (`solana-verify export-pda-tx …`) and submit it with
+   `--remote` so explorers show the program as verified.
 
 5. Move the operator key and the program keypair to cold storage. The program keypair is never needed again.
 
 ## 14. Later upgrades
 
-1. Build with `solana-verify build` and run section 3 on the release commit.
+1. Build with `solana-verify build` as in section 3.2 and run the rest of section 3 on the release commit.
 2. Write a buffer with the operator key, then give the buffer to the vault (the CLI will not write a buffer whose
    authority does not sign):
 
    ```sh
    solana-keygen new --no-bip39-passphrase -o "$KEYS_DIR/upgrade-buffer.json"
-   solana program write-buffer target/deploy/props_vault.so --buffer "$KEYS_DIR/upgrade-buffer.json" \
+   solana program write-buffer programs-p/props_vault_p/target/deploy/props_vault_p.so --buffer "$KEYS_DIR/upgrade-buffer.json" \
      --keypair "$OPERATOR_KEYPAIR" --url "$RPC_URL" --with-compute-unit-price 100000 --max-sign-attempts 50 --use-rpc
    solana program set-buffer-authority "$(solana-keygen pubkey "$KEYS_DIR/upgrade-buffer.json")" --new-buffer-authority <SQUADS_VAULT> \
      --keypair "$OPERATOR_KEYPAIR" --url "$RPC_URL"
@@ -775,13 +800,13 @@ node scripts/admin/fund-sol-treasury.ts --sol 0.000000001 --print-for <SQUADS_VA
      `solana program set-upgrade-authority "$PROGRAM_ID" --new-upgrade-authority <SQUADS_VAULT>
      --skip-new-upgrade-authority-signer-check --keypair "$OPERATOR_KEYPAIR" --url "$RPC_URL"`. Check `solana program
      show` names the vault again before creating the upgrade. Rehearse this on a local validator first.
-4. If the IDL changed: `anchor idl write-buffer --filepath packages/sdk/src/idl/props_vault.json "$PROGRAM_ID" …`,
-   `anchor idl set-authority --program-id "$PROGRAM_ID" --new-authority <SQUADS_VAULT> <IDL_BUFFER> …`, then
-   `anchor idl set-buffer --buffer <IDL_BUFFER> "$PROGRAM_ID" --print-only …` and execute the printed instruction
-   through Squads. Restart the server afterwards: it reads the IDL once per process.
-5. `solana-verify get-program-hash` must equal the new executable hash; re-publish the verification (13.4). It reads
-   finalized state, so for ≈ 15 s after the upgrade executes it still reports the previous binary's hash: run it once
-   `solana program show "$PROGRAM_ID" --url "$RPC_URL" --commitment finalized` shows the upgrade's Last Deployed slot.
+4. If the IDL changed: there is no onchain IDL to update (section 4); the new `packages/sdk/src/idl/props_vault.json`
+   reaches the server and the app with their next deploy (the server reads it once per process).
+5. `solana-verify get-program-hash` must equal the new executable hash; re-publish the verification (13.4:
+   `verify-from-repo … --commit-hash <NEW_COMMIT> --library-name props_vault_p --mount-path programs-p/props_vault_p`).
+   It reads finalized state, so for ≈ 15 s after the upgrade executes it still reports the previous binary's hash: run
+   it once `solana program show "$PROGRAM_ID" --url "$RPC_URL" --commitment finalized` shows the upgrade's Last
+   Deployed slot.
 
 ## 15. Costs
 
@@ -789,10 +814,9 @@ Onchain (mainnet rent on 2026-09-23, ≈ 5,080 lamports per byte; re-check with 
 
 | Item | Size | SOL | Paid by |
 |---|---|---|---|
-| Program data at `--max-len` = size + 10 % (978,072 B binary) | 1,075,924 B | 5.4663 (4.9695 without headroom) | operator, locked while deployed |
+| Program data at `--max-len` = size + 10 % (`<SO_SIZE>` binary, ≈ 172,536 B; section 3.2) | ≈ 189,834 B | ≈ 0.965 (0.877 without headroom; ≈ 5.7 sized for an Anchor fallback, section 4) | operator, locked while deployed |
 | Program account | 36 B | 0.0008 | operator |
-| Deploy writes (≈ 1,000 transactions at 100,000 µlamports/CU) | | ≈ 0.0054 | operator |
-| Anchor IDL account | 13,804 B | 0.0708 | operator |
+| Deploy writes (≈ 180 transactions at 100,000 µlamports/CU) | | ≈ 0.001 | operator |
 | Config + fee vault + capital vault (initialize) | 450 + 165 + 165 B | 0.0059 | operator |
 | Tier / market config | 70 / 147 B | 0.0010 / 0.0014 each | operator |
 | Risk / KYC authority float | | 0.2 / 0.1, refilled as used | operator |
@@ -800,8 +824,9 @@ Onchain (mainnet rent on 2026-09-23, ≈ 5,080 lamports per byte; re-check with 
 | Per verification (identity lock + trader profile if new) | 41 + 86 B | 0.0009 – 0.0019 | KYC key |
 | Per trader: profile, evaluation, funded account, payout request | 86 / 164 / 1,547 / 128 B | 0.0011 / 0.0015 / 0.0085 / 0.0013 | trader |
 
-Operator SOL: keep ≥ 10 SOL during the deploy (the buffer's rent is the program's rent, ≈ 5.47; the margin covers a
-restarted buffer and fees), ≈ 5.6 SOL is spent and locked by the deploy and IDL, then the authorities and treasury.
+Operator SOL: keep about twice what the deploy locks, ≥ 2 SOL at the default `--max-len` (the buffer's rent is the
+program's rent, ≈ 0.97; the margin covers a restarted buffer and fees) or ≥ 12 SOL when sized for an Anchor fallback;
+≈ 0.97 SOL (≈ 5.7) is spent and locked by the deploy, then the authorities and treasury.
 
 Monthly (list prices on 2026-09-23; check before buying):
 

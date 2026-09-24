@@ -504,8 +504,9 @@ Round 4 (review fixes):
   and Luhansk are refused at the start and again at approval, where the reviewer states the residence from the
   documents. Evaluations can still be bought from anywhere; the program copy says so.
 Launch (round 3, `docs/runbooks/launch.md` is the go-live procedure):
-- Publishing the program's Anchor IDL onchain (`anchor idl init`) is recommended (explorers, verification) but not needed
-  by the server: marketdata decodes the `MarketConfig` allowlist with the IDL bundled in `@props/sdk`.
+- The onchain IDL is optional: marketdata decodes the `MarketConfig` allowlist with the IDL bundled in `@props/sdk`, and
+  the Pinocchio build the runbook deploys (`programs-p/props_vault_p`, since 2026-09-24) has no IDL instructions, so
+  `anchor idl init` cannot publish one; explorers can be served by the Program Metadata program later.
 - Railway builds with Railpack; `railpack.json` forces the Node provider (the root `Cargo.toml` otherwise makes it a Rust
   build). Vercel installs with `npm ci` at the repo root (`app/vercel.json`). Node is pinned to 22.x.
 - The app's CSP is built at the edge from the same `VITE_*` variables the build inlined; the Android Mobile Wallet Adapter
