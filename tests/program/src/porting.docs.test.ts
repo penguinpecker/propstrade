@@ -1,7 +1,7 @@
-// The launch runbook is written for the Anchor build; PORTING.md deviation 5 lists, section by section, what the switch
-// to the Pinocchio build must change there. Round-3 audit: that list missed §4's binary path (it would size and deploy
-// an Anchor build), §14.2's write-buffer path and the Anchor-sized SOL figures of §2 and §15. This keeps it complete:
-// every runbook line that names the Anchor binary, crate, IDL tooling or size lies in a section the list has a bullet for.
+// The launch runbook deploys the Pinocchio build (PORTING.md deviation 5 records the switch of 2026-09-24). These checks
+// fail if a section regresses to the Anchor binary (`target/deploy/props_vault.so`), the Anchor crate, `anchor idl`
+// tooling or a suite run without PROPS_VAULT_SO: the round-3 audit found exactly such gaps (§4 sized and deployed
+// whatever Anchor build `target/deploy/props_vault.so` held, §14.2 wrote one into the upgrade buffer).
 // Round-4 audit: the runbook's build and admin steps also rest on things no suite asserted: both Cargo workspaces parse
 // (a duplicated `[workspace.metadata.cli]` had broken `cargo test`, `anchor build` and `solana-verify build` for the
 // Anchor crate), the suites and compare scenarios name the binary they load, and every `set-params.ts` /
@@ -14,31 +14,57 @@ import { describe, it } from 'node:test';
 
 const ROOT = new URL('../../../', import.meta.url);
 const read = (path: string) => readFileSync(new URL(path, ROOT), 'utf8');
-const ANCHOR_SPECIFIC = /target\/deploy\/props_vault\.so|--library-name props_vault\b(?!_p)|programs\/props_vault\/|anchor idl|978(,072|072| KB)|10 SOL/;
+const PINOCCHIO_SO = 'programs-p/props_vault_p/target/deploy/props_vault_p.so';
 
-describe('PORTING.md deviation 5 (switching the deploy to this build)', () => {
-  it('has a bullet for every launch-runbook section that names the Anchor binary, crate, IDL tooling or size', () => {
-    const porting = read('programs-p/props_vault_p/PORTING.md');
-    const start = porting.indexOf('\n5. Anchor');
-    const deviation = porting.slice(start, porting.indexOf('\n6. ', start));
-    // "§13.2-13.3" covers both steps; "§13.4 and §14.5" both sections.
-    const covered = new Set(deviation.split('\n').filter((l) => l.startsWith('   - §')).flatMap((l) => {
-      const head = l.slice(5, l.indexOf(':'));
-      const range = /^§(\d+)\.(\d+)-\1\.(\d+)$/.exec(head);
-      if (range) return Array.from({ length: Number(range[3]) - Number(range[2]) + 1 }, (_, i) => `§${range[1]}.${Number(range[2]) + i}`);
-      return head.split(' and ');
-    }));
-    const missing: string[] = [];
-    let section = '';
+describe('launch runbook: the deploy is the Pinocchio build (PORTING.md deviation 5)', () => {
+  const lines = read('docs/runbooks/launch.md').split('\n');
+  /** The lines of section `n` of the runbook (its `## n.` heading to the next), or of numbered step `s` inside it. */
+  const section = (n: number, s?: number) => {
+    let current = '';
     let step = '';
-    read('docs/runbooks/launch.md').split('\n').forEach((line, i) => {
+    return lines.filter((line) => {
       const heading = /^## (\d+)\./.exec(line);
-      if (heading) [section, step] = [heading[1]!, ''];
-      else if (section && /^\d+\. /.test(line)) step = line.slice(0, line.indexOf('.'));
-      const label = step ? `§${section}.${step}` : `§${section}`;
-      if (section && ANCHOR_SPECIFIC.test(line) && !covered.has(label)) missing.push(`${label} (line ${i + 1}): ${line.trim()}`);
+      if (heading) [current, step] = [heading[1]!, ''];
+      else if (/^\d+\. /.test(line)) step = line.slice(0, line.indexOf('.'));
+      return current === String(n) && (s === undefined || step === String(s));
     });
-    assert.deepEqual(missing, [], 'runbook lines in sections deviation 5 does not list');
+  };
+  const has = (where: string[], text: string, label: string) => assert.ok(where.some((l) => l.includes(text)), `${label}: no line has ${JSON.stringify(text)}`);
+
+  it('§4 sizes and deploys, and §14.2 writes into the upgrade buffer, the solana-verify build of the Pinocchio crate', () => {
+    has(section(4), `SO=${PINOCCHIO_SO}`, '§4');
+    has(section(14, 2), `write-buffer ${PINOCCHIO_SO}`, '§14.2');
+    assert.deepEqual([...section(4), ...section(14)].filter((l) => l.includes('target/deploy/props_vault.so')), [], 'the Anchor binary in §4 or §14');
+  });
+
+  it('§3.2, §13.4 and §14.5 build and verify programs-p/props_vault_p, and nothing names the Anchor crate', () => {
+    has(section(3, 2), 'solana-verify build "$PWD/programs-p/props_vault_p" --library-name props_vault_p', '§3.2');
+    has(section(3, 2), `get-executable-hash ${PINOCCHIO_SO}`, '§3.2');
+    for (const [n, s] of [[13, 4], [14, 5]] as const) {
+      assert.ok(section(n, s).join(' ').includes('--library-name props_vault_p --mount-path programs-p/props_vault_p'), `§${n}.${s}: verify-from-repo flags`);
+    }
+    assert.deepEqual(lines.filter((l) => /--library-name props_vault\b(?!_p)|programs\/props_vault\//.test(l)), [], 'lines naming the Anchor crate');
+  });
+
+  it('§3.3 exports PROPS_VAULT_SO as that file and runs every suite, the compare scenarios and the fuzzers on it', () => {
+    const step = section(3, 3);
+    has(step, `export PROPS_VAULT_SO=$PWD/${PINOCCHIO_SO}`, '§3.3');
+    for (const cmd of [
+      'cargo test --manifest-path programs-p/props_vault_p/Cargo.toml',
+      'npm test --workspace tests/program',
+      'npm run test:validator --workspace tests/program',
+      'npm run test:modules --workspace server',
+      'node app/tests/fullstack.e2e.mjs',
+      'node programs-p/props_vault_p/compare/$s.ts',
+      'FUZZ_QUICK=1 node programs-p/props_vault_p/fuzz/run.ts',
+    ]) has(step, cmd, '§3.3');
+  });
+
+  it('no IDL step: §0, §4, §13 and §14 run no anchor idl command and §15 has no IDL row', () => {
+    const commands = [0, 4, 13, 14].flatMap((n) => section(n).filter((l) => /anchor idl (init|authority|set-|write-|build)/.test(l)));
+    assert.deepEqual(commands, []);
+    assert.ok(!section(0).some((l) => l.startsWith('build →') && l.includes('IDL')), '§0 order still has an IDL step');
+    assert.ok(!section(15).some((l) => l.startsWith('| Anchor IDL')), '§15 still has the IDL row');
   });
 });
 

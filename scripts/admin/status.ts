@@ -47,10 +47,11 @@ main(async () => {
   const authority = header.data[12] === 1 ? new PublicKey(header.data.subarray(13, 45)).toBase58() : 'none (immutable)';
   console.log(`program       upgrade authority ${authority}, last deployed at slot ${header.data.readBigUInt64LE(4)}`);
   // Anchor's IDL account: createWithSeed(PDA([], program), "anchor:idl", program); data = discriminator, authority, …
+  // Informational only: the onchain IDL is optional (the server decodes with the IDL bundled in @props/sdk) and the
+  // deployed Pinocchio build has no IDL instructions to publish one with (programs-p/props_vault_p/PORTING.md).
   const idlAddress = await PublicKey.createWithSeed(PublicKey.findProgramAddressSync([], programId)[0], 'anchor:idl', programId);
   const idl = await connection.getAccountInfo(idlAddress, { dataSlice: { offset: 8, length: 32 } });
-  console.log(`idl           ${idlAddress.toBase58()} ${idl ? `authority ${new PublicKey(idl.data).toBase58()}` : 'missing'}`);
-  if (!idl) warnings.push('the Anchor IDL is not onchain: the server marks no market tradable until `anchor idl init` runs');
+  console.log(`idl           ${idlAddress.toBase58()} ${idl ? `authority ${new PublicKey(idl.data).toBase58()}` : 'missing (optional: the server decodes with the IDL bundled in @props/sdk)'}`);
 
   // ---------- config + vault balances (one read, one slot) ----------
   const [configInfo, capitalInfo, feeInfo, treasuryInfo] = await connection.getMultipleAccountsInfo(

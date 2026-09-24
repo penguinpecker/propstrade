@@ -17,7 +17,7 @@ same `emit_cpi!` events, same error numbers and error log lines. The IDL in `pac
 | `crank.rs` | `crank.rs` | sync, top_up_owner, close_completed_order, close_empty_position, collect_claimable | ported |
 
 All 33 instructions are ported (the last two were added to both builds by the round-1 audit fixes): `src/lib.rs`
-dispatches every discriminator, the event self-CPI and Anchor's IDL tag, and the suite passes 76/76 on this build as on
+dispatches every discriminator, the event self-CPI and Anchor's IDL tag, and the suite passes 79/79 on this build as on
 the Anchor build.
 
 Binary: 172,536 bytes (172,512 before the round-3 audit fixes, 172,496 before round 2, 162,800 before round 1, 145,120
@@ -34,7 +34,7 @@ export PATH=$HOME/.cargo/bin:$HOME/.local/share/solana/install/active_release/bi
 cargo build-sbf --manifest-path programs-p/props_vault_p/Cargo.toml --sbf-out-dir target/deploy   # → target/deploy/props_vault_p.so
 cargo test --manifest-path programs-p/props_vault_p/Cargo.toml     # every hard-coded discriminator and PDA vs its sha256 / find_program_address; GMTrade CPI helpers refuse any other program
 cd tests/program && PROPS_VAULT_SO=$PWD/../../target/deploy/props_vault_p.so npm test          # the suite on this build
-cd tests/program && npm test                                                                    # the suite on the Anchor build (76/76)
+cd tests/program && npm test                                                                    # the suite on the Anchor build (79/79)
 node programs-p/props_vault_p/compare/admin.ts                    # byte-level diff against the Anchor build (needs both .so files; PROPS_VAULT_SO picks the Pinocchio side); also trader.ts, risk.ts, trading.ts, crank.ts, audit.ts
 node programs-p/props_vault_p/fuzz/run.ts                         # the differential fuzz campaign on both builds (fixed seeds, about an hour, PROPS_VAULT_SO picks the Pinocchio side, exit 1 on any difference or violation)
 cd tests/program && PROPS_VAULT_SO=... npm run test:validator    # solana-test-validator 3.1, mainnet's features as far as 3.1 knows them (needs ports 18001/18899/19900)
@@ -302,47 +302,34 @@ SPL Token / ATA / System instruction builders by reading.
    derived the address itself and its CPI failed with `MissingAccount`. Same accept/reject set.
 5. Anchor's onchain-IDL instructions are not included (the IDL tag answers `IdlInstructionStub`, as with Anchor's
    `no-idl`), so every `anchor idl` command fails against this build. Kept out for size: the onchain IDL is optional
-   (explorers only; server, app and SDK decode with the IDL bundled in `@props/sdk`, learnings.txt round 3). The launch
-   runbook `docs/runbooks/launch.md` is written for the Anchor build: each section below names the Anchor crate, its
-   binary or its IDL tooling, or carries the size of the 978 KB Anchor binary it was rehearsed with, so the change that
-   switches the deploy to this build must change every one of them:
-   - §0: drop the IDL from the order (deploy + IDL, the IDL authority, the `anchor idl init` note).
-   - §2: check the `ID` bytes in `programs-p/props_vault_p/src/lib.rs` (it has no `declare_id!`); in the operator row,
-     drop the IDL and recompute its SOL (≈ 5.6 SOL spent, keep ≥ 10 SOL: the Anchor binary's rent) from §4's `MAX_LEN`
-     (below).
-   - §3.2: `solana-verify build programs-p/props_vault_p --library-name props_vault_p`; the binary lands in that
-     workspace's `target/deploy/`, `programs-p/props_vault_p/target/deploy/props_vault_p.so` (≈ 172.5 KB), which
-     `get-executable-hash` and `ls -l` then take.
-   - §3.3: every suite against that binary: `PROPS_VAULT_SO=<it>` for `npm test --workspace tests/program`, `npm run
-     test:validator`, the server module suites and `scripts/local-stack.ts`, which all default to the Anchor `.so`,
-     and for the six `compare/*.ts` scenarios, whose Pinocchio side defaults to `target/deploy/props_vault_p.so`;
-     `cargo test --manifest-path programs-p/props_vault_p/Cargo.toml`; and the compare scenarios at 0 differences,
-     which replace the `anchor idl build … cmp` check as the proof that the binary implements the SDK's IDL. Every
-     process prints `props_vault binary: <path> (<bytes> bytes, executable hash <hash>)` on stderr (round 4; the hash
-     `get-executable-hash` prints): each line must name `<it>` with the hash recorded in step 2, or that run proved
-     another file. Its closing warning becomes: after step 2, build nothing into
-     `programs-p/props_vault_p/target/deploy/` (a plain `cargo build-sbf` in that crate would replace the verifiable
-     binary; `--sbf-out-dir target/deploy` does not).
-   - §4: `SO=programs-p/props_vault_p/target/deploy/props_vault_p.so`. As written, `SO=target/deploy/props_vault.so`
-     sizes `MAX_LEN` from, and deploys, whatever Anchor build that path holds (any machine that ran `anchor build`):
-     `get-program-hash` catches it only after the deploy, and the ≈ 4.7 SOL of extra rent stays locked, since program
-     data never shrinks. Update the expected sizes, rent, write count and balance in its comments (≈ 0.97 SOL of
-     program data at +10 % for this binary). The 10 % `--max-len` headroom is only ≈ 17 KB here, and after the handover
-     the vault cannot extend through Squads (§14.3), so size it for the largest release to ship: a fallback to the
-     Anchor build needs ≈ +830 KB (≈ 5.7 SOL). Drop `anchor idl init` and `anchor idl authority`.
-   - §13.2-13.3: drop `anchor idl set-authority` and the `^idl` check.
-   - §13.4 and §14.5: `verify-from-repo … --library-name props_vault_p --mount-path programs-p/props_vault_p`.
-   - §14.2: `write-buffer programs-p/props_vault_p/target/deploy/props_vault_p.so`.
-   - §14.4: drop the IDL write-buffer / set-buffer.
-   - §15: recompute the program-data row (978,072 B binary), the deploy writes (≈ 1,000 for 978 KB, ≈ 180 here) and the
-     operator's SOL from the chosen `MAX_LEN` (keep about twice what the deploy locks); drop the IDL row.
+   (explorers only; server, app and SDK decode with the IDL bundled in `@props/sdk`, learnings.txt round 3), and one
+   can still be published with a tool that needs no instruction in the program, e.g. the Program Metadata program
+   (`@solana-program/program-metadata` on npm); check what explorers read before relying on it. The launch runbook
+   `docs/runbooks/launch.md` was switched to this build on 2026-09-24 and deploys it end to end, with no IDL step, IDL
+   authority or IDL row (`scripts/admin/status.ts` reports a missing IDL account as informational,
+   `docs/ARCHITECTURE.md` §8 says the onchain IDL is optional, and `tests/program/src/porting.docs.test.ts` fails if a
+   runbook section regresses to the Anchor binary, crate or IDL tooling). What matters going forward:
+   - The verifiable binary is `solana-verify build "$PWD/programs-p/props_vault_p" --library-name props_vault_p` (the
+     mount path absolute: `solana-verify` hands it to `docker run -v` verbatim, and Docker reads a relative one as a
+     volume name), which lands in this workspace's `programs-p/props_vault_p/target/deploy/props_vault_p.so`; the
+     runbook's `<EXECUTABLE_HASH>` is its `get-executable-hash` and `<SO_SIZE>` its size, both read from that build (a
+     local `cargo build-sbf` and the pinned Docker image differ by a few bytes: 172,536 vs 172,504 in an earlier
+     round), and it builds nothing else into that `target/deploy/` afterwards (`--sbf-out-dir target/deploy` above
+     writes to the repo root's).
+   - `PROPS_VAULT_SO=<that file>` (absolute) for every suite, the validator smoke, the server module suites,
+     `scripts/local-stack.ts`, the six `compare/*.ts` scenarios and the fuzzers, which otherwise default to the Anchor
+     build or to `target/deploy/props_vault_p.so`; every process prints `props_vault binary: <path> (<bytes> bytes,
+     executable hash <hash>)` (round 4) and each line must name that file with `<EXECUTABLE_HASH>`. The compare
+     scenarios at 0 differences are the proof that the binary implements the SDK's IDL; they and the fuzzers still
+     need `anchor build`'s reference binary at `target/deploy/props_vault.so`.
+   - `--max-len`: 10 % headroom is only ≈ 17 KB here (≈ 0.965 SOL of program-data rent in all at 172,536 B, against
+     ≈ 5.7 SOL for the Anchor binary), program data never shrinks, and after the handover the vault cannot extend
+     through Squads (runbook §14.3; `scripts/admin/extend-program.ts` while ExtendProgramChecked is inactive), so the
+     runbook presents the choice: the default, or sizing for a fallback to the Anchor build (≈ +850 KB of binary,
+     ≈ 5.7 SOL locked from the first day).
 
-   Outside the runbook: the `anchor idl init` recommendation in `docs/ARCHITECTURE.md` §8 "Launch", and the `idl` line
-   and warning of `scripts/admin/status.ts` (its warning is already stale). Both workspaces pin the image
-   `solana-verify` builds with (`[workspace.metadata.cli] solana = "3.1.10"`); without it, it guessed 3.0.1 / 2.3.0
-   from the lockfiles, whose platform-tools (Rust 1.84) cannot build either lockfile. An IDL can still be published
-   with a tool that needs no instruction in this program, e.g. the Program Metadata program
-   (`@solana-program/program-metadata` on npm); check what explorers read before relying on it.
+   Both workspaces pin the image `solana-verify` builds with (`[workspace.metadata.cli] solana = "3.1.10"`); without
+   it, it guessed 3.0.1 / 2.3.0 from the lockfiles, whose platform-tools (Rust 1.84) cannot build either lockfile.
 6. Singleton PDAs (config, vault, fee_vault, sol_treasury, event authority) are constants checked by `cargo test`
    instead of `find_program_address` at runtime: same accept/reject set, far fewer compute units.
 7. Compute units are much lower (initialize 75.0k → 33.5k, upsert_tier 25.3k → 7.7k, deposit 22.1k → 3.6k, set_pauses
