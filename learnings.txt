@@ -996,3 +996,40 @@ Pinocchio evaluated (2026-09-23; measured in a scratch copy, 59/59 LiteSVM tests
   18.4.0-beta.17 in scratch (port 55499, user postgres) runs every server suite, including the validator e2e.
 - Anchor 0.31.1 has no duplicate-mutable-account check; the port matches (fuzzed: no duplicate substitution succeeds on
   either build). GMTrade's UserHeader rent (0.0045 SOL per funded account) has no close instruction: permanent.
+
+2026-09-25 DEPLOYED debe382 (server 87c8bfe6…, then app dpl_FkEs6tAF…): faster chart data. Measured first in a real
+           headless Chromium from Mumbai against Hyperliquid (medians of 5): our chart drew at 0.9-1.3 s cold and 0.75 s
+           warm (Hyperliquid 2.2-5.0 s cold, 1.1 s warm), a market switch 0.3 s on a server cache hit but 2.0-4.3 s when
+           the server had no copy (its cache key rotates at every bucket boundary and a miss blocked on GMTrade's candle
+           service for up to 4 s), and every API round trip through Vercel → Railway costs ~0.29 s from India even for a
+           76-byte 401 (the Railway route, not our code). Changes: the trading page requests candles for the saved symbol
+           at mount instead of after /v1/markets and downloads the chart chunk at boot; watchlist candles are prefetched
+           once per interval; /v1/candles never waits on GMTrade when any copy exists (latest copy at once, 'live' if
+           it ends at the current or previous bucket and is < 2 min old, else completed from price_bars and 'delayed');
+           a pre-warm keeps the latest 300 bars of all 68 markets × 5 intervals in memory (5 small batches a minute,
+           re-run 2 s after each boundary; full fills in chunks of 8 tokens that yield to user requests); candle
+           responses carry cache-control (s-maxage=5 + stale-while-revalidate=55 latest, 3600/86400 settled, no-store
+           on errors and delayed copies) and vercel.json enables rewrite caching for exactly /v1/candles.
+           After (same method, same machine): candles drawn 620 ms cold (was 906) and 477 ms warm (was 751); the candle
+           request now leaves at 242 ms (was 546) and answers in 149 ms warm from Vercel's edge (HIT, age 1-2 s; a
+           settled window HIT in 49 ms); watchlist switches 11 ms (was 305-313); other switches 295-327 ms (was
+           2,016-4,293), one origin round trip, never a multi-second wait. Hyperliquid in the same run: 3,982 ms cold,
+           975 ms warm, 581 ms per switch.
+- GMTrade's candle service serializes requests: 5 concurrent queries answer ~1 s apart, a 68-token × 300-bar batch times
+  out at 15 s for every resolution, 8 tokens × 300 bars take 0.1-4 s, a 3-bucket patch for all 68 tokens 0.1-0.3 s.
+  Never let a user request queue behind a fill; the pre-warm yields to in-flight request fetches.
+- Vercel caches external rewrites per path when the response carries x-vercel-enable-rewrite-caching: 1 and the origin
+  sends s-maxage; the browser sees `public, max-age=0, must-revalidate` (s-maxage stripped), the key includes the query
+  string, Accept-Encoding and Vary: Origin; /v1/((?!candles$).*) keeps the 0 for every other path. Verified live:
+  MISS 0.29 s → HIT 45-64 ms within 5 s; /v1/me stays MISS; a new deploy starts cold per region.
+- Right after a server restart the pre-warm needs ~1 minute (longer while GMTrade is slow): latest windows answer
+  'delayed' + no-store from price_bars until their live copy lands, and a window with no copy at all can still 503
+  once (retry-after 5; the app retries). GMTrade's candle service was down 00:10-00:45 IST during the test runs.
+- `vercel deploy --prod --yes` from a fresh git-archive export: `vercel link --yes --project propstrade --team
+  penguinpeckers-projects` first (it writes .env.local: delete it), the first attempt died with 'fetch failed' after
+  the upload and the retry succeeded at once. Railway: `railway up -d -s server -e production --path-as-root <export>`
+  from the linked repo dir; `railway deployment list` says BUILDING for ~2 min after the build log's 'Healthcheck
+  succeeded', then DEPLOYING → SUCCESS; `railway logs --build` shows the build while it says BUILDING.
+- The browser tests' extra tabs hit /v1/stream's per-IP cap (429 too_many_streams) after a few contexts; users behind
+  one shared address (offices, carrier NAT) could lose live ticks the same way. Not changed; check the cap.
+- Anchor 0.31 / Node: the app's vitest baseline was 155, not the 118 an older note quoted; app e2e is 168 checks.
