@@ -2,17 +2,19 @@
 // (ARCHITECTURE.md §4.1). Routes under /v1; publishes batched 'price' and changed 'market' stream events.
 import type { FastifyReply } from 'fastify';
 import type {
-  ApiError, Candle, CandleInterval, CandlesResponse, Market, MarketCategory, MarketTrade, PriceImpactQuote, PriceTick,
+  ApiError, Candle, CandleInterval, CandlesResponse, DataFreshness, Market, MarketCategory, MarketTrade, PriceImpactQuote, PriceTick,
 } from '@props/shared';
 import {
-  INTERVAL_SECONDS, KeeperFeed, PUBLIC_RPC, USD_DECIMALS, USD_UNIT, buildCatalog, fetchCandles, fetchCandlesBatch,
-  fetchPairs, fetchTradeEvents, formatFixed, isMarketClosed, modelInput, parseFixed, priceString, priceTick, sessionOf,
-  usdString, type FeedState, type KeeperMarket, type Pair, type PropsLimits,
+  DERIVED_FROM, INTERVAL_SECONDS, KeeperFeed, PUBLIC_RPC, USD_DECIMALS, USD_UNIT, aggregateCandles, bucketNext, bucketStart, decodeMarket,
+  buildCatalog, fetchCandles, fetchCandlesBatch, fetchPairs, fetchTradeEvents, formatFixed, isMarketClosed, modelInput, parseFixed,
+  priceString, priceTick, sessionOf, usdString, type FeedState, type KeeperMarket, type NativeInterval, type Pair, type PropsLimits,
 } from '@props/gmtrade';
 import { model } from '@props/gmsol-wasm';
+import { toUnitPrice } from '@props/sdk';
 import { z } from 'zod';
 import { parse } from '../../errors.ts';
 import { adminAuth } from '../../routes/admin.ts';
+import { withPosition } from '../sim/model.ts';
 import type { MarketDataService, MarketState, ModuleContext } from '../types.ts';
 import { fetchAllowlist, type MarketConfigLimits } from './allowlist.ts';
 import { covers, createHistoryStore, type CandleWindow } from './history.ts';
@@ -50,19 +52,27 @@ const LATEST_STORE_EVERY_MS = 5 * 60_000;
 // time out (measured 2026-09-24); a 3-bucket patch for all 68 takes 0.1-0.3 s. Fill order: the app's default chart
 // interval first (a fresh process gets its 24h change from one small request ahead of the fills), then 5m.
 const PREWARM_CHUNK = 8;
-const PREWARM_ORDER: CandleInterval[] = ['1h', '5m', '15m', '4h', '1D'];
+const PREWARM_ORDER: NativeInterval[] = ['1h', '5m', '15m', '4h', '1D'];
 // The history backfill (after the first pre-warm pass): every series is walked in turn and its newest missing page of
 // PAGE_BARS settled bars (pages are aligned to multiples of their span, so a page never moves) is fetched and stored,
 // until the series holds BACKFILL_BARS or reaches GMTrade's history start (an empty page, stored as the marker). One
-// query at a time, only while GMTrade is idle and quick (no request fetch or pre-warm batch in flight, the candles
-// source ok and its last answer under BACKFILL_MAX_LATENCY_MS), one every BACKFILL_EVERY_MS. Measured 2026-09-25: a
-// 300-bar page answers in 0.1-0.3 s when GMTrade is idle, so the 68 markets' 1,972 pages take about 75 minutes.
+// query at a time, only while GMTrade is idle and answering (no request fetch or pre-warm batch in flight, the candles
+// source not down and its last answer under BACKFILL_MAX_LATENCY_MS), one every BACKFILL_EVERY_MS. Measured 2026-09-25:
+// a 300-bar page answers in 0.1-0.3 s when GMTrade is idle, so the 68 markets' 1,972 pages take about 75 minutes;
+// gated on 'ok' under 2 s, the walk stayed shut through GMTrade's slow spells all day (windowsStored 0), so the gate
+// shuts only for the outages the walk cannot get through.
 // ponytail: an empty page inside a closure (a stock's 5m page on a weekend) reads as that series' history start, as
 // the app's own scroll does; derive the start from the 1D series if that ever matters.
 const PAGE_BARS = 300;
-const BACKFILL_BARS: Record<CandleInterval, number> = { '5m': 1_000, '15m': 1_000, '1h': 2_000, '4h': 2_000, '1D': 2_000 };
+const BACKFILL_BARS: Record<NativeInterval, number> = { '5m': 1_000, '15m': 1_000, '1h': 2_000, '4h': 2_000, '1D': 2_000 };
 const BACKFILL_EVERY_MS = 2_000;
-const BACKFILL_MAX_LATENCY_MS = 2_000;
+const BACKFILL_MAX_LATENCY_MS = 5_000;
+// A copy the price record (the same live feed) completes through the bucket in progress is a current chart: 'live'
+// while the copy is this old at most (the pre-warm refreshes it every minute whenever GMTrade answers), 'delayed' after.
+const COPY_LIVE_MS = 10 * 60_000;
+// Minute bars kept in memory per market: the price record's tail (record.ts writes a finished minute within a minute)
+// and the minute in progress, so the 1m and 3m charts are current to the last tick.
+const RECENT_MINUTES = 5;
 
 /** What the service does while each outside source fails (reported by /v1/health). */
 const FALLBACKS: Record<string, string> = {
@@ -95,14 +105,15 @@ export const candleKey = (symbol: string, res: number, w: { start: number; end: 
 const samePrice = (a: PriceTick, b: PriceTick) => a.min === b.min && a.max === b.max && a.session === b.session;
 
 /** How far a figure the app shows must move, since the row was last sent, for the row to be sent again: the 24h change
- *  and the funding rate by their display precision (percent with 2 and 4 decimals), a USD figure (volume, OI, capacity,
- *  pool liquidity) by 1 % (shown compact, "$1.2M", so a smaller move is rarely visible). Every other field (session,
- *  freshness, tradable, leverage, pools...) counts on any change; price and updatedAt travel in the ticks and the
- *  borrow rates are not shown. Measured 2026-09-25: without this, OI, capacity and liquidity drift re-sent all 68 rows
- *  every 5 s. */
+ *  and the four hourly rates (funding and borrowing, each side) by their display precision (percent with 2 and 4
+ *  decimals), a USD figure (volume, OI, capacity, pool liquidity) by 1 % (shown compact, "$1.2M", so a smaller move is
+ *  rarely visible). Every other field (session, freshness, tradable, leverage, pools...) counts on any change; price
+ *  and updatedAt travel in the ticks. Measured 2026-09-25: without this, OI, capacity and liquidity drift re-sent all
+ *  68 rows every 5 s. */
 const ROW_STEPS: Partial<Record<keyof Market, { abs: number } | { rel: number } | 'ignored'>> = {
-  price: 'ignored', updatedAt: 'ignored', borrowRateHourlyLong: 'ignored', borrowRateHourlyShort: 'ignored',
-  change24h: { abs: 0.01 }, fundingRateHourlyLong: { abs: 0.0001 },
+  price: 'ignored', updatedAt: 'ignored',
+  change24h: { abs: 0.01 },
+  fundingRateHourlyLong: { abs: 0.0001 }, fundingRateHourlyShort: { abs: 0.0001 }, borrowRateHourlyLong: { abs: 0.0001 }, borrowRateHourlyShort: { abs: 0.0001 },
   volume24h: { rel: 0.01 }, openInterestLong: { rel: 0.01 }, openInterestShort: { rel: 0.01 },
   capacityLong: { rel: 0.01 }, capacityShort: { rel: 0.01 }, poolLiquidity: { rel: 0.01 },
 };
@@ -307,11 +318,30 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     return tick && price ? { ...tick, min: price, max: price, mid: price, ts: Date.now() } : tick;
   }
 
+  /** The last RECENT_MINUTES minutes of every market as one-minute bars, built from the ticks as record.ts builds the
+   *  rows it writes: what the 1m and 3m charts read over the table. */
+  const recentMinutes = new Map<string, Candle[]>();
+
   function emitTick(tick: PriceTick) {
     lastTickAt = Date.now();
     record.add(tick);
     pendingTicks.set(tick.symbol, tick);
     for (const fn of tickListeners) fn(tick);
+    const price = Number(tick.mid);
+    if (!(price > 0) || !Number.isFinite(price)) return;
+    const time = Math.floor(tick.ts / 60_000) * 60;
+    const list = recentMinutes.get(tick.symbol) ?? [];
+    const bar = list.at(-1);
+    if (bar && time < bar.time) return; // an older tick
+    if (bar && time === bar.time) {
+      bar.high = Math.max(bar.high, price);
+      bar.low = Math.min(bar.low, price);
+      bar.close = price;
+      return;
+    }
+    list.push({ time, open: price, high: price, low: price, close: price });
+    if (list.length > RECENT_MINUTES) list.shift();
+    recentMinutes.set(tick.symbol, list);
   }
 
   async function refreshPairs() {
@@ -421,7 +451,7 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
   async function backfill() {
     if (!warmedOnce || filling || [...inflight.keys()].some((key) => key.startsWith('candles:'))) return;
     const source = upstreams.status('candles');
-    if (source.state !== 'ok' || (source.latencyMs ?? Infinity) >= BACKFILL_MAX_LATENCY_MS) return;
+    if (source.state === 'down' || (source.latencyMs ?? Infinity) >= BACKFILL_MAX_LATENCY_MS) return;
     const series = allSeries();
     const nowSec = Math.floor(Date.now() / 1000);
     const pageOf = (res: number) => Math.floor(nowSec / (PAGE_BARS * res)); // the page in progress: the series' latest window covers it
@@ -560,7 +590,6 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     every(BACKFILL_EVERY_MS, 'candle backfill', backfill);
     if (programId) every(60_000, 'allowlist', refreshAllowlist, 3);
     every(60_000, 'price record', record.flush);
-    every(3_600_000, 'price record pruning', record.prune);
   })();
   ready.catch((err) => ctx.log.error({ err }, 'marketdata failed to start'));
 
@@ -569,9 +598,60 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     for (const t of timers) clearInterval(t);
   });
 
+  /** A derived interval (DERIVED_FROM), rolled up through this same path. Its latest window comes from the source's
+   *  latest window (the warm copy: no GMTrade call); an older one from the source windows it spans, the table else
+   *  GMTrade, in one source request of at most MAX_CANDLES bars: a longer window answers its newest part, and the
+   *  chart's loader continues from the oldest bar it got. 1m and 3m read the price record's minutes, the last few from
+   *  memory (the table is written once a minute); their history starts with the record (2026-09-23), so an older window
+   *  answers empty as GMTrade's history start does. The aggregate is cached under the derived interval as a native
+   *  window is, a record one for seconds only (its tail may still be unwritten after a database outage). */
+  async function derived(symbol: string, interval: CandleInterval, source: NativeInterval | 'record', from?: number, to?: number): Promise<CandlesResponse> {
+    const res = INTERVAL_SECONDS[interval];
+    const { row } = preferredPool(symbol);
+    const nowSec = Math.floor(Date.now() / 1000);
+    const nowBucket = bucketStart(interval, nowSec);
+    const end = Math.min(bucketStart(interval, to ?? nowSec), nowBucket);
+    let start = bucketStart(interval, from ?? end - (300 - 1) * res);
+    if (start > end) throw badRequest('from must not be after to');
+    if ((end - start) / res + 1 > MAX_CANDLES) throw badRequest(`at most ${MAX_CANDLES} candles per request`);
+    const srcRes = source === 'record' ? 60 : INTERVAL_SECONDS[source];
+    const srcWindow = source !== 'record' && from === undefined && end === nowBucket ? candleWindow(srcRes, nowSec) : null;
+    const srcEnd = Math.min(bucketNext(interval, end) - srcRes, Math.floor(nowSec / srcRes) * srcRes);
+    if (srcWindow) {
+      start = bucketStart(interval, srcWindow.start);
+    } else if (source !== 'record') {
+      const capStart = srcEnd - (MAX_CANDLES - 1) * srcRes;
+      if (start < capStart) start = bucketStart(interval, capStart) === capStart ? capStart : bucketNext(interval, capStart);
+    }
+    const key = candleKey(row.symbol, res, { start, end });
+    const cached = candleCache.get(key);
+    const base = { symbol: row.symbol, interval, source: source === 'record' ? 'record' as const : 'gmtrade' as const };
+    if (cached && Date.now() - cached.at < cached.ttl) return { ...base, candles: cached.candles, freshness: 'live' };
+    let list: Candle[];
+    let freshness: DataFreshness = 'live';
+    if (source === 'record') {
+      const minutes = await record.candles(row.symbol, 60, start, srcEnd).catch(() => null);
+      if (!minutes) throw new HttpError(503, 'unavailable', 'the price record is unavailable right now', { 'retry-after': '5' });
+      const byTime = new Map(minutes.map((c) => [c.time, c]));
+      for (const m of recentMinutes.get(row.symbol) ?? []) if (m.time >= start && m.time <= srcEnd) byTime.set(m.time, { ...m });
+      list = aggregateCandles([...byTime.values()].sort((a, b) => a.time - b.time), interval, start);
+    } else {
+      const r = srcWindow ? await candles(row.symbol, source) : await candles(row.symbol, source, start, srcEnd);
+      list = aggregateCandles(r.candles.filter((c) => c.time >= start), interval, srcWindow ? srcWindow.start : start);
+      freshness = r.freshness;
+    }
+    if (freshness === 'live') {
+      const ttl = source !== 'record' && bucketNext(interval, end) <= nowSec - 60 ? 3_600_000 : 5_000;
+      candleCache.set(key, { at: Date.now(), ttl, candles: list });
+    }
+    return { ...base, candles: list, freshness };
+  }
+
   async function candles(symbol: string, interval: CandleInterval, from?: number, to?: number): Promise<CandlesResponse> {
     const res = Object.hasOwn(INTERVAL_SECONDS, interval) ? INTERVAL_SECONDS[interval] : undefined;
     if (!res) throw badRequest(`interval must be one of ${Object.keys(INTERVAL_SECONDS).join(', ')}`);
+    const source = DERIVED_FROM[interval];
+    if (source) return derived(symbol, interval, source, from, to);
     const { row, pool } = preferredPool(symbol);
     const nowSec = Math.floor(Date.now() / 1000);
     const w = candleWindow(res, nowSec, from, to);
@@ -584,8 +664,8 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     // A copy answers at once: this window's expired entry or the series' latest window (the bucket before this one,
     // when the key has just rotated), whichever GMTrade returned last. It is 'live' for a settled window it reaches
     // the end of (final candles) and, under two minutes old and ending at the current or previous bucket, for the
-    // latest one (live ticks move its last candle in the app); otherwise the price record completes it and it is
-    // 'delayed'.
+    // latest one (live ticks move its last candle in the app); otherwise the price record completes it: 'live' when
+    // that reaches the bucket in progress and the copy is under COPY_LIVE_MS old, 'delayed' else.
     const isSettled = settled(w.end, res, nowSec);
     const latest = lastGood.get(`${row.symbol}:${res}`);
     const copy = latest && latest.start <= w.start && (!cached || latest.at > cached.at)
@@ -605,19 +685,31 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     }
     // One refresh of this exact window runs in the background whatever answers below; it caches (and, settled, stores)
     // only when it succeeds.
-    const fetching = shared(`candles:${key}`, () => upstreams.track('candles', () => gm.fetchCandles(pool.meta!.indexToken.pubkey, res, w.start, w.end))
+    const refresh = () => shared(`candles:${key}`, () => upstreams.track('candles', () => gm.fetchCandles(pool.meta!.indexToken.pubkey, res, w.start, w.end))
       .then((list) => (remember(row.symbol, res, w, list, nowSec), list)));
-    if (fromCopy) return { ...base, candles: copy.candles, freshness: 'live' }; // a bucket short: the refresh fills the rotated key
+    if (fromCopy) {
+      refresh();
+      return { ...base, candles: copy.candles, freshness: 'live' }; // a bucket short: the refresh fills the rotated key
+    }
     const recorded = await record.candles(row.symbol, res, w.start, w.end).catch(() => []);
     const list = mergeCandles(copy?.candles ?? [], recorded);
-    if (list.length) return { ...base, candles: list, freshness: 'delayed' };
-    // Nothing to show at all (a window nobody asked for before, on a fresh process): wait for GMTrade, briefly, and
-    // first for the pre-warm batch it is answering, if any, which this fetch queues behind.
+    if (list.length) {
+      refresh();
+      const current = copy !== undefined && list.at(-1)!.time === w.nowBucket && Date.now() - copy.at < COPY_LIVE_MS;
+      return { ...base, candles: list, freshness: current ? 'live' : 'delayed' };
+    }
+    // Nothing to show at all (a window nobody asked for before, on a fresh process): wait for GMTrade, briefly. A
+    // latest window waits first for the pre-warm batch GMTrade is answering, if any (it fills this series, and this
+    // fetch queues behind it); a settled window only for its own fetch, and not at all while GMTrade is down (queued
+    // behind the batch, a history scroll took 14-15 s to its 503 during an outage, measured 2026-09-25).
+    const unavailable = () => new HttpError(503, 'unavailable', 'GMTrade candles are unavailable right now', { 'retry-after': '5' });
+    if (!w.latest && upstreams.status('candles').state === 'down') throw unavailable();
+    const fetching = refresh();
     try {
-      if (filling) await Promise.race([filling, fetching]).catch(() => {});
+      if (filling && w.latest) await Promise.race([filling, fetching]).catch(() => {});
       return { ...base, candles: await within(fetching, CANDLE_WAIT_MS), freshness: 'live' };
     } catch {
-      throw new HttpError(503, 'unavailable', 'GMTrade candles are unavailable right now', { 'retry-after': '5' });
+      throw unavailable();
     }
   }
 
@@ -663,34 +755,74 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     return { priceFeed, ...upstreams.report(), candles };
   }
 
-  async function quote(symbol: string, side: 'Long' | 'Short', sizeUsd: string): Promise<PriceImpactQuote> {
-    let size: bigint;
-    try {
-      size = parseFixed(sizeUsd, USD_DECIMALS);
-    } catch {
-      throw badRequest('sizeUsd must be a decimal number');
-    }
+  /**
+   * The order ticket's cost preview (api.ts PriceImpactQuote): GMTrade's open fee and impact from one simulateIncrease
+   * on the pool as it is (the account's own position is not in it, as at a fresh open), then the resulting position
+   * valued as the positions table will value it once filled — in the pool (sim/model.ts withPosition, pure pools),
+   * which gives the close fee and the liquidation price from the same positionStatus the book runs. Two model calls,
+   * both in-process: cheap enough for a debounced quote on every keystroke.
+   */
+  async function quote(symbol: string, side: 'Long' | 'Short', sizeUsd: string, collateralUsd?: string, limitPrice?: string): Promise<PriceImpactQuote> {
+    const decimal = (v: string, name: string, decimals: number) => {
+      try {
+        return parseFixed(v, decimals);
+      } catch {
+        throw badRequest(`${name} must be a decimal number`);
+      }
+    };
+    const size = decimal(sizeUsd, 'sizeUsd', USD_DECIMALS);
     if (size <= 0n || size > 100_000_000n * USD_UNIT) throw badRequest('sizeUsd must be between 0 and 100,000,000');
     const { row, pool } = preferredPool(symbol);
-    const input = modelInput(feed, pool);
+    const live = modelInput(feed, pool);
     const meta = feed.tokens.get(pool.meta!.indexToken.pubkey)?.meta;
-    if (!input || !meta) throw new HttpError(503, 'unavailable', `no live state for ${row.symbol} yet`);
-    // Collateral in the pool's short token (USDC for every preferred pool) worth the full size: fees and
-    // impact do not depend on leverage, and 1x never trips the min-collateral checks.
+    if (!live || !meta) throw new HttpError(503, 'unavailable', `no live state for ${row.symbol} yet`);
+    // Collateral in the pool's short token (USDC for every preferred pool): the ticket's margin, else one worth the
+    // full size (fees and impact do not depend on leverage, and 1x never trips the min-collateral checks).
+    const collateral = collateralUsd === undefined ? null : decimal(collateralUsd, 'collateralUsd', 6);
+    if (collateral !== null && collateral <= 0n) throw badRequest('collateralUsd must be above zero');
+    // A limit order is priced at its limit price, as the engine executes it (the model then takes min = max = limit).
+    let input = live;
+    if (limitPrice !== undefined) {
+      let limit: bigint;
+      try {
+        limit = toUnitPrice(limitPrice, meta.decimals);
+      } catch {
+        throw badRequest('limitPrice must be a decimal price');
+      }
+      if (limit <= 0n) throw badRequest('limitPrice must be above zero');
+      input = { ...live, prices: { ...live.prices, index: { min: limit, max: limit } } };
+    }
     let result;
     try {
       result = model.simulateIncrease({
         market: input, isLong: side === 'Long', collateralToken: pool.meta!.shortToken.pubkey,
-        collateralAmount: size / input.prices.short.min + 1n, sizeDeltaUsd: size,
+        collateralAmount: collateral ?? size / input.prices.short.min + 1n, sizeDeltaUsd: size,
       });
     } catch (err) {
       throw new HttpError(422, 'rejected_by_venue', `GMTrade would reject this order: ${(err as Error).message}`);
     }
+    // The position's status in the pool it would then be part of; null when the model cannot value it there (the
+    // conservative fee factor stands in for the close fee: negative-impact, the larger of the two).
+    let status: ReturnType<typeof model.positionStatus> | null = null;
+    try {
+      status = model.positionStatus({ ...input, market: pool.meta!.isPure ? withPosition(input.market, result.position.account) : input.market }, result.position.account);
+    } catch (err) {
+      ctx.log.warn({ err, symbol: row.symbol }, 'marketdata: the quote could not value the resulting position');
+    }
+    const closeFee = status ? status.closeOrderFeeValue : (size * decodeMarket(input.market).config.order_fee_factor_for_negative_impact) / USD_UNIT;
+    const [fundingRate, borrowRate] = side === 'Long' ? [row.fundingRateHourlyLong, row.borrowRateHourlyLong] : [row.fundingRateHourlyShort, row.borrowRateHourlyShort];
+    // Received funding (a negative rate) is never credited here (claimables are not counted), so it costs nothing.
+    const hourlyPct = fundingRate === null || borrowRate === null ? null : Math.max(fundingRate, 0) + borrowRate;
     return {
-      symbol: row.symbol, side, sizeUsd: formatFixed(size, USD_DECIMALS, 6),
+      symbol: row.symbol, side, sizeUsd: formatFixed(size, USD_DECIMALS, 6), orderValueUsd: formatFixed(size, USD_DECIMALS, 6),
+      collateralUsd: collateral === null ? null : formatFixed(collateral, 6, 6),
       priceImpactPct: (Number(result.priceImpactValue) / Number(size)) * 100,
-      openFeeUsd: usdString(result.fees.orderFeeValue),
+      openFeeUsd: usdString(result.fees.orderFeeValue), closeFeeUsd: usdString(closeFee), roundTripFeeUsd: usdString(result.fees.orderFeeValue + closeFee),
       executionPrice: priceString(result.executionPrice, meta.decimals, meta.precision),
+      fundingRateHourlyPct: fundingRate, borrowRateHourlyPct: borrowRate,
+      hourlyCostUsd: hourlyPct === null ? null : usdString((size * BigInt(Math.round(hourlyPct * 1e12))) / (100n * 10n ** 12n)),
+      liquidationPrice: status?.liquidationPrice == null ? null : priceString(status.liquidationPrice, meta.decimals, meta.precision),
+      platformFeeUsd: '0', // Props.trade charges no fee per order (AppConfig.orderFeeBps, when it exists, goes here)
     };
   }
 
@@ -738,9 +870,9 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
       const to = intParam(req.query.to, 'to');
       const body = await candles(symbol, interval as CandleInterval, intParam(req.query.from, 'from'), to);
       // A shared cache may keep a live latest window for seconds, a live settled window for an hour, a fallback never.
-      const res = INTERVAL_SECONDS[body.interval];
+      // (A window is settled once the bucket holding `to` closed more than a minute ago, weeks and months by the calendar.)
       const nowSec = Math.floor(Date.now() / 1000);
-      const past = to !== undefined && settled(candleWindow(res, nowSec, undefined, to).end, res, nowSec);
+      const past = to !== undefined && bucketNext(body.interval, Math.min(to, nowSec)) <= nowSec - 60;
       reply.header('cache-control', body.freshness !== 'live' ? 'no-store'
         : past ? 'public, s-maxage=3600, stale-while-revalidate=86400' : 'public, s-maxage=5, stale-while-revalidate=55');
       return body;
@@ -749,12 +881,12 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
       return send(reply, err);
     }
   });
-  app.get<{ Querystring: { symbol?: string; side?: string; sizeUsd?: string } }>('/v1/quote', async (req, reply) => {
+  app.get<{ Querystring: { symbol?: string; side?: string; sizeUsd?: string; collateralUsd?: string; limitPrice?: string } }>('/v1/quote', async (req, reply) => {
     try {
-      const { symbol, side, sizeUsd } = req.query;
+      const { symbol, side, sizeUsd, collateralUsd, limitPrice } = req.query;
       if (!symbol || !sizeUsd) throw badRequest('symbol and sizeUsd are required');
       if (side !== 'Long' && side !== 'Short') throw badRequest('side must be Long or Short');
-      return await quote(symbol, side, sizeUsd);
+      return await quote(symbol, side, sizeUsd, collateralUsd || undefined, limitPrice || undefined);
     } catch (err) {
       return send(reply, err);
     }

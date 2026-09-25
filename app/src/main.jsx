@@ -8,6 +8,7 @@ import { GOOGLE_ONLY, WithPrivy } from './lib/privy';
 import { createQueryClient } from './lib/queries';
 import './styles.css';
 import './themes.css';
+import './pages.css';
 
 if (!env.rpcUrl) throw new Error('VITE_RPC_URL is required for mainnet builds (see app/.env.example).');
 

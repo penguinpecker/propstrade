@@ -13,6 +13,21 @@ export const compactUsd = value => value == null ? DASH : '$' + new Intl.NumberF
 export const percent = (value, digits = 2) => value == null ? DASH : `${value > 0 ? '+' : ''}${number(value, digits)}%`;
 export const price = (value, decimals) => value == null ? DASH : number(Number(value), decimals);
 export const sol = lamports => `${number(lamports / 1e9, 6)} SOL`;
+/** What a hover on a market's rates explains: the sign convention and how to read the hourly figure over longer periods. */
+export const RATES_TITLE = 'Longs pay when positive, per hour; ×8 for 8h, ×8760 for a year';
+const rate = value => value == null ? DASH : `${number(value, 4)}%`;
+/**
+ * A market's hourly funding and borrow rates as "long / short". Funding is signed (longs pay when positive; the short
+ * side is not simply the negative of the long one), borrowing is always paid. A side the API does not give (the short
+ * funding rate from a server that predates it) is "—".
+ */
+export const rates = market => ({
+  funding: `${percent(market.fundingRateHourlyLong, 4)} / ${percent(market.fundingRateHourlyShort, 4)}`,
+  borrow: `${rate(market.borrowRateHourlyLong)} / ${rate(market.borrowRateHourlyShort)}`,
+  title: RATES_TITLE,
+});
+/** A Solana public key in base58 (32 bytes: 32 to 44 characters): what the trader search may send to the API. */
+export const isSolanaAddress = value => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value);
 /**
  * Margin for a position size at a leverage, in USD with 6 decimals, rounded up: rounded down, size ÷ margin would exceed
  * the leverage (and a market's maximum). 15 significant digits drop the float noise before rounding.

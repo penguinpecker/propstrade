@@ -1,6 +1,7 @@
 // Chart settings kept in this browser. localStorage is a trust boundary: every read is validated, and anything
 // malformed falls back to the defaults.
 import { useCallback, useState } from 'react';
+import { INTERVALS, isInterval } from '../lib/candles';
 import { STUDIES, validInput } from './registry.js';
 
 export const MAX_STUDIES = 20;
@@ -81,15 +82,26 @@ export function validDrawings(raw) {
   });
 }
 
+/** The intervals pinned in the chart's toolbar until the trader stars others. */
+export const DEFAULT_INTERVALS = ['5m', '15m', '1h', '4h', '1D'];
+/** The saved interval, or 1h when there is none or it is not one the chart offers. */
+export const loadInterval = (storage = store()) => { const saved = read(storage, 'chart-interval'); return isInterval(saved) ? saved : '1h'; };
+/** The pinned intervals: known ones only, each once, in the chart's order; anything else reads as the defaults. */
+export const validIntervals = raw => Array.isArray(raw) ? INTERVALS.filter(i => raw.includes(i)) : DEFAULT_INTERVALS;
+export const loadIntervals = (storage = store()) => validIntervals(read(storage, 'chart-intervals'));
 export const loadDrawings = (symbol, storage = store()) => validDrawings(read(storage, `chart-drawings.${symbol}`));
 export const saveDrawings = (symbol, list, storage = store()) => write(storage, `chart-drawings.${symbol}`, list);
 
 /**
- * Chart state shared by the trade page's chart and its expanded copy: interval, chart type, the Positions toggle,
- * indicator instances (saved in this browser), the market's drawings (saved per market) and the drawing toggles.
+ * Chart state shared by the trade page's chart and its expanded copy: interval and the intervals pinned in the toolbar
+ * (both saved in this browser), chart type, the Positions toggle, indicator instances (saved in this browser), the
+ * market's drawings (saved per market) and the drawing toggles.
  */
 export function useChartSettings(symbol) {
-  const [interval, setInterval] = useState('1h');
+  const [interval, setIntervalState] = useState(() => loadInterval());
+  const setInterval = useCallback(next => { write(store(), 'chart-interval', next); setIntervalState(next); }, []);
+  const [pinned, setPinnedState] = useState(() => loadIntervals());
+  const setPinned = useCallback(list => { write(store(), 'chart-intervals', list); setPinnedState(list); }, []);
   const [chartType, setChartType] = useState('candles');
   const [showGuides, setShowGuides] = useState(true);
   const [studies, setStudiesState] = useState(() => loadStudies());
@@ -99,5 +111,5 @@ export function useChartSettings(symbol) {
   if (drawings !== saved) setSaved(drawings);
   const setDrawings = useCallback(list => { saveDrawings(symbol, list); setSaved({ symbol, list }); }, [symbol]);
   const [prefs, setPrefs] = useState({ magnet: false, stay: false, locked: false, hidden: false });
-  return { interval, setInterval, chartType, setChartType, showGuides, setShowGuides, studies, setStudies, drawings: drawings.list, setDrawings, prefs, setPrefs };
+  return { interval, setInterval, pinned, setPinned, chartType, setChartType, showGuides, setShowGuides, studies, setStudies, drawings: drawings.list, setDrawings, prefs, setPrefs };
 }

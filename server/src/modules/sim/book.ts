@@ -126,13 +126,17 @@ export function toPosition(m: Mark, orders: OrderRow[]): Position {
   };
   const unrealized = unrealizedOf(m);
   const leverage = m.status?.leverage ? Number(m.status.leverage) / 1e20 : Number(p.sizeUsd) / Number(p.collateralUsd);
+  const pending = (v: bigint | undefined) => (v === undefined ? '0' : usdText(v));
+  const s = m.status;
   return {
     id: p.id, symbol: p.symbol, side: p.side,
     sizeUsd: trim(p.sizeUsd), sizeTokens: trim(p.sizeTokens), collateralUsd: trim(p.collateralUsd), leverage: round2(leverage),
     entryPrice: trim(p.entryPrice), markPrice: m.tick?.mid ?? null,
-    liquidationPrice: m.status?.liquidationPrice && m.state ? priceText(m.status.liquidationPrice, m.state.indexDecimals) : null,
+    liquidationPrice: s?.liquidationPrice && m.state ? priceText(s.liquidationPrice, m.state.indexDecimals) : null,
     unrealizedPnl: unrealized === undefined ? null : microText(unrealized),
-    pendingFeesUsd: m.status ? usdText(m.status.pendingBorrowingFeeValue + m.status.pendingFundingFeeValue) : '0',
+    pendingFeesUsd: pending(s && s.pendingBorrowingFeeValue + s.pendingFundingFeeValue + s.closeOrderFeeValue),
+    pendingBorrowUsd: pending(s?.pendingBorrowingFeeValue), pendingFundingUsd: pending(s?.pendingFundingFeeValue), closeFeeUsd: pending(s?.closeOrderFeeValue),
+    closing: orders.some((o) => o.positionId === p.id && o.kind === 'Market' && !o.isIncrease && o.closeAll && PENDING.includes(o.status)),
     takeProfit: protection('TakeProfit'), stopLoss: protection('StopLoss'),
     openedAt: p.openedAt.getTime(), venue: 'simulated',
   };

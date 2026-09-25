@@ -26,7 +26,7 @@ const microText = (v: bigint) => formatFixed(v, 6, 6);
 const practiceOf = (u: User) => `practice:${u.wallet}`;
 const path = (id: string) => `/v1/sim/${encodeURIComponent(id)}`;
 const clientId = () => `c-${randomUUID()}`;
-const later = () => Date.now() + 2_500; // a tick the keeper delay lets orders placed until now execute on
+const later = () => Date.now() + 2_500; // a tick newer than any seen, past the evaluation keeper delay for orders placed until now
 const DECIMALS: Record<string, number> = { SOL: 9, BTC: 8, XAU: 8, EUR: 9, NVDA: 8 };
 
 async function place(u: User, id: string, body: Partial<SimOrderRequest> = {}) {
@@ -86,23 +86,24 @@ function recomputeRoot(list: Fill[]): string {
 }
 
 describe('fills', () => {
-  it('fills a market order on the first tick at least 2 s after it was placed, at the price GMTrade\'s model gives', async () => {
+  it('fills a practice market order on the first tick published after it, at the price GMTrade\'s model gives', async () => {
     const u = await t.user();
     const id = practiceOf(u);
     await base('SOL');
+    const seen = t.md.price('SOL')!; // the latest tick when the order is placed
     const { order, account } = await placed(u, id);
     expect(order).toMatchObject({ status: 'awaiting_execution', kind: 'Market', isIncrease: true, sizeUsd: '10000', collateralUsd: '500' });
     expect(account.availableMargin).toBe('750'); // 1,250 allowance minus the 500 reserved by the pending order
 
     const [early, first] = t.md.recorded('SOL').slice(20, 22) as [PriceTick, PriceTick];
-    await t.tick({ ...early, ts: order.createdAt + 1_999 });
+    await t.tick({ ...early, ts: seen.ts }); // a quote no newer than the one seen at the request
     expect((await orders(u, id))[0]!.status).toBe('awaiting_execution');
 
     const expected = model.simulateIncrease({
       market: await input('SOL', units(first, 'SOL')), isLong: true, collateralToken: USDC_MINT,
       collateralAmount: 500_000_000n, sizeDeltaUsd: 10_000n * USD,
     });
-    await t.tick({ ...first, ts: order.createdAt + 2_000 });
+    await t.tick({ ...first, ts: seen.ts + 1 }); // the first tick published after it, whatever the wall clock says
     expect((await orders(u, id))[0]).toMatchObject({ status: 'executed' });
     const [fill] = await fills(u, id);
     expect(fill).toMatchObject({
@@ -120,8 +121,19 @@ describe('fills', () => {
     const [position] = await positions(u, id);
     expect(position).toMatchObject({
       symbol: 'SOL', side: 'Long', sizeUsd: '10000', collateralUsd: microText(expected.position.collateralAmount), venue: 'simulated',
-      takeProfit: null, stopLoss: null,
+      takeProfit: null, stopLoss: null, closing: false,
     });
+    // The row's P&L is net: net value minus collateral, the pending costs split out (borrowing, funding, the close fee).
+    const image = expected.position.account;
+    const status = model.positionStatus(await input('SOL', units(first, 'SOL'), image), image);
+    const state = await t.md.marketState(t.md.market('SOL')!.marketToken);
+    expect(position).toMatchObject({
+      unrealizedPnl: microText((status.netValue - status.collateralValue) / state.prices.short.min),
+      pendingFeesUsd: usdText(status.pendingBorrowingFeeValue + status.pendingFundingFeeValue + status.closeOrderFeeValue),
+      pendingBorrowUsd: usdText(status.pendingBorrowingFeeValue), pendingFundingUsd: usdText(status.pendingFundingFeeValue), closeFeeUsd: usdText(status.closeOrderFeeValue),
+    });
+    expect(Number(position!.closeFeeUsd)).toBeGreaterThan(0.9);
+    expect(Number(position!.unrealizedPnl)).toBeLessThan(0); // the close fee alone puts a fresh position under water
     const after = await summary(u, id);
     expect(after.realizedPnl).toBe(fill!.realizedPnl);
     expect(after.availableMargin).toBe('750'); // realized fees come out of the allowance, the rest is posted collateral
@@ -140,6 +152,66 @@ describe('fills', () => {
       body: `Practice account: $10,000.00 at ${shown}, P&L −$${Math.abs(Number(fill!.realizedPnl)).toFixed(2)} (simulated)`,
     });
     expect((await t.db.select().from(equitySnapshots).where(eq(equitySnapshots.accountId, id))).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('fills an evaluation market order only on a tick at least the keeper delay after it was placed', async () => {
+    const u = await t.user();
+    const ev = await evaluation(u);
+    await base('SOL');
+    const { order } = await placed(u, ev);
+    await t.tick(t.md.scaled('SOL', 1, order.createdAt + 1_999)); // newer than the tick seen, but inside the delay
+    expect((await orders(u, ev))[0]!.status).toBe('awaiting_execution');
+    await t.tick(t.md.scaled('SOL', 1, order.createdAt + 2_000));
+    expect((await orders(u, ev))[0]!.status).toBe('executed');
+  });
+
+  it('closes a practice position on the first tick published after the close, an evaluation one after the keeper delay', async () => {
+    const u = await t.user();
+    const id = practiceOf(u);
+    const ev = await evaluation(u);
+    const close = (account: string, position: string) =>
+      u.post(`${path(account)}/positions/${position}/close`, { clientId: clientId(), percent: 100, slippageBps: 50 });
+    await base('SOL');
+    await placed(u, id);
+    await t.tick(t.md.scaled('SOL', 1, later()));
+    const seen = t.md.price('SOL')!;
+    const [practice] = await positions(u, id);
+    expect((await close(id, practice!.id)).statusCode).toBe(200);
+    expect((await positions(u, id))[0]).toMatchObject({ id: practice!.id, closing: true }); // on its way out, still valued
+    await t.tick({ ...seen, ts: seen.ts }); // the quote the close was requested on: no newer price yet
+    expect((await positions(u, id)).map((p) => p.closing)).toEqual([true]);
+    await t.tick({ ...seen, ts: seen.ts + 1 }); // the first price published after the request
+    expect(await positions(u, id)).toEqual([]);
+    expect((await t.sim.history(u.wallet, id))!.map((x) => x.symbol)).toEqual(['SOL']);
+
+    await placed(u, ev);
+    await t.tick(t.md.scaled('SOL', 1, later()));
+    await t.tick(t.md.scaled('SOL', 1, Date.now())); // the latest quote is current again
+    const [evaluated] = await positions(u, ev);
+    const { order } = (await close(ev, evaluated!.id)).json() as SimOrderResponse;
+    expect((await positions(u, ev))[0]).toMatchObject({ id: evaluated!.id, closing: true });
+    await t.tick(t.md.scaled('SOL', 1, order.createdAt + 1_999)); // newer than the quote seen, but inside the keeper delay
+    expect((await positions(u, ev)).map((p) => p.closing)).toEqual([true]);
+    await t.tick(t.md.scaled('SOL', 1, order.createdAt + 2_000));
+    expect(await positions(u, ev)).toEqual([]);
+  });
+
+  it('never fills a limit set through the price on a tick older than the request, nor on the tick it was placed on', async () => {
+    const u = await t.user();
+    const id = practiceOf(u);
+    await base('SOL');
+    const seen = t.md.price('SOL')!;
+    const mid = toUnitPrice(seen.mid, 9);
+    // A long limit above the market: GMTrade's rule (max ≤ trigger) holds on every one of these ticks.
+    const { order } = await placed(u, id, { kind: 'Limit', triggerPrice: fromUnitPrice((mid * 102n) / 100n, 9) });
+    expect(order.status).toBe('awaiting_price');
+    await t.tick({ ...seen, ts: seen.ts - 1_000 }); // an older quote re-published
+    expect((await orders(u, id))[0]!.status).toBe('awaiting_price');
+    await t.tick({ ...seen, ts: seen.ts }); // the quote the order was placed on
+    expect((await orders(u, id))[0]!.status).toBe('awaiting_price');
+    await t.tick({ ...seen, ts: seen.ts + 1 });
+    expect((await orders(u, id))[0]!.status).toBe('executed');
+    expect((await positions(u, id)).map((p) => p.side)).toEqual(['Long']);
   });
 
   it('cancels a market order whose execution price is worse than its acceptable price', async () => {
@@ -220,6 +292,7 @@ describe('fills', () => {
     expect(await positions(u, id)).toEqual([]);
     const history = (await t.sim.history(u.wallet, id))!;
     expect(history).toHaveLength(2);
+    expect(await t.sim.history(u.wallet, id, 1)).toEqual([history[0]]); // a capped read keeps the newest
     expect(Number(history[0]!.netPnl)).toBeLessThan(0);
 
     const perf = (await t.sim.performance(u.wallet, id, 'All'))!;
@@ -241,7 +314,7 @@ describe('fees over time', () => {
     await placed(u, id, { side: long ? 'Long' : 'Short' });
     await t.tick(t.md.scaled('SOL', 1, later()));
     const [open] = await positions(u, id);
-    expect(open!.pendingFeesUsd).toBe('0');
+    expect([open!.pendingBorrowUsd, open!.pendingFundingUsd]).toEqual(['0', '0']); // pendingFeesUsd also carries the close fee
     // The position opened an hour ago (as GMTrade stamps it) on a market that has not changed onchain since before then.
     const account = await modelAccount(open!.id);
     await t.db.update(simPositions).set({ modelState: { account: stampPosition(account, true, new Date(Date.now() - 3_600_000)) } })
@@ -250,18 +323,29 @@ describe('fees over time', () => {
     try {
       const hour = (Number(rate) / 1e20) * 3_600 * 10_000;
       const [position] = await positions(u, id);
-      expect(Number(position!.pendingFeesUsd)).toBeGreaterThan(hour * 0.98);
+      expect(Number(position!.pendingBorrowUsd)).toBeGreaterThan(hour * 0.98);
+      expect(Number(position!.pendingFeesUsd)).toBeCloseTo(Number(position!.pendingBorrowUsd) + Number(position!.pendingFundingUsd) + Number(position!.closeFeeUsd), 5);
       await u.post(`${path(id)}/positions/${position!.id}/close`, { clientId: clientId(), percent: 50, slippageBps: 50 });
       await t.tick(t.md.scaled('SOL', 1, later()));
       const [, half] = await fills(u, id);
       expect(Number(half!.borrowUsd)).toBeGreaterThan(hour * 0.98); // a decrease settles the whole position's fees
       expect(Number(half!.borrowUsd)).toBeLessThan(hour * 1.02);
       const [rest] = await positions(u, id);
-      expect(Number(rest!.pendingFeesUsd)).toBeLessThan(hour * 0.01); // and they accrue again from it
+      expect(Number(rest!.pendingBorrowUsd)).toBeLessThan(hour * 0.01); // and they accrue again from it
       await u.post(`${path(id)}/positions/${rest!.id}/close`, { clientId: clientId(), percent: 100, slippageBps: 50 });
       await t.tick(t.md.scaled('SOL', 1, later()));
       const [trade] = (await t.sim.history(u.wallet, id))!;
       expect(Number(trade!.feesUsd)).toBeGreaterThan(Number(half!.borrowUsd) + Number(half!.fundingUsd));
+      // The round trip's breakdown is the sum over its fills, and feesUsd keeps meaning order fees + funding + borrowing.
+      const all = await fills(u, id);
+      const total = (key: 'feeUsd' | 'fundingUsd' | 'borrowUsd' | 'priceImpactUsd') => all.reduce((sum, f) => sum + Number(f[key]), 0);
+      expect(all).toHaveLength(3);
+      expect(Number(trade!.orderFeesUsd)).toBeCloseTo(total('feeUsd'), 5);
+      expect(Number(trade!.fundingUsd)).toBeCloseTo(total('fundingUsd'), 5);
+      expect(Number(trade!.borrowUsd)).toBeCloseTo(total('borrowUsd'), 5);
+      expect(Number(trade!.priceImpactUsd)).toBeCloseTo(total('priceImpactUsd'), 5);
+      expect(Number(trade!.borrowUsd)).toBeGreaterThan(hour * 0.98);
+      expect(Number(trade!.feesUsd)).toBeCloseTo(Number(trade!.orderFeesUsd) + Number(trade!.fundingUsd) + Number(trade!.borrowUsd), 5);
     } finally {
       t.md.clockAgeSeconds = 0;
     }

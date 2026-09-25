@@ -72,8 +72,8 @@ describe('fees over time', () => {
       expect(close.statusCode, close.body).toBe(200);
       await t.tick(t.md.scaled('SOL', 1, later())); // closed ~2.5 s (simulated) after it opened
       const [, exit] = (await u.get(`${path(id)}/fills`)).json();
-      console.log('pending fees right after open', position!.pendingFeesUsd, '| borrowUsd charged on the close', exit.borrowUsd);
-      expect(Number(position!.pendingFeesUsd)).toBeLessThan(0.01);
+      console.log('pending borrowing right after open', position!.pendingBorrowUsd, '| borrowUsd charged on the close', exit.borrowUsd);
+      expect(Number(position!.pendingBorrowUsd) + Number(position!.pendingFundingUsd)).toBeLessThan(0.01);
       expect(Number(exit.borrowUsd)).toBeLessThan(0.01);
     } finally {
       t.md.clockAgeSeconds = 0;

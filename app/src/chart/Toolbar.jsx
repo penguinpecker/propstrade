@@ -1,5 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { ChartArea, ChartCandlestick, ChartLine, Expand, Layers3, PencilRuler } from 'lucide-react';
+import { ChartArea, ChartCandlestick, ChartLine, ChevronDown, Expand, Layers3, PencilRuler, Star } from 'lucide-react';
+import { INTERVALS } from '../lib/candles';
 
 /** Glyphs lucide has no match for, drawn in its 24-unit stroke style. */
 const glyph = paths => function Glyph({ size = 18, strokeWidth = 1.6 }) {
@@ -11,7 +12,9 @@ export const HorizontalRayIcon = glyph(<><circle cx="5" cy="12" r="2" /><path d=
 export const FibIcon = glyph(<><path d="M3 4.5h18M3 9.5h18M3 14.5h18M3 19.5h18" /><path d="m6 18 12-12" strokeDasharray="1.5 2.5" /></>);
 export const BarsIcon = glyph(<path d="M8 4v15M5 7h3m0 9h3M16 6v14m-3-11h3m0 8h3" />);
 
-const INTERVALS = ['5m', '15m', '1h', '4h', '1D'];
+/** Every interval, grouped as TradingView's menu groups them; the pinned ones sit in the toolbar, the rest a click away. */
+export const INTERVAL_GROUPS = [['Minutes', ['1m', '3m', '5m', '15m', '30m']], ['Hours', ['1h', '2h', '4h', '6h', '12h']], ['Days', ['1D', '1W', '1M']]];
+const INTERVAL_NAMES = { '1m': '1 minute', '3m': '3 minutes', '5m': '5 minutes', '15m': '15 minutes', '30m': '30 minutes', '1h': '1 hour', '2h': '2 hours', '4h': '4 hours', '6h': '6 hours', '12h': '12 hours', '1D': '1 day', '1W': '1 week', '1M': '1 month' };
 export const CHART_TYPES = [
   { value: 'candles', label: 'Candles', icon: ChartCandlestick },
   { value: 'bars', label: 'Bars', icon: BarsIcon },
@@ -67,17 +70,46 @@ export function Menu({ label, trigger, className = '', items, value, onChange, s
   </>;
 }
 
+/**
+ * The pinned intervals as buttons (and the current one while it is not pinned), then a menu of every interval by
+ * group, each with a star that pins or unpins it. The arrow keys move between the intervals, Enter picks, Escape
+ * closes; Tab reaches the stars, and focus leaving the menu closes it.
+ */
+function IntervalPicker({ interval, onInterval, pinned, onPinned }) {
+  const popup = usePopup();
+  const options = () => [...popup.box.current.querySelectorAll('[role=menuitemradio]')];
+  useEffect(() => { if (popup.at) (popup.box.current.querySelector('[aria-checked="true"]') ?? options()[0]).focus({ preventScroll: true }); }, [popup.at]);
+  const onKeyDown = e => {
+    const items = options();
+    const i = items.indexOf(document.activeElement);
+    const next = { ArrowDown: i + 1, ArrowUp: i - 1, Home: 0, End: items.length - 1 }[e.key];
+    if (next !== undefined) { e.preventDefault(); items[(next + items.length) % items.length].focus({ preventScroll: true }); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); popup.close(); }
+  };
+  const pin = t => onPinned(pinned.includes(t) ? pinned.filter(x => x !== t) : INTERVALS.filter(x => x === t || pinned.includes(x)));
+  return <div className="timeframes" role="group" aria-label="Candle interval">
+    {INTERVALS.filter(t => pinned.includes(t) || t === interval).map(t => <button key={t} type="button" aria-pressed={interval === t} className={interval === t ? 'active' : ''} onClick={() => onInterval(t)}>{t}</button>)}
+    <button ref={popup.button} type="button" className="tv-interval-more" aria-label="More intervals" data-tip="More intervals" aria-haspopup="menu" aria-expanded={popup.at !== null} onClick={popup.toggle}><ChevronDown size={13} /></button>
+    {popup.at && <div ref={popup.box} className="tv-menu tv-intervals" role="menu" aria-label="Candle interval" style={popup.at} onKeyDown={onKeyDown} onBlur={e => { if (!popup.box.current.contains(e.relatedTarget)) popup.toggle(); }}>
+      {INTERVAL_GROUPS.map(([name, list]) => <div key={name} className="tv-menu-group" role="group" aria-label={name}><span>{name}</span>{list.map(t => <div key={t} className="tv-menu-row">
+        <button type="button" role="menuitemradio" aria-checked={t === interval} onClick={() => { onInterval(t); popup.close(); }}>{INTERVAL_NAMES[t]}</button>
+        <button type="button" className={pinned.includes(t) ? 'pinned' : ''} aria-label={`${pinned.includes(t) ? 'Unpin' : 'Pin'} ${t}`} aria-pressed={pinned.includes(t)} onClick={() => pin(t)}><Star size={12} /></button>
+      </div>)}</div>)}
+    </div>}
+  </div>;
+}
+
 /** Interval, chart type, indicators and the Positions toggle; on phones also the drawing-tools button (lit while a tool is armed). */
-export function ChartToolbar({ interval, onInterval, chartType, onChartType, onIndicators, showGuides, onShowGuides, drawTools, drawing, onDrawTools, onExpand }) {
+export function ChartToolbar({ interval, onInterval, pinned, onPinned, chartType, onChartType, onIndicators, showGuides, onShowGuides, drawTools, drawing, onDrawTools, onExpand }) {
   const type = CHART_TYPES.find(t => t.value === chartType) ?? CHART_TYPES[0];
   return <div className="chart-toolbar" data-tip-side="bottom">
-    <div className="timeframes" role="group" aria-label="Candle interval">{INTERVALS.map(t => <button key={t} type="button" aria-pressed={interval === t} className={interval === t ? 'active' : ''} onClick={() => onInterval(t)}>{t}</button>)}</div>
+    <IntervalPicker interval={interval} onInterval={onInterval} pinned={pinned} onPinned={onPinned} />
     <span className="toolbar-divider" />
     <Menu label={`Chart type: ${type.label}`} className="tv-icon-button" trigger={<type.icon size={18} strokeWidth={1.6} />} items={CHART_TYPES} value={chartType} onChange={onChartType} />
     <span className="toolbar-divider" />
     <button type="button" className="chart-option" aria-label="Indicators" onClick={onIndicators}><span className="tv-fx" aria-hidden="true">ƒx</span><span>Indicators</span></button>
     <span className="toolbar-divider" />
-    <button type="button" className={showGuides ? 'chart-option active' : 'chart-option'} aria-label="Positions" aria-pressed={showGuides} data-tip="Entry prices of your open positions" onClick={() => onShowGuides(!showGuides)}><Layers3 size={14} /><span>Positions</span></button>
+    <button type="button" className={showGuides ? 'chart-option active' : 'chart-option'} aria-label="Positions" aria-pressed={showGuides} data-tip="Entry, liquidation, take-profit and stop-loss levels of your open positions" onClick={() => onShowGuides(!showGuides)}><Layers3 size={14} /><span>Positions</span></button>
     <div className="toolbar-spacer" />
     <button type="button" className={`tv-icon-button tv-draw-toggle ${drawTools || drawing ? 'active' : ''}`} aria-label="Drawing tools" aria-expanded={drawTools} onClick={onDrawTools}><PencilRuler size={17} strokeWidth={1.6} /></button>
     {onExpand && <button type="button" className="tv-icon-button" aria-label="Expand price chart" data-tip="Expand price chart" onClick={onExpand}><Expand size={16} strokeWidth={1.7} /></button>}

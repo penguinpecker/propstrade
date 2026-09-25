@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { LineGraph, SessionNotice, WatchlistStar } from './ui.jsx';
+import { FullAddress, LineGraph, SessionNotice, WatchlistStar } from './ui.jsx';
 
 const render = (network, notice) => renderToStaticMarkup(<SessionNotice session={{ network, notice }}>Signing in proves this wallet is yours.</SessionNotice>);
 const SLOW_RPC = { state: 'unreachable', reason: 'The Solana connection is not responding.' };
@@ -32,6 +32,21 @@ describe('WatchlistStar', () => {
   it('names the action it will take and fills the star of a watched market', () => {
     expect(star(false)).toMatch(/^<button class="favorite-button " aria-label="Add TAO to watchlist"/);
     expect(star(true)).toMatch(/^<button class="favorite-button selected" aria-label="Remove TAO from watchlist"/);
+  });
+});
+
+describe('FullAddress', () => {
+  const address = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+  it('shows the whole address with a copy button and its explorer page', () => {
+    const html = renderToStaticMarkup(<FullAddress address={address} />);
+    expect(html).toContain(`<code>${address}</code>`);
+    expect(html).toMatch(/<button type="button">.*Copy<\/button>/);
+    expect(html).toContain(`href="https://explorer.solana.com/address/${address}"`);
+  });
+  it('shortens in a dense table, keeping the full address as the hover and the copy, without the link', () => {
+    const html = renderToStaticMarkup(<FullAddress address={address} short />);
+    expect(html).toContain(`<code title="${address}">EPjF…Dt1v</code>`);
+    expect(html).not.toContain('explorer.solana.com');
   });
 });
 

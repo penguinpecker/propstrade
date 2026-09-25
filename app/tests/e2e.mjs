@@ -23,11 +23,11 @@ const outDir = join(tmpdir(), 'props-app-e2e');
 const DEVNET_GENESIS = 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG';
 const ROUTES = ['/trade/funded', '/trade/evaluation', '/trade/practice', '/markets', '/get-funded', '/program', '/connect', '/checkout',
   '/payment', '/accounts', '/account/funded', '/account/evaluation', '/result', '/activate', '/performance', '/activity', '/payouts',
-  '/payout/review', '/payout/receipt', '/verify', '/vault', '/settings'];
+  '/payout/review', '/payout/receipt', '/search', '/vault', '/settings'];
 
 const stub = await startStub();
 const { state } = stub;
-const keys = testKeys(3);
+const keys = testKeys(4); // keys[3] never signs in or trades: the Search page's unknown trader
 const publicAccounts = list => list.map(({ address, publicKey }) => ({ address, publicKey }));
 const short = address => `${address.slice(0, 4)}…${address.slice(-4)}`;
 
@@ -42,7 +42,7 @@ const siteUrl = site.resolvedUrls.local[0].replace(/\/$/, '');
 // candles of a saved market that is not in the catalog (404).
 const expected = msg => /status of 401/.test(msg.text()) && msg.location().url.endsWith('/v1/me')
   || /503|ERR_INCOMPLETE_CHUNKED_ENCODING/.test(msg.text()) && (msg.location().url.endsWith('/v1/stream') || /EventSource/.test(msg.text()))
-  || /status of 404/.test(msg.text()) && msg.location().url.includes('/v1/candles?symbol=ZZZ');
+  || /status of 404/.test(msg.text()) && (msg.location().url.includes('/v1/candles?symbol=ZZZ') || msg.location().url.includes('/v1/traders/'));
 function watchConsole(page) {
   const errors = [];
   page.on('console', msg => { if (msg.type() === 'error' && !expected(msg)) errors.push(msg.text()); });
@@ -433,7 +433,7 @@ try {
       stub.publish({ type: 'price', ticks: [{ symbol: 'BTC', min: '64600', max: '64600', mid: '64600', ts: Date.now() + 1_000, session: 'open' }] });
       await legend.getByText('C64,600.00').waitFor();
       await page.locator('.market-price').getByText('64,600.00').waitFor();
-      for (const interval of ['5m', '4h', '1D']) {
+      for (const interval of ['5m', '4h', '1D', '1h']) { // back to 1h: the interval is kept in the browser now, and the checks below expect 1h
         await page.locator('.timeframes').getByRole('button', { name: interval, exact: true }).click();
         await legend.getByText(`BTC / USD · ${interval} · GMTrade`).waitFor();
       }
@@ -463,6 +463,8 @@ try {
       await page.locator('.tv-pane-legend').getByText('RSI 14').waitFor();
       await page.getByRole('button', { name: /^1y:/ }).click();
       await page.locator('.tv-legend-main').getByText('BTC / USD · 1D · GMTrade').waitFor();
+      await page.locator('.timeframes').getByRole('button', { name: '1h', exact: true }).click();
+      await page.locator('.tv-legend-main').getByText('BTC / USD · 1h · GMTrade').waitFor();
     });
 
     await check('chart at 1366x768: it stays in its row, every drawing tool can be reached, the saved-copy note is whole, and Delete only acts with focus in the chart', async () => {
@@ -556,6 +558,8 @@ try {
         await legend.getByText('BTC / USD · 4h · GMTrade').waitFor();
         await expectEventually(() => ['ETH 4h', 'SOL 4h', 'XAU 4h'].every(k => asked.includes(k)), `the watchlist's candles were not prefetched for the new interval: ${asked}`);
         assert.equal(asked.filter(k => k === 'ETH 1h').length, 1, `ETH 1h was fetched more than once: ${asked}`);
+        await page.locator('.timeframes').getByRole('button', { name: '1h', exact: true }).click();
+        await legend.getByText('BTC / USD · 1h · GMTrade').waitFor();
       } finally {
         page.off('request', seen);
       }
@@ -665,6 +669,22 @@ try {
       assert.equal(state.signatures, before + 1);
     });
 
+    await check('funded close: a partial close that executed gives the row its Close button back (the request over, the server says whether it is still closing)', async () => {
+      const row = page.locator('.position-table tbody tr').filter({ hasText: 'BTC / USD' });
+      await row.locator('small', { hasText: /^\$2,000\.00 · / }).waitFor(); // both opens above went into one $2,000 position
+      await row.getByRole('button', { name: /Close/ }).click();
+      const dialog = page.getByRole('dialog');
+      await dialog.getByRole('slider').fill('50');
+      await dialog.getByRole('button', { name: 'Send close order' }).click();
+      await row.getByRole('status').getByText('Closing…').waitFor({ timeout: 5_000 });
+      await page.getByText('Close executed by GMTrade.').waitFor({ timeout: 10_000 });
+      await row.getByRole('button', { name: /Close/ }).waitFor({ timeout: 5_000 }); // still here at half its size, and closable again
+      assert.equal(await row.getByRole('status').count(), 0, 'the row still reads Closing…');
+      await row.locator('small', { hasText: /^\$1,000\.00 · / }).waitFor();
+      const [close] = sent('closePosition');
+      assert.equal(BigInt(close.data.args.sizeDeltaUsd.toString()), 1000n * 10n ** 20n, 'half of the $2,000 position');
+    });
+
     await check('checkout: exact fee, buy_evaluation signed and sent, payment tracked until the evaluation is ready', async () => {
       await page.goto(`${siteUrl}/#/get-funded`);
       await page.getByRole('button', { name: '$10K' }).click();
@@ -688,6 +708,7 @@ try {
 
     await check('verify: search finds evidence, the record dialog shows what it establishes, unknown and invalid ids are explained', async () => {
       await page.goto(`${siteUrl}/#/verify`);
+      await page.waitForURL('**/#/search'); // the Verify page became Search; its old links still land there
       await page.getByLabel('Search verification records').fill(w.funded);
       await page.getByRole('button', { name: 'Find record' }).click();
       await main.getByText('Funded account activated').waitFor();
@@ -820,9 +841,182 @@ try {
       await page.goto(`${siteUrl}/#/trade/evaluation`); // Evaluation 25K, selected by the activity check
       const row = page.locator('.position-table tbody tr').filter({ hasText: 'SOL / USD' });
       await row.waitFor();
-      assert.deepEqual(await page.locator('.position-table thead th').allTextContents(), ['Market / side', 'Position size', 'Entry price', 'Mark price', 'Liq. price', 'Unrealized P&L', 'TP / SL', '']);
+      assert.deepEqual(await page.locator('.position-table thead th').allTextContents(), ['Market / side', 'Position size', 'Entry price', 'Mark price', 'Liq. price', 'Unrealized P&L', 'Fees accrued', 'TP / SL', '']);
       await row.getByText('98.12', { exact: true }).waitFor();
       await row.getByText('$4,600.00 · $1,533.33 margin').waitFor();
+      // Accrued costs with their split as the hover, and the market's rates for the position's side under the leverage badge.
+      const fees = row.locator('td[title^="Borrowing"]');
+      assert.equal(await fees.innerText(), '$3.60');
+      assert.equal(await fees.getAttribute('title'), "Borrowing $0.62 · funding $0.22 · close fee $2.76: settled at this position's next fill");
+      assert.equal(await row.locator('.side-rate').innerText(), 'F +0.0012% · B 0.0008% / h');
+    });
+
+    /** Shows `symbol` in the terminal through the watchlist bar (earlier checks leave other markets selected). */
+    const showMarket = async symbol => { await page.locator('.watchlist-bar').getByRole('button', { name: new RegExp(`^${symbol}`) }).click(); await page.locator('.market-select strong', { hasText: new RegExp(`^${symbol}`) }).waitFor(); };
+
+    await check('ticket: the leverage slider and presets change the margin, buying power and the quote rows without a dialog', async () => {
+      await page.goto(`${siteUrl}/#/trade/evaluation`);
+      await showMarket('BTC');
+      const ticket = page.locator('.order-panel');
+      const rowValue = label => ticket.locator('.execution-details .data-row', { has: page.locator('span', { hasText: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`) }) }).locator('strong').innerText();
+      await page.getByLabel('Order size in USD').fill('1000');
+      await ticket.getByText('5× leverage').waitFor();
+      assert.equal(await rowValue('Required margin'), '$200.00');
+      await ticket.getByRole('button', { name: '10×', exact: true }).click();
+      await ticket.getByText('10× leverage').waitFor();
+      assert.equal(await rowValue('Required margin'), '$100.00');
+      assert.equal(await page.getByRole('dialog').count(), 0, 'a dialog opened');
+      await ticket.getByLabel('Leverage').fill('20'); // the slider: Crypto allows up to 25×
+      await ticket.getByText('20× leverage').waitFor();
+      assert.equal(await rowValue('Required margin'), '$50.00');
+      await ticket.getByRole('button', { name: 'Max 25×' }).click();
+      await ticket.getByText('25× leverage').waitFor();
+      await ticket.locator('.execution-details').getByText(/Est\. liquidation price/).waitFor();
+      await page.waitForFunction(() => /\$\d/.test(document.querySelector('.execution-details')?.innerText.split('Est. liquidation price')[1] ?? ''), null, { timeout: 5_000 });
+      const rows = await ticket.locator('.execution-details .data-row span').allInnerTexts();
+      for (const label of ['Estimated entry', 'Order value', 'Required margin', 'Open fee', 'Est. close fee', 'Round-trip fee', 'Price impact', 'Borrow + funding · long', 'Est. liquidation price', 'Slippage tolerance']) assert.ok(rows.some(r => r.startsWith(label)), `missing row ${label}: ${rows.join(' | ')}`);
+      await ticket.getByText('Props.trade charges no fee per order').waitFor();
+      assert.equal(await rowValue('Round-trip fee'), '$1.20'); // 6 bps a leg on $1,000 in the stub
+      assert.match(await rowValue('Borrow + funding · long'), /^≈ \$0\.02\/h · \$0\.48\/day$/); // (0.0012 + 0.0008)% of $1,000
+      assert.equal(await ticket.getByText('Network fee').count(), 0, 'a simulated ticket shows a network fee');
+    });
+
+    await check('ticket: TP/SL rows show an estimated P&L that flips sign with the side, linked price and % fields, chips, and the chart draws both lines', async () => {
+      const ticket = page.locator('.order-panel');
+      const guides = () => page.locator('.chart-section .price-chart').getAttribute('data-guides');
+      await ticket.getByRole('button', { name: '5×', exact: true }).click();
+      await ticket.getByRole('button', { name: '+2%', exact: true }).first().click(); // take profit, 2% above the entry for a long
+      const tpPct = ticket.getByLabel('Take profit distance in percent');
+      assert.equal(await tpPct.inputValue(), '2.00');
+      const tpEst = ticket.locator('.protection-leg').first().locator('.leg-head b');
+      await tpEst.filter({ hasText: /^Est\. P&L ≈ \+\$1[0-9]\.\d\d \(\+\d+\.\d% on margin\)$/ }).waitFor(); // $20 of price move less $1.20 of fees and the impact
+      await ticket.getByLabel('Stop loss distance in percent').fill('-1');
+      const sl = ticket.getByLabel('Stop loss price');
+      assert.ok(Math.abs(Number(await sl.inputValue()) / 64600 - 0.99) < 0.0002, `stop loss price ${await sl.inputValue()}`);
+      const slEst = ticket.locator('.protection-leg').nth(1).locator('.leg-head b');
+      await slEst.filter({ hasText: /^Est\. P&L ≈ −\$1[0-9]\.\d\d/ }).waitFor();
+      assert.equal(await ticket.getByText(/correct sides of the current price/).count(), 0);
+      await expectEventually(async () => /^TP ≈ \+\$1\d\|SL ≈ −\$1\d$/.test(await guides()), `chart guides: ${await guides()}`);
+      // The same prices on a short are on the wrong sides: the copy says so, the order cannot be sent, the estimates flip sign.
+      await ticket.getByRole('button', { name: 'Sell / Short' }).click();
+      await ticket.getByText('Set take profit and stop loss on the correct sides of the current price.').waitFor();
+      await tpEst.filter({ hasText: /^Est\. P&L ≈ −\$2[0-9]\.\d\d/ }).waitFor();
+      await slEst.filter({ hasText: /^Est\. P&L ≈ \+\$[0-9]\.\d\d/ }).waitFor();
+      assert.ok(await ticket.getByRole('button', { name: 'Sell / Short BTC' }).isDisabled());
+      await ticket.getByRole('button', { name: 'Clear' }).first().click();
+      await ticket.getByRole('button', { name: 'Clear' }).nth(1).click();
+      await expectEventually(async () => (await guides()) === '', `chart guides after clearing: ${await guides()}`);
+      await ticket.getByRole('button', { name: 'Buy / Long' }).click();
+    });
+
+    await check('chart: the interval menu lists all 13 by group, a pick asks for its candles, a star pins it to the bar, and both survive a reload', async () => {
+      const asked = [];
+      const seen = request => { const url = new URL(request.url()); if (url.pathname === '/v1/candles' && !url.searchParams.has('from')) asked.push(url.searchParams.get('interval')); };
+      page.on('request', seen);
+      try {
+        await page.goto(`${siteUrl}/#/trade/practice`);
+        await showMarket('BTC');
+        const bar = page.locator('.chart-section .timeframes');
+        await bar.getByRole('button', { name: '1h', exact: true }).waitFor();
+        assert.deepEqual(await bar.getByRole('button').allInnerTexts(), ['5m', '15m', '1h', '4h', '1D', '']);
+        await bar.getByRole('button', { name: 'More intervals' }).click();
+        const menu = page.getByRole('menu', { name: 'Candle interval' });
+        assert.deepEqual(await menu.getByRole('menuitemradio').allInnerTexts(), ['1 minute', '3 minutes', '5 minutes', '15 minutes', '30 minutes', '1 hour', '2 hours', '4 hours', '6 hours', '12 hours', '1 day', '1 week', '1 month']);
+        assert.deepEqual(await menu.getByRole('group').evaluateAll(list => list.map(g => g.getAttribute('aria-label'))), ['Minutes', 'Hours', 'Days']);
+        await menu.getByRole('menuitemradio', { name: '3 minutes' }).click();
+        await page.locator('.tv-legend-main').getByText('BTC / USD · 3m · GMTrade').waitFor();
+        assert.ok(asked.includes('3m'), `intervals asked for: ${asked}`);
+        assert.deepEqual(await bar.getByRole('button').allInnerTexts(), ['3m', '5m', '15m', '1h', '4h', '1D', ''], 'the chosen interval joins the bar while it is not pinned');
+        await bar.getByRole('button', { name: 'More intervals' }).click();
+        await menu.getByRole('button', { name: 'Pin 1W' }).click();
+        await menu.getByRole('button', { name: 'Unpin 1W' }).waitFor();
+        await page.keyboard.press('Escape');
+        await menu.waitFor({ state: 'detached' });
+        await page.reload();
+        await page.locator('.tv-legend-main').getByText('BTC / USD · 3m · GMTrade').waitFor();
+        assert.deepEqual(await bar.getByRole('button').allInnerTexts(), ['3m', '5m', '15m', '1h', '4h', '1D', '1W', '']);
+        assert.deepEqual(await page.evaluate(() => [localStorage.getItem('props.chart-interval'), localStorage.getItem('props.chart-intervals')]), ['"3m"', '["5m","15m","1h","4h","1D","1W"]']);
+        await bar.getByRole('button', { name: '1h', exact: true }).click();
+        await page.locator('.tv-legend-main').getByText('BTC / USD · 1h · GMTrade').waitFor();
+      } finally {
+        page.off('request', seen);
+      }
+    });
+
+    await check('positions: the market button of a position, an order and a trade switches the chart; the chart draws the position’s entry, liquidation and TP', async () => {
+      await page.goto(`${siteUrl}/#/trade/evaluation`);
+      await showMarket('BTC');
+      // A take profit typed on BTC belongs to BTC: SOL's ticket starts without it, or its chart would carry BTC's price.
+      const ticket = page.locator('.order-panel');
+      await ticket.getByRole('button', { name: '+2%', exact: true }).first().click();
+      await expectEventually(async () => /TP ≈ \+\$/.test((await page.locator('.chart-section .price-chart').getAttribute('data-guides')) ?? ''), 'the draft take profit is not on the BTC chart');
+      const row = page.locator('.position-table tbody tr').filter({ hasText: 'SOL / USD' });
+      await row.getByRole('button', { name: 'Show SOL / USD on the chart' }).click();
+      await page.locator('.market-select strong', { hasText: /^SOL/ }).waitFor();
+      await expectEventually(async () => (await page.locator('.chart-section .price-chart').getAttribute('data-guides')) === 'Long entry|Liq.|TP', 'position guides');
+      assert.equal(await ticket.getByLabel('Take profit price').inputValue(), '', "BTC's take profit survived the switch to SOL");
+      await page.getByRole('tab', { name: /Open orders/ }).click();
+      await page.getByRole('button', { name: 'Show ETH / USD on the chart' }).click();
+      await page.locator('.market-select strong', { hasText: /^ETH/ }).waitFor();
+      await page.getByRole('tab', { name: 'Trade history' }).click();
+      await page.getByRole('button', { name: 'Show XAU / USD on the chart' }).click();
+      await page.locator('.market-select strong', { hasText: /^XAU/ }).waitFor();
+      // The record dialog itemises the round trip's costs.
+      await page.getByRole('button', { name: /^View trade trade-1$/ }).click();
+      const dialog = page.getByRole('dialog', { name: 'Record details' });
+      const rows = await dialog.locator('.data-row').allInnerTexts();
+      for (const expected of ['Open + close fees$2.60', 'Funding$0.31', 'Borrowing$0.21', 'Price impact−$0.45', 'Total costs$3.12', 'Net P&L+$36.20']) assert.ok(rows.some(r => r.replace(/\s+/g, '') === expected.replace(/\s+/g, '')), `missing ${expected}: ${rows.join(' | ')}`);
+      await page.keyboard.press('Escape');
+      await page.getByRole('tab', { name: /Positions/ }).click();
+      await page.getByRole('button', { name: 'Show SOL / USD on the chart' }).click();
+      await page.locator('.market-select strong', { hasText: /^SOL/ }).waitFor();
+    });
+
+    await check('closing: the row reads Closing… at once with its buttons gone, leaves when the stream drops it, and comes back with the reason when the venue cancels', async () => {
+      state.closeDelayMs = 2_500;
+      try {
+        await page.goto(`${siteUrl}/#/trade/evaluation`);
+        await showMarket('SOL');
+        await page.getByLabel('Order size in USD').fill('1000');
+        await page.locator('.order-panel').getByRole('button', { name: 'Buy / Long SOL' }).click();
+        await page.locator('.order-panel').getByText('Simulated order filled at the live GMTrade price.').waitFor({ timeout: 10_000 });
+        const rows = page.locator('.position-table tbody tr').filter({ hasText: 'SOL / USD' });
+        await expectEventually(async () => await rows.count() === 2, 'the new SOL position is not listed');
+        const row = rows.nth(1); // the one just opened
+        state.cancelNextClose = 'The price moved past your slippage tolerance.';
+        await row.getByRole('button', { name: /Close/ }).click();
+        await page.getByRole('dialog').getByRole('button', { name: 'Confirm close' }).click();
+        await row.getByRole('status').getByText('Closing…').waitFor({ timeout: 1_500 });
+        assert.equal(await row.getByRole('button', { name: /Close/ }).count(), 0, 'the Close button is still there');
+        await page.getByRole('tab', { name: /Open orders/ }).click();
+        await page.locator('table tbody tr').filter({ hasText: 'SOL / USD' }).filter({ hasText: 'Whole position' }).waitFor();
+        await page.getByRole('tab', { name: /Positions/ }).click();
+        await page.getByRole('alert').getByText('The position was not closed: The price moved past your slippage tolerance.').waitFor({ timeout: 5_000 });
+        await row.getByRole('button', { name: /Close/ }).waitFor();
+        assert.equal(await rows.count(), 2, 'the position left although the close was canceled');
+        await row.getByRole('button', { name: /Close/ }).click();
+        await page.getByRole('dialog').getByRole('button', { name: 'Confirm close' }).click();
+        await row.getByRole('status').getByText('Closing…').waitFor({ timeout: 1_500 });
+        await expectEventually(async () => await rows.count() === 1, 'the closed position stayed', 6_000);
+      } finally {
+        state.closeDelayMs = 1_000;
+        state.cancelNextClose = null;
+      }
+    });
+
+    await check('market heading: funding and borrow rates per side, with the 8h and yearly figures on hover, at 1200 px and 1440 px', async () => {
+      for (const width of [1200, 1440]) {
+        await page.setViewportSize({ width, height: 900 });
+        const metrics = page.locator('.market-heading .rate-metric');
+        await metrics.first().waitFor({ state: 'visible' });
+        assert.equal(await metrics.count(), 2);
+        for (let i = 0; i < 2; i += 1) assert.ok(await metrics.nth(i).isVisible(), `rate metric ${i} hidden at ${width}px`);
+        assert.deepEqual(await metrics.allInnerTexts(), ['Funding / h\nL +0.0012% · S -0.0009%', 'Borrow / h\nL 0.0008% · S 0.0000%']);
+        assert.equal(await metrics.first().locator('strong').getAttribute('title'), 'Longs pay when positive, shorts when negative. Per 8h: L +0.0096% · S -0.0072% · per year: L +10.5120% · S -7.8840%');
+        const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+        assert.ok(overflow <= 0, `horizontal overflow of ${overflow}px at ${width}px`);
+      }
+      await page.setViewportSize({ width: 1920, height: 1080 });
     });
 
     await check('stream outage: reconnecting, offline, trading paused, then recovery, which re-reads the market rows the outage missed', async () => {
@@ -859,6 +1053,70 @@ try {
       await footer.getByText('Live data connected').waitFor({ timeout: 10_000 });
       assert.equal(await page.getByText('Waiting for live prices before you can submit.').count(), 0);
       state.streamDelayMs = 0;
+    });
+
+    await check('search: a trader by wallet address shows accounts, open positions, recent trades and payouts; a position\'s market opens in the terminal', async () => {
+      await page.goto(`${siteUrl}/#/search`);
+      await page.getByLabel('Search a trader').fill(keys[0].address);
+      await page.getByRole('button', { name: 'Search trader' }).click();
+      await page.waitForURL(`**/#/search?trader=${keys[0].address}`);
+      const results = main.locator('.trader-results');
+      const section = name => results.locator('section.surface', { has: page.locator('h2', { hasText: new RegExp(`^${name}$`) }) });
+      await section('Accounts').getByText('Funded', { exact: true }).waitFor();
+      assert.equal(await results.locator('.trader-address code').innerText(), keys[0].address);
+      assert.equal(await section('Accounts').locator('tbody tr').count(), w.accounts.length);
+      await section('Open positions').locator('tbody tr').filter({ hasText: 'SOL / USD' }).getByText('+$192.52').waitFor();
+      await section('Recent trades').locator('tbody tr').filter({ hasText: 'XAU / USD' }).getByText('+$36.20').waitFor();
+      assert.equal(await section('Payouts').locator('tbody tr').filter({ hasText: 'Paid' }).count(), w.payouts.length);
+      await section('Payouts').getByRole('link', { name: 'Transaction' }).first().waitFor(); // the fixture payout paid onchain
+      await section('Open positions').getByRole('button', { name: /SOL \/ USD/ }).click();
+      await page.waitForURL('**/#/trade/*');
+      await page.locator('.market-select strong', { hasText: /^SOL/ }).waitFor();
+    });
+
+    await check('search: an address nobody traded from says so, and a malformed one is refused before the API is asked', async () => {
+      const asked = []; // addresses sent to /v1/traders
+      const seen = request => { const url = new URL(request.url()); if (url.pathname.startsWith('/v1/traders/')) asked.push(decodeURIComponent(url.pathname.slice('/v1/traders/'.length))); };
+      page.on('request', seen);
+      try {
+        await page.goto(`${siteUrl}/#/search?trader=${keys[3].address}`);
+        await main.getByRole('heading', { name: 'No trader with this address' }).waitFor();
+        await page.getByLabel('Search a trader').fill('PT-002841');
+        await page.getByRole('button', { name: 'Search trader' }).click();
+        await main.getByRole('status').getByText('“PT-002841” is not a Solana address.').waitFor();
+        assert.deepEqual(asked, [keys[3].address], 'a malformed address reached the API');
+      } finally {
+        page.off('request', seen);
+      }
+    });
+
+    await check('wallet dialog: the whole address, a copy that says so, and its explorer page', async () => {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await page.goto(`${siteUrl}/#/accounts`);
+      await page.locator('.wallet-button').click();
+      const address = page.getByRole('dialog', { name: 'Your wallet' }).locator('.full-address');
+      assert.equal(await address.locator('code').innerText(), keys[0].address);
+      assert.equal(await address.getByRole('link', { name: 'Explorer' }).getAttribute('href'), `https://explorer.solana.com/address/${keys[0].address}`);
+      await address.getByRole('button', { name: 'Copy', exact: true }).click();
+      await address.getByRole('button', { name: 'Copied', exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => navigator.clipboard.readText()), keys[0].address);
+      await page.keyboard.press('Escape');
+    });
+
+    await check('markets page: funding and borrow rate columns per side; the picker row shows the funding rates', async () => {
+      await page.goto(`${siteUrl}/#/markets`);
+      const rows = page.locator('.markets-table tbody tr');
+      await rows.first().waitFor();
+      const headers = await page.locator('.markets-table thead th').allInnerTexts();
+      assert.ok(headers.includes('Funding / h (L/S)') && headers.includes('Borrow / h (L/S)'), `columns: ${headers.join(' | ')}`);
+      const btc = rows.filter({ hasText: 'BTC / USD' });
+      await btc.getByText('+0.0012% / -0.0009%').waitFor();
+      await btc.getByText('0.0008% / 0.0000%').waitFor();
+      assert.equal(await btc.locator('.rates-cell').first().getAttribute('title'), 'Longs pay when positive, per hour; ×8 for 8h, ×8760 for a year');
+      await page.keyboard.press('Control+k');
+      const dialog = page.getByRole('dialog', { name: 'Find a market' });
+      await dialog.locator('.picker-row').filter({ hasText: 'BTC / USD' }).getByText('F +0.0012% / -0.0009%').waitFor();
+      await page.keyboard.press('Escape');
     });
 
     await check('no unexpected console errors during the data and transaction flows', async () => {

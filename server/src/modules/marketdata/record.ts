@@ -1,9 +1,9 @@
-// Props.trade's own record of GMTrade's live index price: one OHLC bar a minute per market, kept 30 days in price_bars.
+// Props.trade's own record of GMTrade's live index price: one OHLC bar a minute per market, kept for good in price_bars
+// (the 1m and 3m charts' history starts with it, 2026-09-23; about 300 MB per 30 days for 68 markets).
 // Charts fall back to it while GMTrade's candle service is slow or down (index.ts), so they never depend on it alone.
 import type { Candle, PriceTick } from '@props/shared';
 import type { Sql } from '../../db/client.js';
 
-const KEEP_SECONDS = 30 * 86_400;
 const MAX_UNWRITTEN = 50_000; // about 12 hours of minutes for every market while the database is unreachable
 
 export type PriceRecord = ReturnType<typeof createPriceRecord>;
@@ -43,10 +43,6 @@ export function createPriceRecord(sql: Sql) {
         finished = batch.concat(finished).slice(-MAX_UNWRITTEN); // written by the next flush
         throw err;
       }
-    },
-
-    prune: async (): Promise<void> => {
-      await sql`delete from price_bars where t < ${Math.floor(Date.now() / 1000) - KEEP_SECONDS}`;
     },
 
     /** Recorded minutes as `res`-second candles whose start is in [from, to], oldest first. */

@@ -146,14 +146,21 @@ export function createFundedProvider(d: { db: Db; venue: Venue; program: Program
       const collateral = position.collateralAmount * MICRO_TO_GM;
       // GMTrade's entry price is size_in_usd / size_in_tokens; in USD per whole token that is scaled by the decimals.
       const entry = (position.sizeInUsd * 10n ** BigInt(market.decimals) * 10n ** 18n) / (position.sizeInTokens * 10n ** 20n);
+      const pending = (value: bigint | null | undefined) => (value == null ? '0' : gmUsd(value));
+      // A pending market decrease of at least the position's size closes all of it (gm_orders keeps no close-all flag).
+      const closing = orders.some((o) => o.kind === 'Market' && !o.isIncrease && o.symbol === market.symbol && o.side === side
+        && (o.status === 'awaiting_execution' || o.status === 'awaiting_price') && toGmUsd(o.sizeUsd) >= position.sizeInUsd);
       out.push({
         id: p.address, symbol: market.symbol, side, sizeUsd: gmUsd(position.sizeInUsd),
         sizeTokens: tokenAmount(position.sizeInTokens, market.decimals), collateralUsd: micro(position.collateralAmount),
         leverage: Number((position.sizeInUsd * 10_000n) / (status?.netValue || collateral || 1n)) / 10_000,
         entryPrice: formatFixed(entry, 18, 18), markPrice: p.mark === null ? null : unitPrice(p.mark, market.decimals),
         liquidationPrice: status?.liquidationPrice == null ? null : unitPrice(status.liquidationPrice, market.decimals),
-        unrealizedPnl: status ? gmUsd(status.pendingPnl) : null,
-        pendingFeesUsd: status ? gmUsd(status.pendingBorrowingFeeValue + status.pendingFundingFeeValue + status.closeOrderFeeValue) : '0',
+        // Net of pending costs, as the sim values its positions and as the account's unrealized is summed (money()).
+        unrealizedPnl: status ? gmUsd(status.netValue - collateral) : null,
+        pendingFeesUsd: pending(status && status.pendingBorrowingFeeValue + status.pendingFundingFeeValue + status.closeOrderFeeValue),
+        pendingBorrowUsd: pending(status?.pendingBorrowingFeeValue), pendingFundingUsd: pending(status?.pendingFundingFeeValue),
+        closeFeeUsd: pending(status?.closeOrderFeeValue), closing,
         takeProfit: protection('TakeProfit'), stopLoss: protection('StopLoss'),
         openedAt: (opening ?? snapshot)?.ts.getTime() ?? v.at, venue: 'gmtrade', gmPosition: p.address,
       });
@@ -161,12 +168,15 @@ export function createFundedProvider(d: { db: Db; venue: Venue; program: Program
     return out;
   }
 
-  async function history(funded: string, since?: Date): Promise<ClosedTrade[]> {
-    const rows = await db.select().from(closedTrades)
-      .where(and(eq(closedTrades.accountId, funded), since ? gte(closedTrades.closedAt, since) : undefined)).orderBy(desc(closedTrades.closedAt));
+  async function history(funded: string, since?: Date, limit?: number): Promise<ClosedTrade[]> {
+    const query = db.select().from(closedTrades)
+      .where(and(eq(closedTrades.accountId, funded), since ? gte(closedTrades.closedAt, since) : undefined)).orderBy(desc(closedTrades.closedAt)).$dynamic();
+    const rows = await (limit ? query.limit(limit) : query);
     return rows.map((t) => ({
       id: t.id, symbol: t.symbol, side: t.side, openedAt: t.openedAt.getTime(), closedAt: t.closedAt.getTime(), sizeUsd: dec(t.sizeUsd),
-      entryPrice: decPrice(t.entryPrice), exitPrice: decPrice(t.exitPrice), feesUsd: dec(t.feesUsd), netPnl: dec(t.netPnl), venue: t.venue, signatures: t.signatures,
+      entryPrice: decPrice(t.entryPrice), exitPrice: decPrice(t.exitPrice), feesUsd: dec(t.feesUsd), orderFeesUsd: dec(t.orderFeesUsd),
+      fundingUsd: dec(t.fundingUsd), borrowUsd: dec(t.borrowUsd), priceImpactUsd: dec(t.priceImpactUsd), netPnl: dec(t.netPnl),
+      venue: t.venue, signatures: t.signatures,
     }));
   }
 
@@ -251,8 +261,8 @@ export function createFundedProvider(d: { db: Db; venue: Venue; program: Program
     async orders(wallet, id) {
       return (await owned(wallet, id)) ? ordersOf(id) : undefined;
     },
-    async history(wallet, id) {
-      return (await owned(wallet, id)) ? history(id) : undefined;
+    async history(wallet, id, limit) {
+      return (await owned(wallet, id)) ? history(id, undefined, limit) : undefined;
     },
     async activity(wallet, id): Promise<ActivityItem[] | undefined> {
       if (!(await owned(wallet, id))) return undefined;

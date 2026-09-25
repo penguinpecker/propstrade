@@ -4,7 +4,8 @@
 //   GET  /health -> Health                                   GET  /config -> AppConfig
 //   GET  /markets -> Market[]                                GET  /markets/:symbol -> Market
 //   GET  /candles?symbol&interval&from&to -> CandlesResponse  GET  /markets/:symbol/trades?limit -> MarketTrade[]
-//   GET  /quote?symbol&side&sizeUsd -> PriceImpactQuote       GET  /stream -> SSE, `data: <StreamEvent JSON>`
+//   GET  /quote?symbol&side&sizeUsd[&collateralUsd&limitPrice] -> PriceImpactQuote
+//   GET  /traders/:address -> TraderLookup (public)           GET  /stream -> SSE, `data: <StreamEvent JSON>`
 //   POST /auth/nonce NonceRequest -> NonceResponse           POST /auth/verify VerifyRequest -> VerifyResponse (+cookie)
 //   POST /auth/logout -> 204                                  GET  /me -> Me (401 without a session)
 //   POST /kyc/start KycStartRequest -> KycStartResponse
@@ -56,7 +57,8 @@ export interface Market {
   openInterestLong: Decimal | null;       // preferred pool (as are funding, borrow and capacity below)
   openInterestShort: Decimal | null;
   fundingRateHourlyLong: number | null;   // percent per hour, sign = paid(+)/received(−) by longs
-  borrowRateHourlyLong: number | null;
+  fundingRateHourlyShort: number | null;  // same for shorts: not the negative of the long rate (scaled by the OI ratio)
+  borrowRateHourlyLong: number | null;    // percent per hour, always paid (0 for the smaller side when GMTrade waives it)
   borrowRateHourlyShort: number | null;
   capacityLong: Decimal | null;           // USD of additional long OI the pool accepts
   capacityShort: Decimal | null;
@@ -71,13 +73,33 @@ export interface Market {
 
 export interface PriceTick { symbol: string; min: Decimal; max: Decimal; mid: Decimal; ts: Millis; session: SessionState }
 
-export type CandleInterval = '5m' | '15m' | '1h' | '4h' | '1D';
+// 5m 15m 1h 4h 1D come from GMTrade's candle service; 30m 2h 6h 12h 1W (Monday 00:00 UTC) 1M (calendar month, UTC) are
+// rolled up from them on the server; 1m and 3m come from Props.trade's own price record (source 'record'), whose
+// history starts with it (2026-09-23): an empty older window means history start, as with GMTrade's.
+export type CandleInterval = '1m' | '3m' | '5m' | '15m' | '30m' | '1h' | '2h' | '4h' | '6h' | '12h' | '1D' | '1W' | '1M';
 export interface Candle { time: number /* unix seconds */; open: number; high: number; low: number; close: number; volume?: number }
-export interface CandlesResponse { symbol: string; interval: CandleInterval; candles: Candle[]; source: 'gmtrade'; freshness: DataFreshness }
+export interface CandlesResponse { symbol: string; interval: CandleInterval; candles: Candle[]; source: 'gmtrade' | 'record'; freshness: DataFreshness }
 
 export interface MarketTrade { id: string; symbol: string; side: 'Long' | 'Short'; isIncrease: boolean; price: Decimal; sizeUsd: Decimal; ts: Millis; signature?: string }
 
-export interface PriceImpactQuote { symbol: string; side: 'Long' | 'Short'; sizeUsd: Decimal; priceImpactPct: number; openFeeUsd: Decimal; executionPrice: Decimal }
+/**
+ * The order ticket's cost preview. Every figure is GMTrade's: Props.trade charges nothing per order (its only charges
+ * are the evaluation fee and the profit share; `platformFeeUsd` stays '0' until AppConfig.orderFeeBps exists). Fees and
+ * impact are priced on the pool without the account's own position in it, at the live price (at `limitPrice` for a
+ * limit order); the resulting position is then valued as the positions table will value it (in the pool).
+ */
+export interface PriceImpactQuote {
+  symbol: string; side: 'Long' | 'Short'; sizeUsd: Decimal; priceImpactPct: number; openFeeUsd: Decimal; executionPrice: Decimal;
+  orderValueUsd: Decimal;               // the order's notional (= sizeUsd)
+  collateralUsd: Decimal | null;        // the margin the quote was priced at; null = 1x (the request gave none)
+  closeFeeUsd: Decimal;                 // GMTrade's fee to close the resulting position at the same price
+  roundTripFeeUsd: Decimal;             // openFeeUsd + closeFeeUsd
+  fundingRateHourlyPct: number | null;  // the requested side's, as Market gives it (positive = this side pays)
+  borrowRateHourlyPct: number | null;
+  hourlyCostUsd: Decimal | null;        // (borrow + funding when paid) × size, per hour: received funding is never credited
+  liquidationPrice: Decimal | null;     // of the resulting position at collateralUsd; null when the model cannot value it
+  platformFeeUsd: Decimal;              // Props.trade's fee per order: '0' today
+}
 
 // ---------- programs / config ----------
 export interface Tier {
@@ -93,6 +115,9 @@ export interface AppConfig {
   traderShareBps: number; minPayoutUsdc: Decimal;
   paused: { newEvaluations: boolean; trading: boolean; payouts: boolean };
   feeVault: Pubkey; capitalVault: Pubkey;
+  /** A Props fee per order in bps. Absent today: nothing charges or shows one; when it exists the quote's
+   *  platformFeeUsd and the ticket's Props row follow it (it is not applied by any engine until it is also onchain). */
+  orderFeeBps?: number;
 }
 
 // ---------- auth / me ----------
@@ -170,7 +195,14 @@ export interface Position {
   id: string; symbol: string; side: 'Long' | 'Short';
   sizeUsd: Decimal; sizeTokens: Decimal; collateralUsd: Decimal; leverage: number;
   entryPrice: Decimal; markPrice: Decimal | null; liquidationPrice: Decimal | null;
-  unrealizedPnl: Decimal | null; pendingFeesUsd: Decimal;
+  /** Net, in every stage: the position's net value minus its collateral, i.e. price P&L less the pending borrowing,
+   *  funding and close fee below (GMTrade's netValue is floored at 0, so never below −collateral). */
+  unrealizedPnl: Decimal | null;
+  /** pendingBorrowUsd + pendingFundingUsd + closeFeeUsd: what the next fill of this position settles. */
+  pendingFeesUsd: Decimal;
+  pendingBorrowUsd: Decimal; pendingFundingUsd: Decimal; closeFeeUsd: Decimal;
+  /** A market order closing the whole position is pending: the row is on its way out. */
+  closing: boolean;
   takeProfit: { price: Decimal; orderId: string; status: OrderStatus } | null;
   stopLoss: { price: Decimal; orderId: string; status: OrderStatus } | null;
   openedAt: Millis;
@@ -190,7 +222,11 @@ export interface Fill {
 }
 export interface ClosedTrade {
   id: string; symbol: string; side: 'Long' | 'Short'; openedAt: Millis; closedAt: Millis;
-  sizeUsd: Decimal; entryPrice: Decimal; exitPrice: Decimal; feesUsd: Decimal; netPnl: Decimal;
+  sizeUsd: Decimal; entryPrice: Decimal; exitPrice: Decimal;
+  /** Every cost of the round trip: feesUsd = orderFeesUsd + fundingUsd + borrowUsd (order fees include a liquidation
+   *  fee). Price impact is inside the prices and the P&L, shown for the record. netPnl is after all of them. */
+  feesUsd: Decimal; orderFeesUsd: Decimal; fundingUsd: Decimal; borrowUsd: Decimal; priceImpactUsd: Decimal;
+  netPnl: Decimal;
   venue: 'simulated' | 'gmtrade'; signatures: string[];
 }
 export type ActivityType = 'order' | 'fill' | 'cancel' | 'protection' | 'liquidation' | 'charge' | 'account' | 'payout' | 'risk';
@@ -236,6 +272,17 @@ export interface PayoutEligibility {
   account: string; eligible: boolean; reasons: string[];
   realizedProfit: Decimal; traderShare: Decimal; vaultShare: Decimal; minPayout: Decimal;
   flat: boolean; openPositions: number; pendingOrders: number;
+}
+
+// ---------- traders (public search) ----------
+/** A trader's public record by wallet address: accounts at every stage, open positions, the last 50 closed trades and
+ *  payouts. Never identity data. An evaluation or funded account address resolves to its trader. */
+export interface TraderLookup {
+  address: Pubkey;
+  accounts: { id: string; stage: Stage; status: AccountStatus; sizeUsd: Decimal; equityUsd: Decimal; createdAt: Millis }[];
+  positions: Position[];
+  trades: ClosedTrade[];
+  payouts: { id: string; status: PayoutStatus; amountUsd: Decimal; requestedAt: Millis; paidAt: Millis | null; signature: string | null }[];
 }
 
 // ---------- verification ----------

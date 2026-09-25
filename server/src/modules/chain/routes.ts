@@ -1,6 +1,6 @@
 // HTTP routes owned by the chain module: /v1/config, /v1/accounts* (practice + evaluation from the sim module, funded
-// from here, dispatched by id), payouts, verify, vault, and under /v1/admin the operator payout review, lifting a
-// funded account's restriction and retrying a chain job that failed for good.
+// from here, dispatched by id), payouts, verify, vault, the public trader lookup (./traders.ts), and under /v1/admin
+// the operator payout review, lifting a funded account's restriction and retrying a chain job that failed for good.
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
@@ -17,6 +17,7 @@ import { jobRow, requeue, type JobPayload } from './jobs.ts';
 import { ProgramNotInitialized, type ProgramReader } from './program.ts';
 import { PAYOUT_REJECTION_REASONS, rejectionReason } from './projector.ts';
 import { dec } from './reader.ts';
+import { registerTraderRoutes } from './traders.ts';
 
 const AccountParams = z.object({ id: z.string().min(1).max(64) });
 const PayoutParams = z.object({ id: walletSchema });
@@ -65,6 +66,7 @@ export function registerRoutes(app: FastifyInstance, d: {
   app.get('/v1/config', async () => fromChain(() => d.program.appConfig()));
   app.get('/v1/vault', async () => fromChain(() => d.program.vault()));
   app.get('/v1/verify', async (req) => d.verify(parse(VerifyQuery, req.query).q));
+  registerTraderRoutes(app, { db, sim: d.sim, funded });
 
   app.get('/v1/accounts', auth, async (req) => {
     const wallet = walletOf(req);

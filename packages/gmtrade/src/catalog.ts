@@ -168,6 +168,7 @@ export function buildCatalog({ feed, pairs, opens24h, limits, onError, now }: Ca
       openInterestLong: s ? usdString(s.openInterestForLong) : null,
       openInterestShort: s ? usdString(s.openInterestForShort) : null,
       fundingRateHourlyLong: s ? perHourPct(s.fundingRatePerSecondForLong) : null,
+      fundingRateHourlyShort: s ? perHourPct(s.fundingRatePerSecondForShort) : null,
       borrowRateHourlyLong: s ? perHourPct(s.borrowingRatePerSecondForLong) : null,
       borrowRateHourlyShort: s ? perHourPct(s.borrowingRatePerSecondForShort) : null,
       capacityLong: s ? usdString(s.liquidityForLong) : null,

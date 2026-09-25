@@ -44,6 +44,7 @@ If implementation proves a statement here wrong, fix the code to the facts AND u
 | Practice | free, 25K virtual, same engine and rules, reset anytime, never paid out | |
 | Acceptable price | every order carries one; default slippage 0.5% (user-editable ≤ 5%) | protects against GMTrade's scheduled price-impact windows |
 | Geo | block US persons and sanctioned regions (edge middleware + KYC country and region) | GMTrade terms bar US persons |
+| Costs | GMTrade's, in every stage: order fee on each open and close (the market's factor by impact direction: lower when the order improves the long/short balance, higher when it worsens it), price impact (in the execution price), borrowing (the larger side pays), funding (the paying side only: received funding is never credited), liquidation fee. Props.trade: the evaluation fee and the profit share only — no fee per order (`AppConfig.orderFeeBps` is reserved for one, absent today) | The order ticket previews open, close and round-trip fees, the side's hourly rates and cost, and the liquidation price (`GET /v1/quote`); every trip's breakdown is in `ClosedTrade` |
 
 Evaluation and funded use **identical** risk semantics so passing an evaluation predicts funded behaviour.
 
@@ -205,8 +206,8 @@ loops run only while holding a Postgres advisory lock (`pg_try_advisory_lock`).
   All 68 markets (93 pools); one row per index asset, preferring the pure USDC-USDC pool.
 - Live prices: keeper WS `wss://keeper-prod-api.gmtrade.xyz/graphql-ws` tokens subscription; drop any tick older
   than the last seen for that token; `isOpen` = session state. Fallback poll over HTTP. Stale threshold 20 s.
-- Candles: `price-candle-mainnet.gmtrade.xyz/graphql` (60/300/3600/86400 s) with server cache; 15m and 4h are
-  aggregated from 5m and 1h.
+- Candles: `price-candle-mainnet.gmtrade.xyz/graphql` with server cache: native 5m 15m 1h 4h 1D; the rest rolled up on
+  the server, 1m and 3m from Props.trade's own price record (§8).
 - Recent trades per market + trader history: GMTrade subsquid.
 - Pool state (capacity, price impact inputs, fee factors, leverage limits) from onchain Market accounts, refreshed
   every 30 s and on the keeper `markets` subscription (GMTrade rewrites configs on a schedule).
@@ -219,8 +220,10 @@ Sign-In With Solana: `POST /v1/auth/nonce` → message with domain, wallet, nonc
 ### 4.3 sim engine (practice + evaluation)
 - Uses `packages/gmsol-wasm` (gmsol-sdk 0.10.0 model with the HEAD liquidation-price fix) for fill price,
   price impact, open/close fees, borrowing and funding, and liquidation, fed with live market state.
-- Market orders fill at the first price tick with `ts ≥ submit_time + 2 s` (measured keeper delay); limit and
-  TP/SL trigger on ticks; fills use the side-correct min/max price like GMTrade.
+- A practice order executes on the first price tick published after it (strictly newer than the latest tick seen when
+  it was placed); an evaluation order on the first tick with `ts ≥ its last change + 2 s` (the measured keeper delay:
+  parity with funded execution; `engine.ts` header and §8). Limit and TP/SL trigger on such ticks; fills use the
+  side-correct min/max price like GMTrade.
 - Refuse decreases and opens on closed markets (`isOpen = false`), like GMTrade. Apply the same leverage,
   exposure and margin rules as the program.
 - Rules: continuous check of equity vs floor (breach → auto-close all, Failed) and target (≥ target with no open
@@ -341,14 +344,109 @@ the pre-warm runs, so a restarted process answers every chart live from the tabl
 settled window a request fetched with candles is stored (an empty answer stays in memory: stored, it would answer that
 range empty for good), and a request for a settled window answers from memory, then the table (stored windows
 overlapping it, contiguous), and only then GMTrade (the 4 s wait and 503 remain for a window nobody ever had). A
+settled window nobody holds waits only its own 4 s, never behind the pre-warm batch in flight (that queue took a
+history scroll 14-15 s to its 503 during an outage), and answers 503 at once while the candles source is 'down'; only
+a latest window on a cold series waits for the batch, which fills it. A latest-window copy that the price record
+(the same live feed) completes through the bucket in progress is 'live' while the copy is under ten minutes old and
+'delayed' after (before, any copy over two minutes old read 'delayed' with the "saved copy" footer while the chart was
+complete and current). A
 backfill walks market × interval after the first pre-warm pass, one aligned 300-bar page per visit every 2 s, only
-while no request fetch or pre-warm batch is in flight and GMTrade's last answer took under 2 s, back to 2,000 bars
+while no request fetch or pre-warm batch is in flight, the candles source is not 'down' and GMTrade's last answer took
+under 5 s (gated on 'ok' under 2 s, the walk stayed shut through GMTrade's slow spells all day, 2026-09-25), back to 2,000 bars
 (1h/4h/1D) or 1,000 (5m/15m) or GMTrade's history start (an empty page, stored as the marker), then every page as it
 completes; a restart resumes from the table. Storage is capped per series at the app's reach (30,000 bars, oldest
 fetched evicted): a 300-bar page is ≈ 10.5 KB stored, the first fill ≈ 20 MB, a series grows to the cap over time
 (5m in ≈ 100 days, 15m in ≈ 300 days), ≈ 70 MB per interval at the cap, ≈ 360 MB in all. `/v1/health` →
 `upstreams.candles.history` shows the series restored at boot and the backfill's progress; `upstreams.candleStore`
-is the table's own state.
+is the table's own state. A flush of the store is one transaction (the rotated latest window's delete, the upsert,
+the eviction): a failure in any step rolls the others back, so a series never loses the copy it restores from.
+
+Chart intervals and rates (2026-09-25): `CandleInterval` is 1m 3m 5m 15m 30m 1h 2h 4h 6h 12h 1D 1W 1M. Only 5m 15m 1h
+4h 1D are fetched from GMTrade (`NATIVE_INTERVALS`; the pre-warm, the backfill and `candle_windows` hold only those);
+30m, 2h/6h/12h and 1W/1M are rolled up on the server (`DERIVED_FROM`, `aggregateCandles` in `packages/gmtrade`:
+open first, high max, low min, close last; weeks start Monday 00:00 UTC, months are calendar months, UTC) through the
+same `candles()` path: a derived latest window is its source's latest window rolled up (the warm copy, so no GMTrade
+call), an older one is one source request of at most 2,000 bars (the table, else GMTrade) — a longer window answers
+its newest part and the chart's loader continues from the oldest bar it got; a leading bucket the source window does
+not cover from its start is left out. 1m and 3m (`source: 'record'`) come from `price_bars` with the last few minutes
+from memory (the table is written once a minute); the record is kept for good (nothing prunes `price_bars`; about
+300 MB per 30 days for 68 markets), so their history starts with it (2026-09-23) and an older window answers empty, as
+GMTrade's history start does. Aggregates are cached under the derived interval like native
+windows. `Market` carries the four hourly rates (`fundingRateHourlyLong/Short`, `borrowRateHourlyLong/Short`; the
+short funding rate is not the negative of the long one: the receiving side's is scaled by the OI ratio), and a market
+row is re-sent on the stream when any of them moves 0.0001 pp (`ROW_STEPS`).
+
+App (order ticket and chart, 2026-09-25, `app/src/Trading.jsx`, `Chart.jsx`, `chart/Toolbar.jsx`, `lib/pnl.ts`):
+leverage is a slider with presets in the ticket (no dialog); take profit and stop loss are always shown, each a price
+and a % from the entry linked both ways with ±1/2/5% chips, and `expectedPnl` (pure: size × move in the side's favour
+− open fee − close fee − impact) labels each leg "Est. P&L ≈ …" and the chart's dashed preview lines; the entry is the
+quote's execution price for a market order, the limit price for a limit order. The quote is asked with the ticket's
+margin and limit (`collateralUsd`, `limitPrice`), and the ticket lists every GMTrade cost in order (entry, order value,
+margin, open/close/round-trip fee, impact, borrow + funding per hour and day for the side, liquidation price, slippage,
+the network fee for funded orders from `useTxCost`) with the note that Props.trade charges nothing per order (a Props
+row appears only when `AppConfig.orderFeeBps` exists). Chart price lines: each open position's entry (neutral),
+liquidation (amber) and TP/SL orders (green/red), and the ticket's previews (dashed); `.price-chart[data-guides]`
+lists their labels for the browser checks. Intervals: all 13 (`INTERVALS` in `lib/candles.ts`, week and month buckets
+by the calendar as the server's), pinned ones in the toolbar and the rest in a grouped menu whose star pins them;
+the interval and the pins are saved in this browser (`props.chart-interval`, `props.chart-intervals`, validated on
+read). A close request marks its row "Closing…" at once (`Position.closing`, or the request itself: a simulated one
+until the positions stream drops the row or its order ends, a funded one while the request runs — once it has an
+outcome the server's flag decides, so a follow that timed out and was cancelled later, or a partial close that
+executed, gives the row back, and a whole position that executed leaves with the next positions read; a close the
+venue cancels gives the row back with the reason). The ticket's TP/SL drafts and limit price are cleared when the
+market changes: they were typed against the previous market's price. The positions table
+shows accrued fees (`pendingFeesUsd`, split in the hover) and the side's hourly rates; a market cell of a position,
+order or trade is a button that shows that market. The heading shows funding and borrow per hour per side (×8 and
+×8760 on hover) and wraps instead of hiding them. The trade record lists open + close fees, funding, borrowing, price
+impact and total costs from `ClosedTrade`.
+
+Costs, fill timing and the trader lookup (2026-09-25): `GET /v1/quote` takes `collateralUsd` (the ticket's margin;
+1x without it) and `limitPrice` (a limit order is priced at its price, as the engine executes it) and answers the
+ticket's whole cost preview (`PriceImpactQuote`): the open fee and impact from one simulateIncrease on the pool as it is,
+then the resulting position valued in the pool as the positions table will value it (`positionStatus` on
+`withPosition`), which gives `closeFeeUsd`, `roundTripFeeUsd` and `liquidationPrice`; the requested side's hourly
+funding and borrowing rates from the market row and `hourlyCostUsd` = (borrowing + funding when this side pays) × size;
+`platformFeeUsd` is '0' (Props charges nothing per order). `Position.unrealizedPnl` is net in every stage (net value −
+collateral; the funded rows were gross), `pendingFeesUsd` = `pendingBorrowUsd` + `pendingFundingUsd` + `closeFeeUsd`
+in both, and `closing` says a market close of the whole position is pending. `closed_trades` carries the trip's
+`order_fees_usd`, `funding_usd`, `borrow_usd` and `price_impact_usd` (migration 0006 backfilled them from `sim_fills`
+and `venue_fills`; `fees_usd` keeps meaning order fees + funding + borrowing). Fill timing: a practice order executes on
+the first tick published after the request — `sim_orders.executable_from` is 1 ms past the latest tick seen when it was
+placed (or the tick that armed its protection), so only a strictly newer tick qualifies and an older quote never fills
+a limit set through the price; an evaluation order keeps `SIM_FILL_DELAY_MS` (parity with funded keepers; the bound is
+0–60 s now). `GET /v1/traders/:address` (`modules/chain/traders.ts`, public, 60 requests a minute per client, cached 5 s)
+is the Search page's lookup: the wallet's accounts at every stage with equity, open positions, the last 50 closed trades
+(each provider's `history` read takes that cap, so the lookup's cost does not grow with a trader's past) and payouts
+through the same providers the owner's pages use, an evaluation or funded address resolving to its trader;
+nothing from `kyc_requests` or the payout review notes is read.
+
+Postgres (2026-09-25): every query on a request path or a timer was run with EXPLAIN (ANALYZE, BUFFERS) on a
+production-shaped database (68 markets × 30 days of minute bars = 2.9 M `price_bars` rows, 2,735 `candle_windows`,
+200 wallets, 360 accounts, 7,100 simulated fills over a power-law spread of accounts, 5,900 funded fills, 13,900
+position snapshots, 518,000 equity points, 20,000 notifications) with the parameters of its heaviest account. Every
+request-path query answers from an index in well under 1 ms; migration 0007 added the four that were missing:
+`sim_fills (position_id)` (the round trip written at a close summed a position's fills with a sequential scan, 0.23 ms
+at 7,100 fills and growing with every fill), `venue_fills (funded_account, venue_id)` (the sync cursor `max(venue_id)`
+walked the `venue_id` index backwards through every newer fill of every account: 0.10 → 0.006 ms), `venue_fills
+(position, venue_id)` (a position's opening fill and its round trip; the planner still takes the `venue_id` walk while
+the table is small, and switches to it as the table grows) and `gm_position_snapshots (funded_account, position)`,
+with `venue.ts openSnapshots` rewritten from a distinct-on over every snapshot of the account (a sort of thousands of
+rows every 5 s tick: 3.6 ms) to the account's distinct positions read index-only plus one primary-key lookup each
+(0.28 ms). Known and left: `record.candles` aggregating 30 days of minutes into daily bars for a cold 1D window takes
+13 ms (the 1m/3m windows of up to 6,000 minutes take ≤ 3.5 ms; nothing prunes the table any more, so a cold 1D window
+from the record grows with it); the last-50-orders list sorts every
+finished order of the account (0.2 ms at 750) and the open-orders read of a funded account walks all its `gm_orders`
+(0.12 ms at 2,000) — an `(account_id, updated_at)` index and a partial `closed_at is null` index are the fixes when an
+account passes about 5,000 orders; the keeper's churn check reads every `gm_orders` row each tick (0.3 ms at 6,000).
+Write paths: minute bars are one upsert a minute, candle windows one delete + one upsert (+ eviction) per flush, both
+re-queued on failure; every fill, every indexed transaction and every admin decision commits in one transaction; the
+history flush's delete-then-upsert of a rotated latest window is two autocommit statements (a crash between them loses
+that series' restore copy until its next write, at most five minutes; the pre-warm refills it). `test/db-plans.test.ts`
+plans each hot query with sequential scans priced out and asserts the intended index (and no sort where the index gives
+the order), so a migration cannot drop one unnoticed. Backups: nothing beyond Railway's own volume backups (a daily
+kept 6 days, a weekly 27, a monthly 89, when the volume's schedule is on — not checked from the repo; no point-in-time
+restore); the daily off-platform `pg_dump` in `docs/runbooks/launch.md` §11 is a manual step with nothing scheduling
+it yet.
 
 Server (round 1): Node 22 + tsx (no build step). Session cookie `__Host-props_session`. Global Origin check on unsafe
 methods. Leader lock connection uses `max_lifetime: null`. `ModuleContext` carries config, db, sql, rpc, notify.
@@ -363,6 +461,18 @@ strings count, each once, at most 12: `validWatchlist`). A star on every row of 
 picker adds a market or removes it without choosing it; the picker's Watchlist tab and the trading page's watchlist bar
 follow at once, the bar's "+" opens the picker on All, and the order is the catalog's. A full watchlist says so (a
 toast on the Markets page; in the picker its own note, since a toast sits under an open dialog).
+
+App (Search, 2026-09-25, `app/src/Search.jsx`): the Verify page is now Search at `/search` (`/verify` and its `?q=`
+links redirect there). At the top, any trader by Solana address, signed in or not: `GET /v1/traders/:address` (accounts
+at every stage, open positions, the last 50 closed trades, payouts; never identity data; 404 `unknown_trader`, 400 for
+a malformed address, which the page refuses first with `isSolanaAddress`). A market in a position or trade row opens it
+in the terminal (`selectMarket`). The verification records keep their own search below. Addresses that are the point
+(the wallet dialog, Settings, the searched trader) show in full through `FullAddress`: wrapped, monospace, a copy
+button whose label says "Copied", and the explorer page; a dense table (payout destinations) keeps the short form with
+the copy button. Rates: `rates(market)` in `data.js` formats hourly funding and borrowing per side ("long / short",
+funding signed: longs pay when positive; "—" for a side the server does not give, such as `fundingRateHourlyShort`
+from a server that predates it); the picker row shows funding under the price and the Markets page has both columns,
+each with the reading guide as its hover.
 
 Sim engine (round 2, `server/src/modules/sim`):
 - Account money is USDC. Every fill carries its realized P&L (an increase: its costs; a decrease or liquidation: payout

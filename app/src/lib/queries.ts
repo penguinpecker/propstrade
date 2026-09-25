@@ -13,7 +13,7 @@ export const keys = {
   market: (symbol: string) => ['market', symbol] as const,
   marketTrades: (symbol: string) => ['market', symbol, 'trades'] as const,
   candles: (symbol: string, interval: CandleInterval) => ['candles', symbol, interval] as const,
-  quote: (symbol: string, side: 'Long' | 'Short', sizeUsd: string) => ['quote', symbol, side, sizeUsd] as const,
+  quote: (symbol: string, side: 'Long' | 'Short', sizeUsd: string, collateralUsd: string, limitPrice: string) => ['quote', symbol, side, sizeUsd, collateralUsd, limitPrice] as const,
   accounts: ['accounts'] as const,
   account: (id: string) => ['account', id] as const,
   positions: (id: string) => ['account', id, 'positions'] as const,
@@ -25,6 +25,7 @@ export const keys = {
   payouts: ['payouts'] as const,
   payout: (id: string) => ['payout', id] as const,
   verify: (q: string) => ['verify', q] as const,
+  trader: (address: string) => ['trader', address] as const,
   vault: ['vault'] as const,
   notifications: ['notifications'] as const,
 };
@@ -86,12 +87,13 @@ export const candlesOptions = (symbol: string, interval: CandleInterval) => {
 };
 export const useCandles = (symbol: string, interval: CandleInterval) => useQuery(candlesOptions(symbol, interval));
 /**
- * Fees, price impact and execution price for an order size. While a new size loads, the previous size's quote stays
- * (same market and side only: another market's or side's figures are never shown for this one).
+ * Fees, price impact, execution price and, for the collateral (margin) and limit price given, the close fee and the
+ * liquidation price of an order size. While a new size loads, the previous size's quote stays (same market and side
+ * only: another market's or side's figures are never shown for this one).
  */
-export const useQuote = (symbol: string, side: 'Long' | 'Short', sizeUsd: string | null) => useQuery({
-  queryKey: keys.quote(symbol, side, sizeUsd ?? ''),
-  queryFn: () => api.quote(symbol, side, sizeUsd!),
+export const useQuote = (symbol: string, side: 'Long' | 'Short', sizeUsd: string | null, collateralUsd = '', limitPrice = '') => useQuery({
+  queryKey: keys.quote(symbol, side, sizeUsd ?? '', collateralUsd, limitPrice),
+  queryFn: () => api.quote(symbol, side, sizeUsd!, collateralUsd || undefined, limitPrice || undefined),
   enabled: sizeUsd !== null,
   placeholderData: (previous, previousQuery) => previousQuery?.queryKey[1] === symbol && previousQuery.queryKey[2] === side ? previous : undefined,
   staleTime: 5_000,
@@ -112,6 +114,8 @@ export const usePayoutEligibility = (id: string | null) =>
 export const usePayouts = (enabled: boolean) => useQuery({ queryKey: keys.payouts, queryFn: api.payouts, enabled });
 export const usePayout = (id: string | null) => useQuery({ queryKey: keys.payout(id ?? ''), queryFn: () => api.payout(id!), enabled: id !== null });
 export const useVerify = (q: string) => useQuery({ queryKey: keys.verify(q), queryFn: () => api.verifyRecord(q), enabled: q.trim() !== '' });
+/** A trader by wallet address, once the page has checked its shape (null = nothing to look up). */
+export const useTrader = (address: string | null) => useQuery({ queryKey: keys.trader(address ?? ''), queryFn: () => api.trader(address!), enabled: address !== null });
 export const useVault = () => useQuery({ queryKey: keys.vault, queryFn: api.vault });
 
 /** The signed-in wallet's notifications; the stream prepends new ones. */

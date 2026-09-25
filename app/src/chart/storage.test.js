@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DRAWING_COLOR, MAX_DRAWINGS, loadDrawings, loadStudies, saveDrawings, validDrawings, validStudies } from './storage.js';
+import { DEFAULT_INTERVALS, DRAWING_COLOR, MAX_DRAWINGS, loadDrawings, loadInterval, loadIntervals, loadStudies, saveDrawings, validDrawings, validIntervals, validStudies } from './storage.js';
 
 /** A localStorage stand-in. */
 function memory(entries = {}) {
@@ -93,5 +93,22 @@ describe('drawings from storage', () => {
     expect(loadDrawings('ETH', storage)).toEqual([]);
     storage.setItem('props.chart-drawings.ETH', '[{"id":');
     expect(loadDrawings('ETH', storage)).toEqual([]);
+  });
+});
+
+describe('interval settings from storage', () => {
+  it('reads the saved interval when the chart offers it, 1h otherwise', () => {
+    expect(loadInterval(memory({ 'props.chart-interval': '"3m"' }))).toBe('3m');
+    for (const raw of ['"7m"', '"1d"', '1', '{not json', 'null']) expect(loadInterval(memory({ 'props.chart-interval': raw }))).toBe('1h');
+    expect(loadInterval(memory())).toBe('1h');
+  });
+
+  it('keeps known pinned intervals once each in the chart’s order, and falls back to the defaults for anything else', () => {
+    expect(validIntervals(['1D', '3m', '3m', '7m', 4, '1h'])).toEqual(['3m', '1h', '1D']);
+    expect(validIntervals([])).toEqual([]);
+    expect(validIntervals('1h')).toEqual(DEFAULT_INTERVALS);
+    expect(loadIntervals(memory({ 'props.chart-intervals': '["1W","1m"]' }))).toEqual(['1m', '1W']);
+    expect(loadIntervals(memory({ 'props.chart-intervals': '{bad' }))).toEqual(DEFAULT_INTERVALS);
+    expect(loadIntervals(memory())).toEqual(DEFAULT_INTERVALS);
   });
 });

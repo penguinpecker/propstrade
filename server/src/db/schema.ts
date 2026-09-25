@@ -144,6 +144,12 @@ export const simOrders = pgTable('sim_orders', {
   statusDetail: text('status_detail'),
   createdAt: now('created_at'),
   updatedAt: now('updated_at'),
+  /**
+   * The earliest price tick (its ts) that may execute the order: a practice order the first tick published after it
+   * (1 ms past the latest tick seen when it was placed or armed), an evaluation order its placement plus the keeper
+   * delay (SIM_FILL_DELAY_MS); GMTrade's trigger rule then applies on top for limits and protection.
+   */
+  executableFrom: at('executable_from').notNull(),
   /** Take-profit / stop-loss placed with an increase order: armed when that order fills, cancelled with it. */
   parentOrderId: uuid('parent_order_id').references((): AnyPgColumn => simOrders.id, { onDelete: 'cascade' }),
   /** Closes the whole position at execution (GMTrade CLOSE_ALL): take profit, stop loss and 100% closes; size_usd is shown only. */
@@ -173,7 +179,11 @@ export const simFills = pgTable('sim_fills', {
   /** Timestamp of the price tick the fill used. */
   tickTs: at('tick_ts').notNull(),
   ts: now('ts'),
-}, (t) => [index('sim_fills_account_ts_idx').on(t.accountId, t.ts)]);
+}, (t) => [
+  index('sim_fills_account_ts_idx').on(t.accountId, t.ts),
+  /** The round trip written when a position closes sums its fills (engine.ts recordRoundTrip). */
+  index('sim_fills_position_idx').on(t.positionId),
+]);
 
 /**
  * Evaluation outcomes decided by the sim engine: an outbox the chain module drains into record_evaluation_result
@@ -204,7 +214,13 @@ export const closedTrades = pgTable('closed_trades', {
   sizeUsd: usd('size_usd').notNull(),
   entryPrice: price('entry_price').notNull(),
   exitPrice: price('exit_price').notNull(),
+  /** Every cost of the trip, summed from its fills: fees_usd = order_fees_usd + funding_usd + borrow_usd (kept as the
+   *  total readers always had); price impact sits inside the prices and the P&L and is recorded for the breakdown. */
   feesUsd: usd('fees_usd').notNull(),
+  orderFeesUsd: usd('order_fees_usd').notNull().default('0'),
+  fundingUsd: usd('funding_usd').notNull().default('0'),
+  borrowUsd: usd('borrow_usd').notNull().default('0'),
+  priceImpactUsd: usd('price_impact_usd').notNull().default('0'),
   netPnl: usd('net_pnl').notNull(),
   signatures: text('signatures').array().notNull().default(sql`'{}'::text[]`),
 }, (t) => [index('closed_trades_account_closed_idx').on(t.accountId, t.closedAt)]);
@@ -332,6 +348,8 @@ export const gmPositionSnapshots = pgTable('gm_position_snapshots', {
 }, (t) => [
   primaryKey({ columns: [t.position, t.slot] }),
   index('gm_position_snapshots_funded_idx').on(t.fundedAccount, t.slot),
+  /** The positions an account has had, read index-only every venue tick (venue.ts openSnapshots, verify.ts). */
+  index('gm_position_snapshots_funded_position_idx').on(t.fundedAccount, t.position),
 ]);
 
 /** Executions of funded-account orders on GMTrade. */
@@ -360,6 +378,10 @@ export const venueFills = pgTable('venue_fills', {
 }, (t) => [
   primaryKey({ columns: [t.signature, t.eventIndex] }),
   index('venue_fills_funded_ts_idx').on(t.fundedAccount, t.ts),
+  /** The account's sync cursor, max(venue_id), every venue tick (venue.ts syncFills). */
+  index('venue_fills_funded_venue_id_idx').on(t.fundedAccount, t.venueId),
+  /** A position's fills in chain order: its opening fill (funded.ts positionsOf) and its round trip (syncFills). */
+  index('venue_fills_position_venue_id_idx').on(t.position, t.venueId),
 ]);
 
 export const payouts = pgTable('payouts', {

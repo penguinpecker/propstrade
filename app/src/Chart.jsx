@@ -2,7 +2,7 @@ import React, { useEffect, useReducer, useRef, useState } from 'react';
 import { ChevronsRight, LineChart, Trash2, Type } from 'lucide-react';
 import { AreaSeries, BarSeries, CandlestickSeries, CrosshairMode, HistogramSeries, LineSeries, LineStyle, PriceScaleMode, createChart } from 'lightweight-charts';
 import { Button, Dialog, Empty, Unavailable } from './ui.jsx';
-import { applyTick, INTERVAL_SECONDS } from './lib/candles';
+import { applyTick, bucketNext, bucketStart, INTERVAL_SECONDS } from './lib/candles';
 import { BottomBar } from './chart/BottomBar.jsx';
 import { DrawingToolbar } from './chart/DrawingToolbar.jsx';
 import { createDrawingLayer, formatTime, ink, logicalToTime, readable, rgba, timeToLogical } from './chart/drawings.js';
@@ -29,8 +29,8 @@ const AXIS_LABEL = FONT_SIZE * 17 / 12;
 const SCROLL = { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true };
 const SERIES = { candles: CandlestickSeries, bars: BarSeries, line: LineSeries, area: AreaSeries };
 const PALETTES = {
-  dark: { surface: '#19181f', axis: '#afa6bc', grid: '#2b2732', border: '#35313e', separatorHover: 'rgba(178,138,255,.18)', purple: '#b28aff', green: '#0ecb81', red: '#f6465d', greenSoft: 'rgba(14,203,129,.55)', redSoft: 'rgba(246,70,93,.55)', entry: '#9168ba', entryBg: '#332743', entryText: '#c8a3f3' },
-  light: { surface: '#fdfdfb', axis: '#6e6975', grid: '#efeee9', border: '#eeece6', separatorHover: 'rgba(121,70,188,.14)', purple: '#8552cc', green: '#0a9e6b', red: '#e5354d', greenSoft: 'rgba(10,158,107,.5)', redSoft: 'rgba(229,53,77,.5)', entry: '#976ccc', entryBg: '#f0e8fa', entryText: '#76529b' },
+  dark: { surface: '#19181f', axis: '#afa6bc', grid: '#2b2732', border: '#35313e', separatorHover: 'rgba(178,138,255,.18)', purple: '#b28aff', green: '#0ecb81', red: '#f6465d', greenSoft: 'rgba(14,203,129,.55)', redSoft: 'rgba(246,70,93,.55)', entry: '#9168ba', entryBg: '#332743', entryText: '#c8a3f3', amber: '#e0b96a' },
+  light: { surface: '#fdfdfb', axis: '#6e6975', grid: '#efeee9', border: '#eeece6', separatorHover: 'rgba(121,70,188,.14)', purple: '#8552cc', green: '#0a9e6b', red: '#e5354d', greenSoft: 'rgba(10,158,107,.5)', redSoft: 'rgba(229,53,77,.5)', entry: '#976ccc', entryBg: '#f0e8fa', entryText: '#76529b', amber: '#c48a1d' },
 };
 const closesOnly = type => type === 'line' || type === 'area';
 const toPoint = (type, bar) => closesOnly(type) ? { time: bar.time, value: bar.close } : bar;
@@ -55,13 +55,14 @@ function barIndex(list, time) {
  * own labels never show beside it. The axis stacks labels outward from the price in view, so a label exactly one label
  * height lower stays right under the price.
  */
-function lastPrice(series, step, getBars, isLive) {
+function lastPrice(series, interval, getBars, isLive) {
   let timer;
   const ctx = document.createElement('canvas').getContext('2d');
   ctx.font = `${FONT_SIZE}px ${FONT}`;
   const width = text => ctx.measureText(text).width;
   const last = () => series.lastValueData(true);
-  const left = () => { const bar = getBars().at(-1); return bar ? bar.time + step - Date.now() / 1000 : 0; };
+  const left = () => { const bar = getBars().at(-1); return bar ? bucketNext(interval, bar.time) - Date.now() / 1000 : 0; };
+  const current = () => getBars().at(-1)?.time === bucketStart(interval, Date.now() / 1000); // the latest candle is the one in progress
   const two = n => String(Math.floor(n)).padStart(2, '0');
   const price = () => { const d = last(); return d.noData ? '' : series.priceFormatter().format(d.price); };
   const clock = () => {
@@ -76,7 +77,7 @@ function lastPrice(series, step, getBars, isLive) {
     coordinate: () => { const d = last(); const y = d.noData ? null : series.priceToCoordinate(d.price); return y === null ? -1e4 : y + offset; },
     text, backColor: color, textColor: () => ink(color()), visible, tickVisible: () => offset === 0,
   });
-  const views = [label(0, price, () => !last().noData), label(AXIS_LABEL, clock, () => isLive() && left() > 0 && left() <= step)]; // the countdown only while the latest candle is the current one
+  const views = [label(0, price, () => !last().noData), label(AXIS_LABEL, clock, () => isLive() && current() && left() > 0)]; // the countdown only while the latest candle is the current one
   return { attached: ({ requestUpdate }) => { timer = setInterval(requestUpdate, 1000); }, detached: () => clearInterval(timer), priceAxisViews: () => views };
 }
 
@@ -191,7 +192,7 @@ export default function ChartPanel({ settings, market, candles, tick, theme, liv
     onRemove: s => settings.setStudies(studies.filter(x => x.id !== s.id)),
   };
   return <div className="tv-panel" ref={root}>
-    <ChartToolbar interval={interval} onInterval={settings.setInterval} chartType={chartType} onChartType={settings.setChartType} onIndicators={() => setDialog('indicators')} showGuides={settings.showGuides} onShowGuides={settings.setShowGuides} drawTools={drawTools} drawing={tool !== 'cursor'} onDrawTools={() => setDrawTools(!drawTools)} onExpand={onExpand} />
+    <ChartToolbar interval={interval} onInterval={settings.setInterval} pinned={settings.pinned} onPinned={settings.setPinned} chartType={chartType} onChartType={settings.setChartType} onIndicators={() => setDialog('indicators')} showGuides={settings.showGuides} onShowGuides={settings.setShowGuides} drawTools={drawTools} drawing={tool !== 'cursor'} onDrawTools={() => setDrawTools(!drawTools)} onExpand={onExpand} />
     <div className="tv-body">
       <DrawingToolbar tool={tool} onTool={chooseTool} prefs={prefs} onPrefs={next => { settings.setPrefs(next); if (next.locked || next.hidden) setSelected(null); }} count={drawings.length} onClear={() => setDialog('clear')} open={drawTools} />
       <div className="tv-plot">
@@ -215,8 +216,9 @@ export default function ChartPanel({ settings, market, candles, tick, theme, liv
 }
 
 /**
- * GMTrade candles (`candles`), moved live by `tick` ({ price, ts }); `guides` are horizontal price lines ({ price, title }).
- * Drag in any direction pans; the wheel or a pinch zooms. `loadOlder(beforeTime, count)` supplies earlier candles as the
+ * GMTrade candles (`candles`), moved live by `tick` ({ price, ts }); `guides` are horizontal price lines ({ price, title,
+ * kind: 'entry' | 'liquidation' | 'tp' | 'sl', draft? }): entry neutral, liquidation amber, take profit green, stop loss
+ * red, a draft (the ticket's own TP/SL while it is typed) dashed. Drag in any direction pans; the wheel or a pinch zooms. `loadOlder(beforeTime, count)` supplies earlier candles as the
  * view nears the first one. Drawings and indicator instances come from the chart settings.
  */
 function PriceChart({ market, candles, tick, interval, chartType, theme, live, guides, loadOlder, studies, studyActions, drawings, onDrawings, prefs, tool, onTool, selected, onSelect, scaleMode, autoScale, onAutoScale, request, onRequestDone }) {
@@ -262,7 +264,7 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
       onChange: list => latest.current.onDrawings(list), onSelect: id => latest.current.onSelect(id), onTool: t => latest.current.onTool(t), onText: edit => latest.current.startText(edit),
     });
     series.attachPrimitive(layer.primitive);
-    const label = lastPrice(series, step, () => bars.current, () => latest.current.live);
+    const label = lastPrice(series, interval, () => bars.current, () => latest.current.live);
     series.attachPrimitive(label);
     const showRecent = () => { const n = bars.current.length; if (n) chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - RECENT_BARS), to: n - 1 + RIGHT_OFFSET }); };
     // `view` shows what the chart was opened with (the latest bars, the view before a rebuild, or a range or date asked
@@ -490,8 +492,15 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
   useEffect(() => {
     const current = chartRef.current;
     if (!current) return;
+    const c = current.colors;
     for (const priceLine of current.priceLines) current.series.removePriceLine(priceLine);
-    current.priceLines = guides.map(g => current.series.createPriceLine({ price: g.price, color: current.colors.entry, lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: g.title, axisLabelColor: current.colors.entryBg, axisLabelTextColor: current.colors.entryText }));
+    current.priceLines = guides.map(g => {
+      const color = { liquidation: c.amber, tp: c.green, sl: c.red }[g.kind];
+      return current.series.createPriceLine(color
+        ? { price: g.price, color, lineWidth: 1, lineStyle: g.draft ? LineStyle.Dashed : LineStyle.Solid, axisLabelVisible: true, title: g.title, axisLabelColor: color, axisLabelTextColor: ink(color) }
+        : { price: g.price, color: c.entry, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: g.title, axisLabelColor: c.entryBg, axisLabelTextColor: c.entryText });
+    });
+    container.current.dataset.guides = guides.map(g => g.title).join('|'); // what the axis shows (drawn on canvas), for the browser checks
   }, [guides, market.symbol, interval, chartType, theme]);
 
   useEffect(() => {

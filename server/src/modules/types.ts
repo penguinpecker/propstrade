@@ -52,7 +52,8 @@ export interface AccountsProvider {
   detail(wallet: string, id: string): Promise<AccountDetail | undefined>;
   positions(wallet: string, id: string): Promise<Position[] | undefined>;
   orders(wallet: string, id: string): Promise<Order[] | undefined>;
-  history(wallet: string, id: string): Promise<ClosedTrade[] | undefined>;
+  /** Newest first; `limit` caps the read (the public trader lookup keeps 50 per account, the owner's pages take all). */
+  history(wallet: string, id: string, limit?: number): Promise<ClosedTrade[] | undefined>;
   activity(wallet: string, id: string): Promise<ActivityItem[] | undefined>;
   performance(wallet: string, id: string, period: Performance['period']): Promise<Performance | undefined>;
 }
@@ -106,7 +107,9 @@ export interface MarketDataService {
   marketState(marketToken: string): Promise<MarketState>;
   candles(symbol: string, interval: CandleInterval, from?: number, to?: number): Promise<CandlesResponse>;
   trades(symbol: string, limit?: number): Promise<MarketTrade[]>;
-  quote(symbol: string, side: 'Long' | 'Short', sizeUsd: string): Promise<PriceImpactQuote>;
+  /** The ticket's cost preview; `collateralUsd` prices the resulting position at that margin (1x without it),
+   *  `limitPrice` prices a limit order at its price instead of the live one. */
+  quote(symbol: string, side: 'Long' | 'Short', sizeUsd: string, collateralUsd?: string, limitPrice?: string): Promise<PriceImpactQuote>;
   /** Each outside source's state: which is failing, since when, why, and what the service does meanwhile. */
   health(): Record<string, UpstreamStatus>;
 }

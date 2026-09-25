@@ -5,10 +5,12 @@
 // lock (SELECT … FOR UPDATE, safe across processes), behind an in-process queue per account so waiting requests do not
 // pin pool connections. Order intake runs anywhere; fills, liquidations and the rules loop run only on the leader.
 //
-// Execution follows GMTrade: every order executes on the first price tick with ts ≥ its last update + the keeper delay
-// (SIM_FILL_DELAY_MS, measured 2 s); market orders at that tick, limit / take-profit / stop-loss orders on the first such
-// tick that meets GMTrade's trigger rule; the model picks the side-correct min/max price and an order whose execution
-// price is worse than its acceptable price is cancelled. Nothing opens, closes or triggers while the market is closed;
+// Execution: a practice order executes on the first price tick published after it (strictly newer than the latest
+// tick seen when it was placed or armed, so never on a quote older than the request); an evaluation order on the first
+// tick with ts ≥ its last change + the keeper delay (SIM_FILL_DELAY_MS, measured 2 s), parity with funded execution.
+// Market orders fill at that tick, limit / take-profit / stop-loss orders on the first such tick that meets GMTrade's
+// trigger rule; the model picks the side-correct min/max price and an order whose execution price is worse than its
+// acceptable price is cancelled. Nothing opens, closes or triggers while the market is closed;
 // liquidation (GMTrade's own check, including its closed-market factor, read from the Market account) always runs.
 // Take profit, stop loss and 100% closes close the whole position at execution (GMTrade CLOSE_ALL, as funded places
 // them), and an account holds at most the 8 orders and 8 positions a funded account can (program MAX_ORDERS/MAX_SLOTS).
@@ -77,7 +79,6 @@ export interface EngineDeps {
 export type Engine = ReturnType<typeof createEngine>;
 
 const failure = (err: unknown) => (err instanceof Error ? err.message : String(err));
-/** Order times come from this process's clock, the one fill timing compares ticks against. */
 const stamped = () => {
   const now = new Date();
   return { createdAt: now, updatedAt: now };
@@ -98,6 +99,13 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
   const shownPrice = (unit: bigint, decimals: number, symbol: string) => fixed(Number(priceText(unit, decimals)), md.market(symbol)?.priceDecimals ?? 2);
   const queues = new Map<string, Promise<unknown>>();
   const inflight = new Set<Promise<unknown>>();
+  /**
+   * When an order placed or armed at `now` may first execute (sim_orders.executable_from): practice 1 ms past `seen`,
+   * the latest tick when it was placed or the tick that armed it, so only a strictly newer tick fills it; evaluation
+   * the keeper delay from `now` (this process's clock, the one its ticks are compared against).
+   */
+  const executableFrom = (stage: AccountRow['stage'], seen: PriceTick, now: Date) =>
+    new Date(stage === 'practice' ? seen.ts + 1 : now.getTime() + fillDelayMs);
   /**
    * symbol → pending orders in it by id: what a tick can fill, checked in memory before any account is locked. Rebuilt
    * from the database by every rules pass (1 s, shorter than the fill delay), so orders placed by another process are
@@ -418,9 +426,11 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       }
       const acceptable = acceptablePrice(trigger ?? quoteFor(quote, isLong, true), isLong, true, req.slippageBps);
       const base = { accountId, symbol: market.symbol, marketToken: market.marketToken, side: req.side, slippageBps: req.slippageBps };
+      const stamp = stamped();
+      const from = executableFrom(account.stage, tick, stamp.createdAt);
       const [row] = await tx.insert(simOrders).values({
-        ...base, ...stamped(), clientId: req.clientId, kind: req.kind, isIncrease: true, sizeUsd: usdText(size), collateralUsd: microText(collateral),
-        triggerPrice: trigger === null ? null : priceText(trigger, dec), acceptablePrice: priceText(acceptable, dec),
+        ...base, ...stamp, executableFrom: from, clientId: req.clientId, kind: req.kind, isIncrease: true, sizeUsd: usdText(size),
+        collateralUsd: microText(collateral), triggerPrice: trigger === null ? null : priceText(trigger, dec), acceptablePrice: priceText(acceptable, dec),
         status: req.kind === 'Market' ? 'awaiting_execution' : 'awaiting_price',
       }).returning();
       // Protection covers the whole position this order fills into (CLOSE_ALL); the size shown follows the position.
@@ -428,7 +438,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       for (const [kind, price] of [['TakeProfit', tp], ['StopLoss', sl]] as const) {
         if (price === null) continue;
         await tx.insert(simOrders).values({
-          ...base, ...stamped(), clientId: `${req.clientId}:${kind}`, kind, isIncrease: false, closeAll: true, sizeUsd: protects,
+          ...base, ...stamp, executableFrom: from, clientId: `${req.clientId}:${kind}`, kind, isIncrease: false, closeAll: true, sizeUsd: protects,
           triggerPrice: priceText(price, dec), status: 'awaiting_price', parentOrderId: row!.id,
         });
       }
@@ -468,7 +478,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
   async function closePosition(wallet: string, accountId: string, positionId: string, req: SimCloseRequest): Promise<SimOrderResponse> {
     await owned(wallet, accountId);
     const closeAll = req.percent === 100;
-    const order = await inAccount(accountId, async (tx, _account, fx) => {
+    const order = await inAccount(accountId, async (tx, account, fx) => {
       const existing = await byClientId(tx, accountId, req.clientId,
         (o) => !o.isIncrease && o.kind === 'Market' && o.positionId === positionId && o.closeAll === closeAll);
       if (existing) return existing;
@@ -479,10 +489,11 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       const size = closeAll ? usd(position.sizeUsd) : (usd(position.sizeUsd) * BigInt(Math.round(req.percent * 100))) / 10_000n;
       if (!closeAll && size < MIN_DECREASE_USD) throw new ApiError(422, 'order_rejected', 'GMTrade closes at least $1 at a time');
       const acceptable = acceptablePrice(quoteFor(tickUnits(tick, state.indexDecimals), isLong, false), isLong, false, req.slippageBps);
+      const stamp = stamped();
       const [row] = await tx.insert(simOrders).values({
-        ...stamped(), accountId, clientId: req.clientId, positionId, symbol: position.symbol, marketToken: position.marketToken, side: position.side,
-        kind: 'Market', isIncrease: false, closeAll, sizeUsd: usdText(size), acceptablePrice: priceText(acceptable, state.indexDecimals),
-        slippageBps: req.slippageBps, status: 'awaiting_execution',
+        ...stamp, executableFrom: executableFrom(account.stage, tick, stamp.createdAt), accountId, clientId: req.clientId, positionId, symbol: position.symbol,
+        marketToken: position.marketToken, side: position.side, kind: 'Market', isIncrease: false, closeAll, sizeUsd: usdText(size),
+        acceptablePrice: priceText(acceptable, state.indexDecimals), slippageBps: req.slippageBps, status: 'awaiting_execution',
       }).returning();
       await event(tx, accountId, 'order', `Close ${position.side.toLowerCase()} ${position.symbol}`, `${req.percent}% of ${money(position.sizeUsd)}`,
         { amountUsd: usdText(size), symbol: position.symbol });
@@ -520,10 +531,11 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
           fx.unwatch.push(have);
         }
         if (price === null) continue;
+        const stamp = stamped();
         const [row] = await tx.insert(simOrders).values({
-          ...stamped(), accountId, clientId: `protection:${randomUUID()}`, positionId, symbol: position.symbol, marketToken: position.marketToken,
-          side: position.side, kind, isIncrease: false, closeAll: true, sizeUsd: position.sizeUsd, triggerPrice: priceText(price, dec),
-          slippageBps: 0, status: 'awaiting_price',
+          ...stamp, executableFrom: executableFrom(account.stage, tick, stamp.createdAt), accountId, clientId: `protection:${randomUUID()}`, positionId,
+          symbol: position.symbol, marketToken: position.marketToken, side: position.side, kind, isIncrease: false, closeAll: true,
+          sizeUsd: position.sizeUsd, triggerPrice: priceText(price, dec), slippageBps: 0, status: 'awaiting_price',
         }).returning();
         fx.watch.push(row!);
       }
@@ -539,9 +551,9 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
 
   // ---------- execution (leader) ----------
 
-  /** Whether `order` may execute on `tick`: open market, the keeper delay since its last change, GMTrade's trigger rule. */
+  /** Whether `order` may execute on `tick`: open market, a tick from its executable_from on, GMTrade's trigger rule. */
   function executable(order: OrderRow, tick: PriceTick, state: MarketState): boolean {
-    if (tick.session !== 'open' || state.isClosed || tick.ts < order.updatedAt.getTime() + fillDelayMs) return false;
+    if (tick.session !== 'open' || state.isClosed || tick.ts < order.executableFrom.getTime()) return false;
     if (order.kind === 'Market') return true;
     if (!order.isIncrease && order.positionId === null) return false; // protection armed only once its order fills
     const dec = state.indexDecimals;
@@ -662,7 +674,8 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     if (order) {
       await tx.update(simOrders).set({ status: 'executed', statusDetail: `Filled at ${shownPrice(result.executionPrice, dec, p.symbol)}`, positionId: p.id, updatedAt: now })
         .where(eq(simOrders.id, order.id));
-      const armed = await tx.update(simOrders).set({ positionId: p.id, updatedAt: now })
+      // Armed protection triggers from the next tick on (practice) or after the keeper delay (evaluation).
+      const armed = await tx.update(simOrders).set({ positionId: p.id, updatedAt: now, executableFrom: executableFrom(account.stage, f.tick, now) })
         .where(and(eq(simOrders.parentOrderId, order.id), inArray(simOrders.status, PENDING))).returning();
       for (const o of armed) { // the newest protection of each kind replaces the position's previous one
         await tx.update(simOrders).set({ status: 'canceled', statusDetail: 'Replaced by a new price', updatedAt: now }).where(and(
@@ -687,20 +700,25 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     }
   }
 
+  /** The round trip's costs summed from its fills (funding and borrowing are USDC amounts, taken as $1 each). */
   async function recordRoundTrip(tx: Tx, p: PositionRow, closedAt: Date) {
     const fills = await tx.select().from(simFills).where(eq(simFills.positionId, p.id));
-    let size = 0n, fees = 0n, net = 0n, exitSize = 0n, exitValue = 0n;
+    let size = 0n, orderFees = 0n, funding = 0n, borrow = 0n, impact = 0n, net = 0n, exitSize = 0n, exitValue = 0n;
     for (const f of fills) {
       const delta = usd(f.sizeUsd);
       if (f.isIncrease) size += delta;
       else [exitSize, exitValue] = [exitSize + delta, exitValue + delta * usd(f.price)];
-      fees += usd(f.feeUsd) + (micro(f.fundingUsd) + micro(f.borrowUsd)) * MICRO_PER_USD;
+      orderFees += usd(f.feeUsd);
+      funding += micro(f.fundingUsd) * MICRO_PER_USD;
+      borrow += micro(f.borrowUsd) * MICRO_PER_USD;
+      impact += usd(f.priceImpactUsd);
       net += micro(f.realizedPnl ?? '0');
     }
     await tx.insert(closedTrades).values({
       accountId: p.accountId, symbol: p.symbol, side: p.side, venue: 'simulated', openedAt: p.openedAt, closedAt,
       sizeUsd: usdText(size), entryPrice: p.entryPrice, exitPrice: formatFixed(exitSize ? exitValue / exitSize : 0n, 20, 18),
-      feesUsd: usdText(fees), netPnl: microText(net),
+      feesUsd: usdText(orderFees + funding + borrow), orderFeesUsd: usdText(orderFees), fundingUsd: usdText(funding), borrowUsd: usdText(borrow),
+      priceImpactUsd: usdText(impact), netPnl: microText(net),
     });
   }
 

@@ -2,8 +2,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { model, type MarketStatus } from '@props/gmsol-wasm';
 import {
-  PriceBook, buildCatalog, categoryOf, displayDecimals, pairOf, subcategoryOf, type CatalogInput, type FeedState, type KeeperMarket,
+  PriceBook, USD_UNIT, buildCatalog, categoryOf, displayDecimals, pairOf, subcategoryOf, type CatalogInput, type FeedState, type KeeperMarket,
   type KeeperToken, type Pair, type PropsLimits,
 } from '../src/index.ts';
 
@@ -122,4 +123,36 @@ test('price book keeps timestamps monotonic per token', () => {
   assert.equal(book.accept('A', p(10, '3')), true, 'same second, new price');
   assert.equal(book.accept('B', p(1)), true, 'tokens are independent');
   assert.equal(book.accept('A', p(10, '3')), false, 'the newest accepted tick is the reference');
+});
+
+test('rates: the paying side pays the funding factor, the other side receives it scaled by the OI ratio; borrowing falls on the larger side', () => {
+  const { SOL, NVDA } = catalog();
+  // research: SOL shorts held more OI ($1,153,947 vs $1,137,971), so shorts pay funding and longs receive it
+  assert.ok(SOL!.fundingRateHourlyShort! > 0 && SOL!.fundingRateHourlyLong! < 0, `SOL ${SOL!.fundingRateHourlyLong} / ${SOL!.fundingRateHourlyShort}`);
+  const solRatio = Number(SOL!.openInterestShort) / Number(SOL!.openInterestLong);
+  assert.ok(Math.abs(-SOL!.fundingRateHourlyLong! / SOL!.fundingRateHourlyShort! - solRatio) < 1e-4, `|long| = short × OI_short/OI_long (${solRatio})`);
+  assert.notEqual(SOL!.fundingRateHourlyShort, -SOL!.fundingRateHourlyLong!, 'the short rate is not the negative of the long one');
+  // NVDA the other way round: longs held $561 against $235
+  assert.ok(NVDA!.fundingRateHourlyLong! > 0 && NVDA!.fundingRateHourlyShort! < 0);
+  const nvdaRatio = Number(NVDA!.openInterestLong) / Number(NVDA!.openInterestShort);
+  assert.ok(Math.abs(-NVDA!.fundingRateHourlyShort! / NVDA!.fundingRateHourlyLong! - nvdaRatio) < 1e-4, `|short| = long × OI_long/OI_short (${nvdaRatio})`);
+  // Borrowing: SOL's smaller side (longs) is waived, the larger pays; NVDA's pool charges both sides.
+  assert.deepEqual([SOL!.borrowRateHourlyLong, SOL!.borrowRateHourlyShort! > 0], [0, true]);
+  assert.ok(NVDA!.borrowRateHourlyLong! > 0 && NVDA!.borrowRateHourlyShort! > 0);
+});
+
+test('rates: percent per hour from the model\'s per-second factors (1e20 = 100 %), each side with its sign', (t) => {
+  const status: MarketStatus = {
+    fundingRatePerSecondForLong: 10n ** 12n, fundingRatePerSecondForShort: -3n * 10n ** 12n,
+    borrowingRatePerSecondForLong: 0n, borrowingRatePerSecondForShort: 2n * 10n ** 12n,
+    openInterestForLong: 3n * USD_UNIT, openInterestForShort: USD_UNIT, liquidityForLong: USD_UNIT, liquidityForShort: USD_UNIT,
+    poolValueForLong: USD_UNIT, poolValueForShort: USD_UNIT, minCollateralFactorForLong: 0n, minCollateralFactorForShort: 0n,
+  };
+  t.mock.method(model, 'marketStatus', () => status);
+  const { SOL } = catalog();
+  assert.deepEqual(
+    [SOL!.fundingRateHourlyLong, SOL!.fundingRateHourlyShort, SOL!.borrowRateHourlyLong, SOL!.borrowRateHourlyShort],
+    [0.0036, -0.0108, 0, 0.0072], // 1e12 /s × 3600 × 100 / 1e20
+  );
+  assert.deepEqual([SOL!.openInterestLong, SOL!.openInterestShort], ['3', '1']);
 });

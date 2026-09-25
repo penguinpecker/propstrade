@@ -1,10 +1,28 @@
 import { describe, expect, it } from 'vitest';
-import { WATCHLIST_MAX, compactUsd, freshnessLabel, isCurrent, marginFor, marketPrice, percent, pickMarkets, signedUsd, stageRestriction, tierRules, toggleWatchlist, usd, usdBase, validWatchlist } from './data.js';
+import { RATES_TITLE, WATCHLIST_MAX, compactUsd, freshnessLabel, isCurrent, isSolanaAddress, marginFor, marketPrice, percent, pickMarkets, rates, signedUsd, stageRestriction, tierRules, toggleWatchlist, usd, usdBase, validWatchlist } from './data.js';
 
 describe('formatters', () => {
   it('show a dash for values the API reports as unavailable', () => {
     for (const format of [usd, signedUsd, compactUsd, percent]) expect(format(null)).toBe('—');
     expect([usd('1234.5'), signedUsd('-49.86'), signedUsd('0'), compactUsd('142600000'), percent(2.481)]).toEqual(['$1,234.50', '−$49.86', '+$0.00', '$142.6M', '+2.48%']);
+  });
+});
+
+describe('rates', () => {
+  it('shows both sides per hour, funding signed and borrowing unsigned, with the reading guide as the title', () => {
+    expect(rates({ fundingRateHourlyLong: 0.0012, fundingRateHourlyShort: -0.0009, borrowRateHourlyLong: 0.0008, borrowRateHourlyShort: 0 }))
+      .toEqual({ funding: '+0.0012% / -0.0009%', borrow: '0.0008% / 0.0000%', title: RATES_TITLE });
+  });
+  it('dashes a side the server does not give (a catalog from before the short funding rate) and unavailable rates', () => {
+    expect(rates({ fundingRateHourlyLong: 0.0012, borrowRateHourlyLong: null, borrowRateHourlyShort: 0.0001 })).toMatchObject({ funding: '+0.0012% / —', borrow: '— / 0.0001%' });
+  });
+});
+
+describe('isSolanaAddress', () => {
+  it('accepts base58 keys of 32 to 44 characters and nothing else', () => {
+    expect(isSolanaAddress('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v')).toBe(true);
+    expect(isSolanaAddress('1'.repeat(32))).toBe(true);
+    for (const bad of ['', 'PT-002841', '0'.repeat(32), 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1vX', ' EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', '1'.repeat(31)]) expect(isSolanaAddress(bad)).toBe(false);
   });
 });
 
