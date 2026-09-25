@@ -1,13 +1,14 @@
 // The risk keeper's loop (leader only, ARCHITECTURE.md §4.5). Every tick: watch GMTrade's program for upgrades; for each
-// open funded account read the chain, plan the next transaction (rules.ts), send it with the risk authority after
-// confirming leadership, then read and plan again until nothing is left; review payout requests; raise alerts.
+// open funded account (eight at a time) read the chain, plan the next transaction (rules.ts), send it with the risk
+// authority after confirming leadership, then read and plan again until nothing is left; review payout requests; raise
+// alerts.
 import { setTimeout as sleep } from 'node:timers/promises';
 import { PublicKey, type Connection, type Keypair, type TransactionInstruction } from '@solana/web3.js';
 import { and, count, desc, eq, gt, gte, inArray, isNotNull, isNull, max, ne } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Notification } from '@props/shared';
 import {
-  CLOSE_ALL, GMTRADE_PROGRAM_ID, PROPS_VAULT_PROGRAM_ID, decodeGmPosition, enumName, marketConfigPda, traderProfilePda, type ConfigAccount,
+  CLOSE_ALL, GMTRADE_PROGRAM_ID, PROPS_VAULT_PROGRAM_ID, enumName, marketConfigPda, ownerPda, traderProfilePda, type ConfigAccount,
   type PropsVaultClient,
 } from '@props/sdk';
 import type { Db } from '../../db/client.ts';
@@ -18,17 +19,24 @@ import { money } from '../chain/funded.ts';
 import { fundedHref } from '../chain/projector.ts';
 import { enqueue } from '../chain/jobs.ts';
 import { dec, toMicro6, type ChainReader } from '../chain/reader.ts';
-import { fitsInTransaction, sendTransaction, type SendRpc } from '../chain/send.ts';
+import { Expired, NotEnoughSol, Rejected, fitsInTransaction, sendTransaction, type SendRpc } from '../chain/send.ts';
 import { readFundedState, valueFunded, type FundedState } from '../chain/venue.ts';
 import type { Alerts } from './alerts.ts';
 import {
   LINK_WINDOW_MS, exposuresOf, linkedPositions, planStep, programDeploySlot, reviewPayout, upgradeState,
   type AccountView, type Action, type FillRow, type MarketView, type OrderType, type Step, type StepKind,
 } from './rules.ts';
-import { covers, type Schedule } from './sessions.ts';
+import { SCHEDULES, covers } from './sessions.ts';
 
 /** Transactions per account per tick; each is followed by a fresh read, so this only bounds a pathological loop. */
 const MAX_STEPS = 8;
+/**
+ * Funded accounts worked on at once. Each waits on its own confirmations (≥ 1 s per transaction): one at a time, a burst
+ * of 30 breaches took a 61 s tick. A breached account costs ~14 RPC calls, so 8 at once peak near 100 requests/s, twice
+ * the Helius Developer plan's 50/s; web3.js retries a 429 with backoff.
+ */
+// ponytail: fixed concurrency; derive it from the RPC plan's rate limit if 429s show up in a burst.
+const ACCOUNT_CONCURRENCY = 8;
 const CHURN_WINDOW_MS = 3_600_000;
 /** Orders per account per hour that count as churn (each costs GMTrade execution fees paid from the owner's SOL). */
 const CHURN_ALERT_ORDERS = 50;
@@ -39,7 +47,6 @@ const INDEXER_CHECK_EVERY_MS = 60_000;
 const FREE = PublicKey.default;
 /** A forced close must not fail on price: a long decrease sells at no less than 1, a short buys back at no more than u128::MAX. */
 const ANY_PRICE = { long: 1n, short: CLOSE_ALL };
-const SCHEDULES: Record<string, Schedule> = { Stocks: 'nyse', Forex: 'fx' };
 const ORDER_NAMES: Record<OrderType, string> = { market: 'market order', limit: 'limit order', close: 'close order', takeProfit: 'take-profit', stopLoss: 'stop-loss' };
 const GMTRADE_PROGRAM_DATA = PublicKey.findProgramAddressSync([GMTRADE_PROGRAM_ID.toBuffer()], new PublicKey('BPFLoaderUpgradeab1e11111111111111111111111'))[0];
 
@@ -48,7 +55,7 @@ export class LeadershipLost extends Error {}
 
 export interface KeeperDeps {
   db: Db;
-  rpc: SendRpc & Pick<Connection, 'getAccountInfo' | 'getMultipleAccountsInfo' | 'getMultipleAccountsInfoAndContext' | 'getSignaturesForAddress'>;
+  rpc: SendRpc & Pick<Connection, 'getAccountInfo' | 'getMultipleAccountsInfoAndContext' | 'getSignaturesForAddress'>;
   client: PropsVaultClient;
   reader: ChainReader;
   marketdata?: Pick<MarketDataService, 'market' | 'marketState'>;
@@ -98,6 +105,11 @@ export function createKeeper(d: KeeperDeps) {
     const state = await readFundedState(d, funded);
     if (!state) return null;
     const valuation = await valueFunded(d, funded, state);
+    const unvalued = [...new Set(valuation.positions.filter((p) => !p.status).map((p) => p.market.symbol))];
+    if (unvalued.length) {
+      // The stale check sees only the price feed, which can be live while a market's state is missing.
+      d.alerts.send(`value:${funded}`, 'critical', `Keeper cannot value funded account ${funded}: GMTrade's model gave no value for its ${unvalued.join(', ')} position(s) (the log says why: "position could not be valued"), so no stop-out or session guard for it until this clears`);
+    }
     const netValue = new Map(valuation.positions.map((p) => [p.address, p.status?.netValue ?? null]));
     const orderKeys = state.orders.map((o) => o.tracked.order.toBase58());
     const created = new Map(orderKeys.length
@@ -134,8 +146,9 @@ export function createKeeper(d: KeeperDeps) {
       case 'topUp': return client.topUpOwner({ funded: address });
       case 'restrict': return client.restrict({ riskAuthority: risk.publicKey, funded: address, restricted: true });
       case 'markBreached': return client.markBreached({ riskAuthority: risk.publicKey, funded: address });
-      // The program re-checks every existing GMTrade position of the owner PDA as flat.
-      case 'closeFunded': return client.closeFunded({ riskAuthority: risk.publicKey, funded: ref, positions: await client.fetchOwnerPositions(address) });
+      // The program re-checks every GMTrade position of the owner PDA passed as flat; an empty one proves nothing, and
+      // a cancelled or unfilled increase leaves one per market and side: passing those too outgrew the transaction.
+      case 'closeFunded': return client.closeFunded({ riskAuthority: risk.publicKey, funded: ref, positions: await client.fetchOwnerPositions(address, { open: true }) });
       case 'closeCompleted': return client.closeCompletedOrder({ funded: address, order: new PublicKey(a.order) });
       case 'cancel': return client.cancelOrder({ authority: risk.publicKey, funded: ref, order: new PublicKey(a.order) });
       case 'sync': {
@@ -171,12 +184,43 @@ export function createKeeper(d: KeeperDeps) {
     }
     if (!instructions.length) throw new Error(`${step.actions[0]!.type} does not fit in a transaction`);
     const signature = await sendTransaction(rpc, {
-      instructions, signer: risk,
+      instructions, signer: risk, gate,
       beforeSend: async () => {
         if (!(await held())) throw new LeadershipLost('leadership lost before sending');
       },
     });
     return { signature, sent };
+  }
+
+  /**
+   * Accounts run concurrently, but each leadership check and its send pass one at a time: once one finds leadership
+   * gone, nothing more goes out.
+   */
+  let sending: Promise<void> = Promise.resolve();
+  function gate(checkAndSend: () => Promise<void>): Promise<void> {
+    const turn = sending.then(checkAndSend);
+    sending = turn.catch(() => undefined);
+    return turn;
+  }
+
+  /**
+   * A failed step's alert, keyed by its cause: a second, different failure of the same step is raised at once (a
+   * repeat of the same one every 30 min). A transaction that expired unlanded is one alert for the whole keeper.
+   */
+  function alertFailure(funded: string, step: Step, err: unknown) {
+    if (err instanceof Expired) {
+      d.alerts.send('landing', 'critical', `Keeper transactions are not landing before their blockhash expires (the latest: ${step.kind} for funded account ${funded}, ${err.message}): each re-plan pays a higher priority fee, up to its cap; check the RPC and the network`);
+      return;
+    }
+    const urgent = step.kind === 'breach' || step.kind === 'session' || step.kind === 'upgrade';
+    // The owner PDA pays each forced close's accounts; a named account other than it (the risk authority paying the
+    // fee) is in the message itself.
+    const owner = ownerPda(new PublicKey(funded));
+    const sol = err instanceof NotEnoughSol && step.actions.some((a) => a.type === 'close') && (!err.account || err.account.equals(owner))
+      ? ` Its owner PDA ${owner.toBase58()} lacks the SOL a forced close takes: about 0.015 SOL per close (order and escrow rent, which come back, and GMTrade's execution fee). Send it SOL with a plain transfer; it returns to the treasury at close_funded.`
+      : '';
+    d.alerts.send(`failed:${funded}:${step.kind}:${err instanceof Rejected ? err.code : 'error'}`, urgent ? 'critical' : 'warning',
+      `Keeper ${step.kind} transaction for ${funded} failed (${step.detail}): ${(err as Error).message}${sol && `.${sol}`}`);
   }
 
   async function reportSent(step: Step, sent: Action[], read: Read, trader: string, signature: string) {
@@ -195,8 +239,8 @@ export function createKeeper(d: KeeperDeps) {
       });
     }
     // The trader hears of a breach from the indexed AccountBreached event (chain projector).
-    if (step.kind === 'breach') {
-      d.alerts.send(`breach:${funded}`, 'critical', `Funded account ${funded} reached its equity floor: marked breached and closing every open position; it is closed once flat (last transaction ${signature})`);
+    if (sent.some((a) => a.type === 'markBreached')) {
+      d.alerts.send(`breach:${funded}`, 'critical', `Funded account ${funded} reached its equity floor and is marked breached (${signature}): its open positions are closed, those worth nothing by GMTrade's liquidation, and it is closed once flat`);
     }
     if (step.kind === 'closure') {
       d.alerts.send(`closed:${funded}`, 'info', `Breached funded account ${funded} closed: its USDC and SOL are back in the vault and its principal is released (${signature})`);
@@ -238,8 +282,7 @@ export function createKeeper(d: KeeperDeps) {
       const result = await execute(step, read.state, row.address, d.risk, ctx.held).catch((err: unknown) => {
         if (err instanceof LeadershipLost) throw err;
         skip.add(step.kind);
-        const urgent = step.kind === 'breach' || step.kind === 'session' || step.kind === 'upgrade';
-        d.alerts.send(`failed:${row.address}:${step.kind}`, urgent ? 'critical' : 'warning', `Keeper ${step.kind} transaction for ${row.address} failed (${step.detail}): ${(err as Error).message}`);
+        alertFailure(row.address, step, err);
         return null;
       });
       if (result) {
@@ -294,10 +337,8 @@ export function createKeeper(d: KeeperDeps) {
     const funded = new PublicKey(p.fundedAccount);
     const account = await client.fetchFunded(funded);
     if (!account) return;
-    const owned = await client.fetchOwnerPositions(funded);
-    const infos = owned.length ? await rpc.getMultipleAccountsInfo(owned) : [];
-    const flat = account.slots.every((s) => s.marketToken.equals(FREE)) && account.orders.every((o) => o.order.equals(FREE))
-      && infos.every((i) => i?.owner.equals(GMTRADE_PROGRAM_ID) && decodeGmPosition(i.data).sizeInUsd === 0n);
+    const open = await client.fetchOwnerPositions(funded, { open: true });
+    const flat = account.slots.every((s) => s.marketToken.equals(FREE)) && account.orders.every((o) => o.order.equals(FREE)) && !open.length;
     const profile = await client.fetch('traderProfile', traderProfilePda(new PublicKey(trader)));
     const [lastPaid] = await db.select({ at: max(payouts.requestedAt) }).from(payouts)
       .where(and(eq(payouts.fundedAccount, p.fundedAccount), eq(payouts.status, 'paid')));
@@ -389,24 +430,34 @@ export function createKeeper(d: KeeperDeps) {
     const rows = await db.select({ address: fundedAccounts.address, trader: fundedAccounts.trader }).from(fundedAccounts).where(ne(fundedAccounts.status, 'closed'));
     const openBySymbol = new Map<string, number>();
     let active = 0;
-    for (const row of rows) {
-      if (lost.aborted) return;
-      try {
-        const view = await runAccount(row, { config, upgradePending: upgrade.pending, held, market });
-        if (!view) continue;
-        if (view.status === 'active') active++;
-        for (const s of view.slots) {
-          if ((view.positions.get(s.gmPosition)?.size ?? 0n) === 0n) continue;
-          const { symbol } = view.markets.get(s.marketToken)!;
-          openBySymbol.set(symbol, (openBySymbol.get(symbol) ?? 0) + 1);
+    let steppedDown = false;
+    let next = 0;
+    const worker = async () => {
+      while (next < rows.length && !steppedDown && !lost.aborted) {
+        const row = rows[next++]!;
+        try {
+          const view = await runAccount(row, { config, upgradePending: upgrade.pending, held, market });
+          if (!view) continue;
+          if (view.status === 'active') active++;
+          for (const s of view.slots) {
+            if ((view.positions.get(s.gmPosition)?.size ?? 0n) === 0n) continue;
+            const { symbol } = view.markets.get(s.marketToken)!;
+            openBySymbol.set(symbol, (openBySymbol.get(symbol) ?? 0) + 1);
+          }
+        } catch (err) {
+          if (err instanceof LeadershipLost) {
+            steppedDown = true;
+            return;
+          }
+          active++; // unknown: keep an upgrade's restriction pass open
+          d.log.error({ err, funded: row.address }, 'keeper: account pass failed');
+          d.alerts.send(`read:${row.address}`, 'critical', `Keeper cannot read or value funded account ${row.address}: no stop-out, session guard or upgrade restriction for it until this clears (${(err as Error).message})`);
         }
-      } catch (err) {
-        if (err instanceof LeadershipLost) throw err;
-        active++; // unknown: keep an upgrade's restriction pass open
-        d.log.error({ err, funded: row.address }, 'keeper: account pass failed');
-        d.alerts.send(`read:${row.address}`, 'critical', `Keeper cannot read or value funded account ${row.address}: no stop-out, session guard or upgrade restriction for it until this clears (${(err as Error).message})`);
       }
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(ACCOUNT_CONCURRENCY, rows.length) }, worker));
+    if (steppedDown) throw new LeadershipLost('leadership lost before sending');
+    if (lost.aborted) return;
     if (upgrade.pending && !active) {
       const [restricted] = await db.update(gmtradeDeploys).set({ handledAt: new Date() })
         .where(and(eq(gmtradeDeploys.slot, upgrade.slot), isNull(gmtradeDeploys.handledAt))).returning({ at: gmtradeDeploys.handledAt });

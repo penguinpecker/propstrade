@@ -1066,3 +1066,33 @@ Pinocchio evaluated (2026-09-23; measured in a scratch copy, 59/59 LiteSVM tests
   slow, then GMTrade went 'degraded' again at 09:27 IST; the gate pauses the backfill and users keep the copies.
 - Stocks report null funding/borrow and freshness 'unavailable' outside the US session; the ticket renders those
   rows as '—' (checked in the cost-row formatter) rather than $0, so a closed market never shows a false zero cost.
+
+2026-09-25 DEPLOYED 7fde512 (server 87805aa0…, app dpl_2xNSQnwE…): white label (no venue name in anything users see or
+           fetch; "the exchange"), 13 markets without an enabled USDC-only pool unlisted (55 remain; session-closed
+           stocks stay), per-side maxLeverage/maxSize/minCollateralUsd from the exchange's own model on every row, the
+           quote and the engine (placement and fill time), sliders whose labels sit at their values, tab title = market
+           + live price, watchlist shared across tabs, filled stars.
+- Starred stocks "vanished": useSaved kept one copy per tab and never listened to 'storage'; a star in a second tab
+  saved that tab's older list over the first tab's stars. Only the watchlist syncs across tabs (market/stage stay per
+  tab so two tabs can show two charts).
+- A module-level `document.title` read in Trading.jsx broke every node-environment test that imports App.jsx (vitest
+  reported 193/193 passed with 1 FAILED FILE; a grep for "Tests" hid it). Read DOM globals inside effects only, and grep
+  for "Test Files" too.
+
+2026-09-25 Black-swan liquidation campaign (4 attackers: program on both builds in LiteSVM, keeper, sim engine, local
+           rehearsal with a 35% crash and a feed pause; each finding independently re-checked; fixes; gate). Program:
+           no invariant broke on either build in scenarios 1-7, 9, 10 (loss capped at posted collateral, no stranded
+           funds, no USDC created); scenario 8 (a malicious upgraded exchange mid-crash) not built. 16 confirmed
+           server findings, none critical/high, all fixed: keeper works 8 accounts at a time (30 breaches: last marked
+           after 3.2 s, was 59 s), mark_breached always alone, no forced close for positions worth nothing (the exchange
+           refuses insolvent user closes and cancels them at an execution fee; its liquidation closes them), dynamic
+           priority fee (p90 of recent fees, doubles after an expiry), closure/payout pass only positions with a size
+           (was capped at 16/19 accounts incl. empty ones), critical alert when positions cannot be valued, SOL shortage
+           alerts name the owner PDA, alert keys carry the cause, health clears lastError on recovery; sim: one price per
+           market per rules pass (identical accounts no longer end differently), session guard for evaluations (as
+           funded), a position's own stop runs before its liquidation, leader fill/rules steps capped at 4 DB slots
+           (a 300-account storm: 4.0 s, bystander request 17 ms, was 851 ms). Not done: close_empty_position still never
+           sent by the keeper (rent stays locked), churn check counts keeper orders, fee not raised within one blockhash
+           lifetime. Tests: server/test/sim/blackswan.*.test.ts, keeper/test/blackswan.keeper.test.ts, chain/test/send.test.ts.
+- The repo's target/deploy/props_vault.so (Anchor reference) is a 09-23 build that predates 6d05353; the Pinocchio build
+  that deploys is current. Rebuild the Anchor binary before trusting a test:modules run on it.

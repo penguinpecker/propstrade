@@ -103,7 +103,7 @@ export function createJobs(d: JobDeps) {
       if (status !== 'requested') return { permanent: `Payout is ${status}` };
       const account = await client.fetchFunded(request.funded);
       if (!account) return { permanent: 'Funded account not found' };
-      const positions = await client.fetchOwnerPositions(request.funded);
+      const positions = await client.fetchOwnerPositions(request.funded, { open: true });
       return {
         instructions: [await client.approvePayout({ riskAuthority: risk.publicKey, funded: { address: request.funded, account }, payout: address, positions })],
         signer: risk,
@@ -138,8 +138,8 @@ export function createJobs(d: JobDeps) {
       if (account.slots.some((s) => !s.marketToken.equals(PublicKey.default)) || account.orders.some((o) => !o.order.equals(PublicKey.default))) {
         return { permanent: 'The account still has positions or orders: close and cancel them (and sync) first' };
       }
-      // The program re-checks every existing GMTrade position of the owner PDA as flat.
-      const positions = await client.fetchOwnerPositions(address);
+      // The program re-checks every GMTrade position of the owner PDA passed as flat; an empty one proves nothing.
+      const positions = await client.fetchOwnerPositions(address, { open: true });
       return { instructions: [await client.closeFunded({ riskAuthority: risk.publicKey, funded: { address, account }, positions })], signer: risk };
     },
   };

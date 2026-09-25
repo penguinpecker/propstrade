@@ -42,6 +42,9 @@ describe('isCurrent', () => {
   it('moves ended accounts to the past', () => {
     for (const status of ['breached', 'failed', 'closed']) expect(isCurrent({ ...evaluation, status }, [])).toBe(false);
   });
+  it('keeps a breached funded account current while its positions are being closed (closure_pending, "Closing")', () => {
+    expect(isCurrent({ id: 'f1', stage: 'funded', status: 'closure_pending', evidence: {} }, [])).toBe(true);
+  });
 });
 
 describe('usdBase', () => {

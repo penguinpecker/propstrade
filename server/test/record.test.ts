@@ -73,7 +73,7 @@ describe('upstreams', () => {
     expect(u.status('candles')).toMatchObject({ state: 'down', lastError: 'no answer in time', fallback: 'use the record' });
     expect(u.status('candles').since).toBeGreaterThan(0);
     expect(await u.track('candles', async () => 7)).toBe(7);
-    expect(u.status('candles')).toMatchObject({ state: 'ok', since: null });
+    expect(u.status('candles')).toMatchObject({ state: 'ok', since: null, lastError: null }); // as the price feed's: no error while ok
     expect(changes).toEqual(['candles:down', 'candles:ok']);
   });
 });

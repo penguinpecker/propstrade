@@ -177,17 +177,21 @@ export class PropsVaultClient {
     return this.fetch('fundedAccount', address);
   }
 
-  /** All GMTrade Position accounts owned by a funded account's owner PDA (for payout and closure re-checks). */
-  async fetchOwnerPositions(funded: PublicKey): Promise<PublicKey[]> {
+  /**
+   * All GMTrade Position accounts owned by a funded account's owner PDA (for payout and closure re-checks). `open`: only
+   * those with a size. An empty one (every cancelled or unfilled increase leaves one) proves nothing to those checks,
+   * and a transaction has room for only about a dozen.
+   */
+  async fetchOwnerPositions(funded: PublicKey, { open = false } = {}): Promise<PublicKey[]> {
     const accounts = await this.connection.getProgramAccounts(GMTRADE_PROGRAM_ID, {
-      dataSlice: { offset: 0, length: 0 },
+      dataSlice: { offset: POSITION_LAYOUT.sizeInUsd, length: open ? 16 : 0 },
       filters: [
         { dataSize: POSITION_LAYOUT.length },
         { memcmp: { offset: 0, bytes: btoa(String.fromCharCode(...POSITION_DISCRIMINATOR)), encoding: 'base64' } },
         { memcmp: { offset: POSITION_LAYOUT.owner, bytes: ownerPda(funded).toBase58() } },
       ],
     });
-    return accounts.map((a) => a.pubkey);
+    return accounts.filter((a) => !open || a.account.data.some((b) => b !== 0)).map((a) => a.pubkey);
   }
 
   // ---------- admin ----------

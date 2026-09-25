@@ -36,7 +36,7 @@ export function createUpstreams(fallbacks: Record<string, string>, onChange: (na
       try {
         const value = await call();
         const recovered = r.failures >= DOWN_AFTER;
-        Object.assign(r, { failures: 0, since: null, lastOkAt: Date.now(), latencyMs: Date.now() - started });
+        Object.assign(r, { failures: 0, since: null, lastOkAt: Date.now(), lastError: null, latencyMs: Date.now() - started });
         if (recovered) onChange(name, status(name));
         return value;
       } catch (err) {

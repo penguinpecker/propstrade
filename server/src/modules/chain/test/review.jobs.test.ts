@@ -9,7 +9,7 @@ import { Keypair, PublicKey, VersionedTransaction } from '@solana/web3.js';
 import BN from 'bn.js';
 import bs58 from 'bs58';
 import { eq, sql } from 'drizzle-orm';
-import { PROPS_VAULT_PROGRAM_ID, PropsVaultClient } from '@props/sdk';
+import { GMTRADE_PROGRAM_ID, PROPS_VAULT_PROGRAM_ID, PropsVaultClient } from '@props/sdk';
 import { chainJobs, programEvents } from '../../../db/schema.ts';
 import { createJobs, enqueue } from '../jobs.ts';
 import { encodeAccount, freshDb, silentLog, simStub, sealer } from './support.ts';
@@ -103,6 +103,61 @@ test('a job whose own transaction failed completes with the transaction that did
   await jobs.runDue();
   const [job] = await t.db.select().from(chainJobs).where(eq(chainJobs.subject, result.evaluation));
   assert.deepEqual([job!.status, job!.signature, recorded], ['confirmed', 'recordedSig', [[result.evaluation, 'recordedSig']]]);
+});
+
+test('approve_payout and close_funded pass only the owner PDA\'s positions with a size: every cancelled or unfilled increase leaves an empty one, and 25 of them do not fit a transaction', async () => {
+  const funded = Keypair.generate().publicKey;
+  const payout = Keypair.generate().publicKey;
+  // 25 empty Position accounts of the owner PDA and one with a size (GMTrade's data, sliced as asked).
+  const owned = Array.from({ length: 26 }, (_, i) => ({ pubkey: Keypair.generate().publicKey, size: i === 25 ? 1n : 0n }));
+  const sent: string[] = [];
+  const rpc = {
+    async getProgramAccounts(_program: PublicKey, config: { dataSlice: { offset: number; length: number } }) {
+      return owned.map((p) => {
+        const data = Buffer.alloc(16);
+        data.writeBigUInt64LE(p.size);
+        return { pubkey: p.pubkey, account: { data: data.subarray(0, config.dataSlice.length), owner: GMTRADE_PROGRAM_ID, lamports: 1, executable: false } };
+      });
+    },
+    async getLatestBlockhash() {
+      return { blockhash: Keypair.generate().publicKey.toBase58(), lastValidBlockHeight: 1_000 };
+    },
+    async simulateTransaction() {
+      return { context: { slot: 1 }, value: { err: null, logs: [], unitsConsumed: 50_000 } };
+    },
+    async sendRawTransaction(raw: Uint8Array) {
+      const signature = bs58.encode(VersionedTransaction.deserialize(raw).signatures[0]!);
+      sent.push(signature);
+      return signature;
+    },
+    async getSignatureStatuses() {
+      return { context: { slot: 2 }, value: [{ slot: 2, confirmations: 1, err: null, confirmationStatus: 'confirmed' as const }] };
+    },
+    async getBlockHeight() {
+      return 10;
+    },
+  };
+  const client = new PropsVaultClient(rpc as never);
+  const account = { trader: Keypair.generate().publicKey, status: { breached: {} }, slots: [], orders: [] };
+  client.fetch = (async (name: string) => (name === 'payoutRequest' ? { status: { requested: {} }, funded } : null)) as never;
+  client.fetchFunded = (async () => account) as never;
+  const passed: string[][] = [];
+  for (const name of ['approvePayout', 'closeFunded'] as const) {
+    const build = client[name].bind(client) as (p: { positions?: PublicKey[] }) => Promise<unknown>;
+    (client as unknown as Record<string, unknown>)[name] = (p: { positions?: PublicKey[] }) => {
+      passed.push(p.positions?.map(String) ?? []);
+      return build(p);
+    };
+  }
+  const jobs = createJobs({ db: t.db, rpc: rpc as never, client, log: silentLog, sealer, keys: { risk: Keypair.generate() } });
+  await enqueue(t.db, sealer, 'approve_payout', payout.toBase58(), { payout: payout.toBase58() });
+  await enqueue(t.db, sealer, 'close_funded', `close:${funded.toBase58()}`, { funded: funded.toBase58() });
+  await jobs.runDue();
+  const rows = await t.db.select().from(chainJobs).where(sql`${chainJobs.subject} in (${payout.toBase58()}, ${`close:${funded.toBase58()}`})`);
+  console.log(JSON.stringify({ jobs: rows.map((r) => [r.kind, r.status, r.lastError]), passed: passed.map((p) => p.length) }));
+  assert.deepEqual(passed, [[owned[25]!.pubkey.toBase58()], [owned[25]!.pubkey.toBase58()]], 'the one position with a size is passed (the program refuses it: not flat); the empty ones are not');
+  assert.deepEqual(rows.map((r) => r.status).sort(), ['confirmed', 'confirmed'], 'both transactions fit and were sent');
+  assert.equal(sent.length, 2);
 });
 
 function evaluationData(): Buffer {
