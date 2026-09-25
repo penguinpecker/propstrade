@@ -135,3 +135,6 @@
 :root[data-theme="dark"] .spinner { border-color:#4d395f; border-top-color:var(--purple); }
 :root[data-theme="dark"] .order-panel.mobile-visible { border-color:#584268; box-shadow:0 15px 70px rgba(0,0,0,.6); }
 @media(max-width:800px){.header-end>.theme-toggle{display:flex}}
+:root[data-theme="dark"] .graph-axis { color:var(--muted); }
+:root[data-theme="dark"] .toggle::before { background:#51465e; }
+:root[data-theme="dark"] .toggle.checked::before { background:var(--purple); }
