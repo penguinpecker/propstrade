@@ -22,7 +22,7 @@ export function IndicatorsDialog({ studies, onAdd, onClose }) {
       {!rows.length && <Empty title="No matching indicator">Try a name such as RSI or moving average.</Empty>}
     </div>
     {full && <Notice tone="amber">{`The chart holds up to ${MAX_STUDIES} indicators. Remove one to add another.`}</Notice>}
-    <Notice>Volume-based indicators (Volume, VWAP, OBV, MFI) are not offered: GMTrade's candles carry no trading volume.</Notice>
+    <Notice>Volume-based indicators (Volume, VWAP, OBV, MFI) are not offered: these candles carry no trading volume.</Notice>
   </Dialog>;
 }
 

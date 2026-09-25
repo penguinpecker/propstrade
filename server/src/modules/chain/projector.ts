@@ -39,7 +39,7 @@ export const LEDGER = {
 /** Plain-English reasons for `reject_payout` reason codes (the admin API and the keeper use only these codes). */
 export const PAYOUT_REJECTION_REASONS: Record<number, string> = {
   1: 'Open positions or orders were found at review',
-  2: 'Requested profit does not match the account\'s GMTrade trade history',
+  2: 'Requested profit does not match the account\'s exchange trade history',
   3: 'Opposite or correlated positions were found across accounts',
   4: 'Identity review is not complete',
   5: 'Trading broke the account terms',
@@ -145,7 +145,7 @@ export async function project(tx: Tx, ev: VaultEvent, eventIndex: number, info: 
       await activity(e.funded, {
         type: byRisk ? 'risk' : 'order', symbol: m.symbol, ts: at(e.ts), amountUsd: closeAll ? null : sizeUsd,
         title: byRisk ? `Risk service placed a close order on ${side(e.isLong)} ${m.symbol}` : `${side(e.isLong)} ${m.symbol} ${what} placed`,
-        detail: isIncrease ? `Size ${sizeUsd} USD with ${micro(e.collateral)} USDC collateral, sent to GMTrade.` : closeAll ? 'Closes the whole position on GMTrade.' : `Reduces the position by ${sizeUsd} USD on GMTrade.`,
+        detail: isIncrease ? `Size ${sizeUsd} USD with ${micro(e.collateral)} USDC collateral, sent to the exchange.` : closeAll ? 'Closes the whole position on the exchange.' : `Reduces the position by ${sizeUsd} USD on the exchange.`,
       });
       return [];
     }
@@ -178,7 +178,7 @@ export async function project(tx: Tx, ev: VaultEvent, eventIndex: number, info: 
         updatedAt: at(e.ts),
       }).where(eq(gmOrders.address, e.order));
       await activity(e.funded, {
-        type: 'order', symbol: order.symbol, ts: at(e.ts), title: `${order.side} ${order.symbol} order updated`, detail: 'New order terms sent to GMTrade.',
+        type: 'order', symbol: order.symbol, ts: at(e.ts), title: `${order.side} ${order.symbol} order updated`, detail: 'New order terms sent to the exchange.',
       });
       return [];
     }
@@ -192,7 +192,7 @@ export async function project(tx: Tx, ev: VaultEvent, eventIndex: number, info: 
       await activity(e.funded, {
         type: byRisk ? 'risk' : 'cancel', symbol: order?.symbol, ts: at(e.ts),
         title: `${order ? `${order.side} ${order.symbol} ` : ''}order cancelled${byRisk ? ' by the risk service' : ''}`,
-        detail: 'The order was withdrawn from GMTrade; its collateral and deposit returned to the account.',
+        detail: 'The order was withdrawn from the exchange; its collateral and deposit returned to the account.',
       });
       return [];
     }

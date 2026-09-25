@@ -68,7 +68,7 @@ const NOW = 1_700_000_000_000; // when the saved-candle tests run: 800 s into th
 const LAST = 1_699_999_200;
 /** `n` hourly bars ending at LAST, as a fetch of the current window returns them. */
 const bars = (n: number) => Array.from({ length: n }, (_, i) => ({ time: LAST - (n - 1 - i) * 3600, open: 100 + i, high: 101 + i, low: 99 + i, close: 100.5 + i }));
-const live = (candles = bars(3)): CandlesResponse => ({ symbol: 'BTC', interval: '1h', candles, source: 'gmtrade', freshness: 'live' });
+const live = (candles = bars(3)): CandlesResponse => ({ symbol: 'BTC', interval: '1h', candles, source: 'venue', freshness: 'live' });
 
 describe('saved candles', () => {
   beforeEach(() => vi.useFakeTimers({ now: NOW }));
@@ -79,7 +79,7 @@ describe('saved candles', () => {
     writeCandleSnapshot('BTC', '1h', live(bars(SNAPSHOT_BARS + 20).map(b => ({ ...b, volume: 5, onclick: 'x' }))), storage);
     const saved = readCandleSnapshot('BTC', '1h', storage);
     expect(saved?.at).toBe(NOW);
-    expect(saved?.response).toEqual({ symbol: 'BTC', interval: '1h', candles: bars(SNAPSHOT_BARS + 20).slice(-SNAPSHOT_BARS), source: 'gmtrade', freshness: 'live' });
+    expect(saved?.response).toEqual({ symbol: 'BTC', interval: '1h', candles: bars(SNAPSHOT_BARS + 20).slice(-SNAPSHOT_BARS), source: 'venue', freshness: 'live' });
     expect(readCandleSnapshot('BTC', '4h', storage)).toBeNull();
     expect(readCandleSnapshot('ETH', '1h', storage)).toBeNull();
   });

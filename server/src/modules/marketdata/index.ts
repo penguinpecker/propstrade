@@ -14,7 +14,7 @@ import { toUnitPrice } from '@props/sdk';
 import { z } from 'zod';
 import { parse } from '../../errors.ts';
 import { adminAuth } from '../../routes/admin.ts';
-import { withPosition } from '../sim/model.ts';
+import { plainRefusal, withPosition } from '../sim/model.ts';
 import type { MarketDataService, MarketState, ModuleContext } from '../types.ts';
 import { fetchAllowlist, type MarketConfigLimits } from './allowlist.ts';
 import { covers, createHistoryStore, type CandleWindow } from './history.ts';
@@ -30,7 +30,6 @@ const DEFAULT_LIMITS: Record<MarketCategory, { maxLeverage: number; closedMaxLev
 };
 const NOT_ENABLED_YET = 'Not yet enabled for funded trading';
 const NOT_ALLOWLISTED = 'Not available for funded trading';
-const NO_USDC_POOL = 'Not available for funded trading: GMTrade has no USDC-only pool for this market';
 
 const PRICE_FLUSH_MS = 100; // at most 10 'price' events per second, each carrying only the symbols whose price moved
 const MAX_CANDLES = 2_000;
@@ -106,8 +105,9 @@ const samePrice = (a: PriceTick, b: PriceTick) => a.min === b.min && a.max === b
 
 /** How far a figure the app shows must move, since the row was last sent, for the row to be sent again: the 24h change
  *  and the four hourly rates (funding and borrowing, each side) by their display precision (percent with 2 and 4
- *  decimals), a USD figure (volume, OI, capacity, pool liquidity) by 1 % (shown compact, "$1.2M", so a smaller move is
- *  rarely visible). Every other field (session, freshness, tradable, leverage, pools...) counts on any change; price
+ *  decimals), a USD figure (volume, OI, capacity, pool liquidity, the largest new position per side) by 1 % (shown
+ *  compact, "$1.2M", so a smaller move is rarely visible; the engine checks orders against the current figure). Every
+ *  other field (session, freshness, tradable, leverage per side, min collateral, pools...) counts on any change; price
  *  and updatedAt travel in the ticks. Measured 2026-09-25: without this, OI, capacity and liquidity drift re-sent all
  *  68 rows every 5 s. */
 const ROW_STEPS: Partial<Record<keyof Market, { abs: number } | { rel: number } | 'ignored'>> = {
@@ -116,6 +116,7 @@ const ROW_STEPS: Partial<Record<keyof Market, { abs: number } | { rel: number } 
   fundingRateHourlyLong: { abs: 0.0001 }, fundingRateHourlyShort: { abs: 0.0001 }, borrowRateHourlyLong: { abs: 0.0001 }, borrowRateHourlyShort: { abs: 0.0001 },
   volume24h: { rel: 0.01 }, openInterestLong: { rel: 0.01 }, openInterestShort: { rel: 0.01 },
   capacityLong: { rel: 0.01 }, capacityShort: { rel: 0.01 }, poolLiquidity: { rel: 0.01 },
+  maxSizeLong: { rel: 0.01 }, maxSizeShort: { rel: 0.01 },
 };
 
 /** Whether the app would show `next` differently from `last`, the row it was last sent (see ROW_STEPS). */
@@ -234,7 +235,7 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
 
   function send(reply: FastifyReply, err: unknown) {
     if (!(err instanceof HttpError)) ctx.log.warn({ err }, 'marketdata upstream request failed');
-    const e = err instanceof HttpError ? err : new HttpError(502, 'upstream_unavailable', 'GMTrade data is unavailable right now');
+    const e = err instanceof HttpError ? err : new HttpError(502, 'upstream_unavailable', 'Market data is unavailable right now');
     const body: ApiError = { error: { code: e.code, message: e.message } };
     return reply.code(e.status).headers(e.headers).send(body);
   }
@@ -261,9 +262,8 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     if (rewrite || (isSettled && list.length)) history.put({ symbol, res, start: w.start, end: w.end, candles: list, settled: isSettled, at: Date.now() });
   }
 
-  const limits = ({ category, marketToken, pureUsdc }: { category: MarketCategory; marketToken: string; pureUsdc: boolean }): PropsLimits => {
+  const limits = ({ category, marketToken }: { category: MarketCategory; marketToken: string }): PropsLimits => {
     const defaults = DEFAULT_LIMITS[category];
-    if (!pureUsdc) return { tradable: false, unavailableReason: NO_USDC_POOL, ...defaults };
     if (!programId) return { tradable: false, unavailableReason: NOT_ENABLED_YET, ...defaults };
     const config = allowlist.get(marketToken);
     if (!config?.enabled) return { tradable: false, unavailableReason: NOT_ALLOWLISTED, ...defaults };
@@ -304,7 +304,7 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     if (!started) throw new HttpError(503, 'unavailable', 'market data is starting');
     const row = current().find((r) => r.symbol === symbol.toUpperCase());
     const pool = row && feed.markets.get(row.marketToken);
-    if (!row || !pool) throw new HttpError(404, 'not_found', `unknown market ${symbol}`);
+    if (!row || !pool) throw new HttpError(404, 'unknown_market', `unknown market ${symbol}`);
     return { row, pool };
   }
 
@@ -625,7 +625,7 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     }
     const key = candleKey(row.symbol, res, { start, end });
     const cached = candleCache.get(key);
-    const base = { symbol: row.symbol, interval, source: source === 'record' ? 'record' as const : 'gmtrade' as const };
+    const base = { symbol: row.symbol, interval, source: source === 'record' ? 'record' as const : 'venue' as const };
     if (cached && Date.now() - cached.at < cached.ttl) return { ...base, candles: cached.candles, freshness: 'live' };
     let list: Candle[];
     let freshness: DataFreshness = 'live';
@@ -659,7 +659,7 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     if ((w.end - w.start) / res + 1 > MAX_CANDLES) throw badRequest(`at most ${MAX_CANDLES} candles per request`);
     const key = candleKey(row.symbol, res, w);
     const cached = candleCache.get(key);
-    const base = { symbol: row.symbol, interval, source: 'gmtrade' as const };
+    const base = { symbol: row.symbol, interval, source: 'venue' as const };
     if (cached && Date.now() - cached.at < cached.ttl) return { ...base, candles: cached.candles, freshness: 'live' };
     // A copy answers at once: this window's expired entry or the series' latest window (the bucket before this one,
     // when the key has just rotated), whichever GMTrade returned last. It is 'live' for a settled window it reaches
@@ -702,7 +702,7 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     // latest window waits first for the pre-warm batch GMTrade is answering, if any (it fills this series, and this
     // fetch queues behind it); a settled window only for its own fetch, and not at all while GMTrade is down (queued
     // behind the batch, a history scroll took 14-15 s to its 503 during an outage, measured 2026-09-25).
-    const unavailable = () => new HttpError(503, 'unavailable', 'GMTrade candles are unavailable right now', { 'retry-after': '5' });
+    const unavailable = () => new HttpError(503, 'unavailable', 'Candles are unavailable right now', { 'retry-after': '5' });
     if (!w.latest && upstreams.status('candles').state === 'down') throw unavailable();
     const fetching = refresh();
     try {
@@ -792,14 +792,15 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
       if (limit <= 0n) throw badRequest('limitPrice must be above zero');
       input = { ...live, prices: { ...live.prices, index: { min: limit, max: limit } } };
     }
+    const collateralAmount = collateral ?? size / input.prices.short.min + 1n;
     let result;
     try {
       result = model.simulateIncrease({
-        market: input, isLong: side === 'Long', collateralToken: pool.meta!.shortToken.pubkey,
-        collateralAmount: collateral ?? size / input.prices.short.min + 1n, sizeDeltaUsd: size,
+        market: input, isLong: side === 'Long', collateralToken: pool.meta!.shortToken.pubkey, collateralAmount, sizeDeltaUsd: size,
       });
     } catch (err) {
-      throw new HttpError(422, 'rejected_by_venue', `GMTrade would reject this order: ${(err as Error).message}`);
+      // In the engine's words for the same refusal, so the ticket can say why before the order is sent.
+      throw new HttpError(422, 'rejected_by_venue', plainRefusal(err, row, side, size, collateralAmount) ?? `The exchange would reject this order: ${(err as Error).message}`);
     }
     // The position's status in the pool it would then be part of; null when the model cannot value it there (the
     // conservative fee factor stands in for the close fee: negative-impact, the larger of the two).
@@ -823,6 +824,8 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
       hourlyCostUsd: hourlyPct === null ? null : usdString((size * BigInt(Math.round(hourlyPct * 1e12))) / (100n * 10n ** 12n)),
       liquidationPrice: status?.liquidationPrice == null ? null : priceString(status.liquidationPrice, meta.decimals, meta.precision),
       platformFeeUsd: '0', // Props.trade charges no fee per order (AppConfig.orderFeeBps, when it exists, goes here)
+      maxSizeUsd: side === 'Long' ? row.maxSizeLong : row.maxSizeShort,
+      maxLeverage: side === 'Long' ? row.maxLeverageLong : row.maxLeverageShort,
     };
   }
 
@@ -902,7 +905,7 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     app.put<{ Params: { symbol: string } }>('/v1/test/prices/:symbol', { onRequest: adminAuth(ctx.config.ADMIN_API_TOKEN) }, async (req, reply) => {
       const { price } = parse(PinBody, req.body);
       const symbol = req.params.symbol.toUpperCase();
-      if (!started || !bySymbol.has(symbol)) return send(reply, new HttpError(404, 'not_found', `unknown market ${symbol}`));
+      if (!started || !bySymbol.has(symbol)) return send(reply, new HttpError(404, 'unknown_market', `unknown market ${symbol}`));
       if (price === null) pinned.delete(symbol);
       else pinned.set(symbol, price);
       return tickFor(symbol) ?? null;

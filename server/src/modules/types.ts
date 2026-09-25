@@ -42,7 +42,7 @@ export interface KeeperStatus {
    * The last GMTrade program upgrade seen: deploy slot, when noticed, when every active account had been restricted,
    * and when an operator acknowledged the new release as reviewed (until then accounts stay restricted).
    */
-  gmtradeUpgrade: { slot: number; detectedAt: number; restrictedAt: number | null; acknowledgedAt: number | null } | null;
+  venueUpgrade: { slot: number; detectedAt: number; restrictedAt: number | null; acknowledgedAt: number | null } | null;
 }
 
 /** Read side of one stage family. The accounts router (chain module) merges providers and dispatches by stage. */

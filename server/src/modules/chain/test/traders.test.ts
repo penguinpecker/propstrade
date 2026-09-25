@@ -154,8 +154,9 @@ test('a trader by wallet: accounts at every stage, open positions, the last 50 t
   assert.ok(body.accounts.every((a) => typeof a.createdAt === 'number'));
   assert.deepEqual(body.positions, [position]);
   assert.deepEqual(body.trades.map((x) => [x.id, x.venue, x.orderFeesUsd, x.fundingUsd, x.borrowUsd, x.priceImpactUsd]), [
-    ['t-new', 'simulated', '2', '0.3', '0.2', '-0.05'], ['11111111-1111-4111-8111-111111111111', 'gmtrade', '2.4', '0.7', '0.5', '0.1'], ['t-old', 'simulated', '2', '0.3', '0.2', '-0.05'],
+    ['t-new', 'simulated', '2', '0.3', '0.2', '-0.05'], ['11111111-1111-4111-8111-111111111111', 'exchange', '2.4', '0.7', '0.5', '0.1'], ['t-old', 'simulated', '2', '0.3', '0.2', '-0.05'],
   ]);
+  assert.doesNotMatch(JSON.stringify(body), /gmtrade/i, 'white label: the public record never names the venue');
   assert.deepEqual(body.payouts.map((p) => [p.id, p.status, p.amountUsd, p.paidAt, p.signature]), [
     [ids.requested, 'requested', '80', null, null], [ids.paid, 'paid', '80', 1_700_000_010_000, 'paySig'],
   ]);

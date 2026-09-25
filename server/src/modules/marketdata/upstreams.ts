@@ -7,12 +7,13 @@ export type { UpstreamStatus };
 /** Consecutive failures that make a source 'down' (fewer are 'degraded'). */
 const DOWN_AFTER = 3;
 
-/** Why a call failed, in words for the health report. */
+/** Why a call failed, in words for the health report, which is public: without the service's URL (it names the venue
+ *  and may carry a key) and without the venue's name. */
 export function why(err: unknown): string {
   const e = err as { name?: string; message?: string; cause?: { code?: string } } | undefined;
   if (e?.name === 'TimeoutError' || e?.name === 'AbortError' || /no answer within/.test(e?.message ?? '')) return 'no answer in time';
   if (e?.cause?.code) return `network error (${e.cause.code})`;
-  return String(e?.message ?? err).slice(0, 200);
+  return String(e?.message ?? err).replace(/[a-z][\w+.-]*:\/\/\S+?(:\s|\s|$)/gi, '').replace(/gmtrade/gi, 'exchange').slice(0, 200);
 }
 
 export function createUpstreams(fallbacks: Record<string, string>, onChange: (name: string, status: UpstreamStatus) => void) {

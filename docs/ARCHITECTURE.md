@@ -39,7 +39,7 @@ If implementation proves a statement here wrong, fix the code to the facts AND u
 | Payout | when flat (no open positions, no pending orders), min 50 USDC trader share, reviewed by risk service, paid in USDC to the trader's wallet; account continues, allowance resets to L | |
 | Funded accounts per person | 1 active (enforced by `IdentityLock`) | KYC authority sets identity; v1 = manual review |
 | Order types | Market, Limit (increase); Take-profit (LimitDecrease), Stop-loss (StopLossDecrease) | GMTrade has no stop-entry: the "Stop" entry tab is removed |
-| Tradable markets | GMTrade **pure USDC-USDC** markets only, on the allowlist (`MarketConfig.enabled`) | All 68 markets are listed and browsable; non-allowlisted ones show "Not available for funded trading" |
+| Tradable markets | GMTrade **pure USDC-USDC** markets only, on the allowlist (`MarketConfig.enabled`) | Every asset with a pure USDC-USDC pool is listed and browsable (55 of GMTrade's 68 on 2026-09-25; the rest could never be traded here, so they are not listed); non-allowlisted ones show "Not available for funded trading" |
 | Sessions | stock/ETF and FX markets close outside hours; risk service closes positions above the closed-market leverage cap before the close; decreases are impossible while closed | |
 | Practice | free, 25K virtual, same engine and rules, reset anytime, never paid out | |
 | Acceptable price | every order carries one; default slippage 0.5% (user-editable ≤ 5%) | protects against GMTrade's scheduled price-impact windows |
@@ -203,7 +203,15 @@ loops run only while holding a Postgres advisory lock (`pg_try_advisory_lock`).
 ### 4.1 marketdata
 - Market catalog = GMTrade keeper GraphQL `markets` + `tokens` (+ categories) joined with market-info
   `/api/v2/solana/pairs` (24h volume, change, OI, funding/borrow, capacity) and our `MarketConfig` allowlist.
-  All 68 markets (93 pools); one row per index asset, preferring the pure USDC-USDC pool.
+  One row per index asset with an enabled pure USDC-USDC pool, which it trades on (55 of 68 assets on 2026-09-25: AAVE,
+  APE, ARB, GMX, LIT, NEAR, ONDO, TAO, TON, VVV, WLD, XMR, ZEC have none and are not listed). Each row carries what the
+  venue accepts for a new position per side right now (`maxLeverageLong/Short`, `maxSizeLong/Short`, `minCollateralUsd`,
+  from the pool's model status and config); the sim engine checks orders against them at placement and at fill.
+  A side's size room is the lower of its reserve headroom (a long's net of the largest positive price impact it could
+  get, which the venue reserves too) and max open interest less its open interest in USD; rows are re-sent when a size
+  moves 1 %, and the engine checks the current row. What the venue's model still refuses within those limits (fees
+  against the minimum margin, its own leverage limit) is worded plainly by the engine and by `/v1/quote`, and the order
+  ticket shows the quote's refusal under the size before anything is sent.
 - Live prices: keeper WS `wss://keeper-prod-api.gmtrade.xyz/graphql-ws` tokens subscription; drop any tick older
   than the last seen for that token; `isOpen` = session state. Fallback poll over HTTP. Stale threshold 20 s.
 - Candles: `price-candle-mainnet.gmtrade.xyz/graphql` with server cache: native 5m 15m 1h 4h 1D; the rest rolled up on

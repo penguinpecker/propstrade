@@ -47,11 +47,11 @@ describe('GET /v1/health', () => {
   });
 
   it('includes the keeper status when the keeper module runs', async () => {
-    const gmtradeUpgrade = { slot: 7, detectedAt: 1_000, restrictedAt: null, acknowledgedAt: null };
-    const k = await makeApp({ services: { keeper: { status: () => ({ leader: true, lastTickAt: 2_000, gmtradeUpgrade }) } } });
+    const venueUpgrade = { slot: 7, detectedAt: 1_000, restrictedAt: null, acknowledgedAt: null };
+    const k = await makeApp({ services: { keeper: { status: () => ({ leader: true, lastTickAt: 2_000, venueUpgrade }) } } });
     try {
       const res = await k.app.inject({ method: 'GET', url: '/v1/health' });
-      expect(res.json()).toMatchObject({ status: 'ok', keeper: { leader: true, lastTickAt: 2_000, gmtradeUpgrade } });
+      expect(res.json()).toMatchObject({ status: 'ok', keeper: { leader: true, lastTickAt: 2_000, venueUpgrade } });
     } finally {
       await k.close();
     }

@@ -457,7 +457,7 @@ the Node provider (without it Railpack sees the root `Cargo.toml` and builds the
    ```sh
    curl -s https://api.<DOMAIN>/v1/health
    # {"status":"ok","db":"ok","modules":{"marketdata":"running","sim":"running","chain":"running","keeper":"running"},
-   #  "time":…,"keeper":{"leader":true,"lastTickAt":<within the last few seconds>,"gmtradeUpgrade":null}}
+   #  "time":…,"keeper":{"leader":true,"lastTickAt":<within the last few seconds>,"venueUpgrade":null}}
    ```
 
 Rehearsal note: the exact install (`npm ci` at the root), pre-deploy and start commands were run from a clean copy of

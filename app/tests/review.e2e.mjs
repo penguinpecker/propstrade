@@ -48,7 +48,7 @@ try {
     await page.keyboard.press('Escape'); // or the dialog's close button: both keep the typed value
     await page.getByLabel('Order size in USD').fill('1000');
     await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
-    await ticket.getByText('BTC long executed on GMTrade.').waitFor({ timeout: 10_000 });
+    await ticket.getByText('BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
     const [open] = opens();
     const mid = toUnitPrice(state.markets.find(m => m.symbol === 'BTC').price, 8);
     const tolerance = Number(BigInt(open.data.args.acceptablePrice.toString()) * 10_000n / mid) / 100 - 100;
@@ -76,7 +76,7 @@ try {
     });
     await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
     await ticket.getByRole('button', { name: 'Awaiting execution…' }).waitFor({ timeout: 10_000 });
-    await ticket.getByText('BTC long executed on GMTrade.').waitFor({ timeout: 10_000 });
+    await ticket.getByText('BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
     await page.unroute(`${stub.url}/rpc`);
     assert.equal(dropped, 1, 'the send was not intercepted');
     assert.equal(opens().length, before + 1, 'the order was sent more or less than once');

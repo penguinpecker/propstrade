@@ -19,13 +19,13 @@ const day = (d: Date) => d.toISOString().slice(0, 10);
 
 const EVENT_TITLES: Record<string, string> = {
   evaluationPurchased: 'Evaluation purchased', evaluationResolved: 'Evaluation result recorded', fundedActivated: 'Funded account activated',
-  orderRequested: 'GMTrade order placed', protectionSet: 'Take-profit or stop-loss placed', orderUpdated: 'GMTrade order updated',
-  orderCancelled: 'GMTrade order cancelled', completedOrderClosed: 'Finished GMTrade order closed', synced: 'Account synced with GMTrade',
+  orderRequested: 'Exchange order placed', protectionSet: 'Take-profit or stop-loss placed', orderUpdated: 'Exchange order updated',
+  orderCancelled: 'Exchange order cancelled', completedOrderClosed: 'Finished exchange order closed', synced: 'Account synced with the exchange',
   ownerToppedUp: 'Network fee float topped up', payoutRequested: 'Payout requested', payoutCancelled: 'Payout request cancelled',
   payoutPaid: 'Payout paid', payoutRejected: 'Payout rejected', accountRestricted: 'Account restriction changed', accountBreached: 'Loss limit reached',
   accountClosed: 'Funded account closed', capitalDeposited: 'Capital deposited', capitalWithdrawn: 'Capital withdrawn', feesSwept: 'Fees moved to capital',
   configChanged: 'Program settings changed', identitySet: 'Identity verified', solTreasuryWithdrawn: 'SOL treasury withdrawal',
-  emptyPositionClosed: 'Empty GMTrade position closed', claimableCollected: 'GMTrade claimable USDC collected',
+  emptyPositionClosed: 'Empty exchange position closed', claimableCollected: 'Exchange claimable USDC collected',
 };
 
 export function createVerify(d: { db: Db; rpc: Pick<Connection, 'getAccountInfo' | 'getTransaction'>; programId: PublicKey; cluster: AppConfig['cluster'] }) {
@@ -61,7 +61,7 @@ export function createVerify(d: { db: Db; rpc: Pick<Connection, 'getAccountInfo'
         title: `Evaluation ${e.status === 'failed' ? 'failed' : 'passed'}`, state: 'confirmed', ...tx(e.resultSignature, undefined, e.resolvedAt),
         description: `Result recorded with final equity ${dec(e.finalEquity ?? '0')} USD and trades root ${e.tradesRoot}.`,
         establishes: 'A Props.trade risk authority recorded the result onchain. The evaluation\'s trades were simulated off-chain against live '
-          + 'GMTrade prices and are not onchain. The trades root is a SHA-256 Merkle root over the evaluation\'s canonical fill list, which '
+          + 'market prices and are not onchain. The trades root is a SHA-256 Merkle root over the evaluation\'s canonical fill list, which '
           + 'anyone can download here and recompute it from. A match shows the fill list was not changed after the result was recorded; it '
           + 'does not show that the simulated fills were fair.',
         ...(e.tradesRoot ? { tradesRoot: { root: e.tradesRoot, evaluation: e.address } } : {}),
@@ -69,7 +69,7 @@ export function createVerify(d: { db: Db; rpc: Pick<Connection, 'getAccountInfo'
     } else {
       items.push({
         title: 'Simulated trading in progress', state: 'simulated',
-        description: 'Evaluation trades are simulated by Props.trade against live GMTrade prices.',
+        description: 'Evaluation trades are simulated by Props.trade against live market prices.',
         establishes: 'Nothing onchain yet: simulated trades are off-chain. When the evaluation ends, its result and a commitment to its fill list are recorded here.',
       });
     }
@@ -82,17 +82,17 @@ export function createVerify(d: { db: Db; rpc: Pick<Connection, 'getAccountInfo'
         title: 'Funded account activated', state: 'confirmed', ...tx(f.activationSignature, undefined, f.createdAt),
         description: `${dec(f.principal)} USDC allocated on ${day(f.createdAt)}.`,
         establishes: `${dec(f.principal)} USDC moved from the Props.trade capital vault to an address only the program controls. It is the account's `
-          + 'loss allowance and the most the vault can lose on this account: GMTrade positions carry no debt.',
+          + 'loss allowance and the most the vault can lose on this account: exchange positions carry no debt.',
       },
       {
         title: 'Funded account', state: 'confirmed', ...account(f.address),
-        description: 'The program account with the rules, open position slots and tracked GMTrade orders.',
-        establishes: 'The program checks every trade against these rules (leverage, exposure, market allowlist) before it reaches GMTrade.',
+        description: 'The program account with the rules, open position slots and tracked exchange orders.',
+        establishes: 'The program checks every trade against these rules (leverage, exposure, market allowlist) before it reaches the exchange.',
       },
       {
         title: 'Trading address', state: 'confirmed', ...account(f.ownerPda),
-        description: 'Owns the account\'s USDC and every GMTrade position and order.',
-        establishes: 'A program address with no private key: only the Props.trade program can sign for it, and it sends USDC only to GMTrade orders, '
+        description: 'Owns the account\'s USDC and every exchange position and order.',
+        establishes: 'A program address with no private key: only the Props.trade program can sign for it, and it sends USDC only to exchange orders, '
           + 'approved payouts to the trader\'s registered wallet, or back to the capital vault.',
       },
     ];
@@ -100,9 +100,9 @@ export function createVerify(d: { db: Db; rpc: Pick<Connection, 'getAccountInfo'
       .where(eq(gmPositionSnapshots.fundedAccount, f.address)).orderBy(gmPositionSnapshots.position, desc(gmPositionSnapshots.slot));
     for (const p of positions.filter((x) => toMicro6(x.sizeUsd) > 0n)) {
       items.push({
-        title: `GMTrade position: ${p.side}`, state: 'confirmed', ...account(p.position), slot: p.slot, ts: p.ts.getTime(),
+        title: `Exchange position: ${p.side}`, state: 'confirmed', ...account(p.position), slot: p.slot, ts: p.ts.getTime(),
         description: `${dec(p.sizeUsd)} USD with ${dec(p.collateralUsd)} USDC collateral, as last read.`,
-        establishes: 'A real position on GMTrade held by the account\'s trading address; its size and collateral are GMTrade\'s own account data.',
+        establishes: 'A real position on the exchange held by the account\'s trading address; its size and collateral are the exchange\'s own account data.',
       });
     }
     const fills = await db.select().from(venueFills).where(eq(venueFills.fundedAccount, f.address)).orderBy(desc(venueFills.venueId)).limit(20);
@@ -110,7 +110,7 @@ export function createVerify(d: { db: Db; rpc: Pick<Connection, 'getAccountInfo'
       items.push({
         title: `${x.side} ${x.symbol} ${x.isIncrease ? 'increase' : 'decrease'} filled`, state: 'confirmed', ...tx(x.signature, x.slot, x.ts),
         description: `${dec(x.sizeUsd)} USD at ${decPrice(x.price)}, fees ${dec(x.feeUsd)} USD.`,
-        establishes: 'GMTrade\'s keeper executed this order onchain; size, price and fees are GMTrade\'s own records of the fill.',
+        establishes: 'The exchange\'s keeper executed this order onchain; size, price and fees are the exchange\'s own records of the fill.',
       });
     }
     for (const p of await db.select().from(payouts).where(eq(payouts.fundedAccount, f.address)).orderBy(desc(payouts.requestedAt))) {
@@ -174,9 +174,9 @@ export function createVerify(d: { db: Db; rpc: Pick<Connection, 'getAccountInfo'
         establishes: 'The Props.trade program emitted this record in this transaction; the values are exactly what the program logged.',
       })),
       ...fills.map((x): EvidenceItem => ({
-        title: `${x.side} ${x.symbol} ${x.isIncrease ? 'increase' : 'decrease'} filled on GMTrade`, state: 'confirmed', ...tx(signature, x.slot, x.ts),
+        title: `${x.side} ${x.symbol} ${x.isIncrease ? 'increase' : 'decrease'} filled on the exchange`, state: 'confirmed', ...tx(signature, x.slot, x.ts),
         description: `${dec(x.sizeUsd)} USD at ${decPrice(x.price)} for funded account ${x.fundedAccount}.`,
-        establishes: 'GMTrade\'s keeper executed a funded account\'s order in this transaction.',
+        establishes: 'The exchange\'s keeper executed a funded account\'s order in this transaction.',
       })),
     ];
     if (items.length) return { query: signature, kind: 'transaction', title: 'Transaction', items };

@@ -26,7 +26,7 @@ export function rpcRefusal(call: Call): string | null {
       // Only the SDK's owner-filtered GMTrade position lookup: an unfiltered scan is expensive for the provider.
       const filters = (params[1] as { filters?: unknown } | undefined)?.filters;
       const filtered = Array.isArray(filters) && filters.some((f) => typeof f === 'object' && f !== null && 'memcmp' in f);
-      return params[0] === GMTRADE_PROGRAM && filtered ? null : 'Only filtered GMTrade account queries are relayed';
+      return params[0] === GMTRADE_PROGRAM && filtered ? null : 'Only filtered exchange account queries are relayed';
     }
     default:
       return READS.has(call.method) ? null : `Method ${call.method} is not relayed`;

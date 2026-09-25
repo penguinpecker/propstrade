@@ -86,7 +86,7 @@ export function readCandleSnapshot(symbol: string, interval: CandleInterval, sto
   // SNAPSHOT_BARS starts would leave a hole it cannot show (bars are drawn by index): on 5m that is 25 h, well inside
   // SNAPSHOT_MAX_AGE_MS.
   if (Date.now() / 1000 - list.at(-1)!.time > SNAPSHOT_BARS * INTERVAL_SECONDS[interval]) return null;
-  return { at, response: { symbol, interval, candles: list, source: 'gmtrade', freshness: 'live' } };
+  return { at, response: { symbol, interval, candles: list, source: 'venue', freshness: 'live' } };
 }
 
 /** When a saved pair was fetched; 0 for one that cannot be read, so it is the first to go. */

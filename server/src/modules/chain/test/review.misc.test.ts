@@ -202,9 +202,9 @@ test('order status: an order the sync dropped before the venue tick still gets i
   await venue.syncOrders(funded);
   const activity = await t.db.select().from(accountEvents).where(eq(accountEvents.accountId, funded));
   assert.deepEqual(activity.map((a) => [a.type, a.title, a.detail]), [
-    ['cancel', 'Long SOL order cancelled by GMTrade', 'GMTrade could not execute this order (acceptable price exceeded). Its collateral and deposit returned to the account.'],
+    ['cancel', 'Long SOL order cancelled by the exchange', 'The exchange could not execute this order (acceptable price exceeded). Its collateral and deposit returned to the account.'],
   ]);
-  assert.deepEqual(notices.map((n) => [n.wallet, n.title]), [[trader, 'Long SOL order cancelled by GMTrade']]);
+  assert.deepEqual(notices.map((n) => [n.wallet, n.title]), [[trader, 'Long SOL order cancelled by the exchange']]);
 });
 
 function evaluationData(client: PropsVaultClient, status: 'active' | 'passed'): Buffer {

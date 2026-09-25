@@ -486,13 +486,15 @@ describe('sessions and limits', () => {
     const id = practiceOf(u);
     await base('SOL');
     const reject = async (body: Partial<SimOrderRequest>) => (await place(u, id, body)).json().error as { code: string; message: string };
-    expect(await reject({ sizeUsd: '26000', collateralUsd: '1000' })).toEqual({ code: 'order_rejected', message: 'Leverage 26.00x is above the 25x limit for SOL' });
+    expect(await reject({ sizeUsd: '26000', collateralUsd: '1000' })).toEqual({ code: 'order_rejected', message: 'Leverage 26.00x is above the 25x limit for longs on SOL' });
     expect(await reject({ sizeUsd: '10000', collateralUsd: '1300' })).toEqual({ code: 'order_rejected', message: 'Margin $1,300.00 is more than the $1,250.00 available' });
     const far = fromUnitPrice(toUnitPrice(t.md.price('SOL')!.mid, 9) / 2n, 9);
     await placed(u, id, { kind: 'Limit', triggerPrice: far, sizeUsd: '24000', collateralUsd: '1000' });
     expect((await summary(u, id)).availableMargin).toBe('250');
     expect(await reject({ sizeUsd: '2000', collateralUsd: '100' })).toEqual({ code: 'order_rejected', message: 'Total exposure would be $26,000.00, above the $25,000.00 limit' });
-    expect((await reject({ sizeUsd: '0.5', collateralUsd: '0.5' })).code).toBe('rejected_by_venue'); // below GMTrade's $1 minimum
+    expect(await reject({ sizeUsd: '0.5', collateralUsd: '0.5' })).toEqual({ code: 'order_rejected', message: 'A long on SOL needs at least $1.00 of margin' });
+    const venue = await reject({ sizeUsd: '0.5', collateralUsd: '1' }); // below the exchange's $1 minimum size: its model refuses it
+    expect([venue.code, venue.message]).toEqual(['rejected_by_venue', expect.stringMatching(/^The exchange would reject this order: /)]);
 
     const invalid = [
       { kind: 'Limit' as const }, { triggerPrice: '100' }, { kind: 'Limit' as const, triggerPrice: '100.123456789012' }, { sizeUsd: '1.1234567' },
@@ -501,7 +503,7 @@ describe('sessions and limits', () => {
     for (const body of invalid) expect((await place(u, id, body)).statusCode, JSON.stringify(body)).toBe(400);
   });
 
-  it('lets practice trade any USDC-only market and evaluations only allowlisted ones', async () => {
+  it('lets practice trade every listed market and evaluations only allowlisted ones; an unlisted market is unknown', async () => {
     const u = await t.user();
     const ev = await evaluation(u);
     await base('BTC');
@@ -510,11 +512,91 @@ describe('sessions and limits', () => {
     try {
       expect((await place(u, ev, { symbol: 'BTC' })).json().error).toEqual({ code: 'market_unavailable', message: 'BTC is not available in evaluations: they trade only the markets funded accounts can' });
       expect((await place(u, practiceOf(u), { symbol: 'BTC' })).statusCode).toBe(200);
-      t.md.setRow('BTC', { pools: btc.pools.map((p) => ({ ...p, pure: false })) });
-      expect((await place(u, practiceOf(u), { symbol: 'BTC' })).json().error.code).toBe('market_unavailable');
+      // A market without a USDC-only pool (ONDO on 2026-09-25) is not listed at all: an order for it names no market.
+      const ondo = await place(u, practiceOf(u), { symbol: 'ONDO' });
+      expect([ondo.statusCode, ondo.json().error]).toEqual([404, { code: 'unknown_market', message: 'Unknown market ONDO' }]);
     } finally {
       t.md.setRow('BTC', btc);
     }
+  });
+});
+
+describe('exchange limits', () => {
+  it('refuses an increase the exchange would not accept on that side right now, naming the market, side and limit', async () => {
+    const u = await t.user();
+    const id = practiceOf(u);
+    await base('SOL');
+    const sol = t.md.market('SOL')!;
+    const reject = async (body: Partial<SimOrderRequest>) => {
+      const res = await place(u, id, body);
+      return [res.statusCode, res.json().error];
+    };
+    try {
+      t.md.setRow('SOL', { maxSizeLong: '5000.75', maxSizeShort: '0', maxLeverageShort: 10, minCollateralUsd: '5' });
+      expect(await reject({ sizeUsd: '6000', collateralUsd: '500' })).toEqual([422, { code: 'order_rejected', message: 'Up to $5,000 can be opened long on SOL right now' }]);
+      expect(await reject({ side: 'Short', sizeUsd: '100', collateralUsd: '50' })).toEqual([422, { code: 'order_rejected', message: 'No new short can be opened on SOL right now' }]);
+      t.md.setRow('SOL', { maxSizeShort: '1000000' });
+      expect(await reject({ side: 'Short', sizeUsd: '10000', collateralUsd: '500' })).toEqual([422, { code: 'order_rejected', message: 'Leverage 20.00x is above the 10x limit for shorts on SOL' }]);
+      expect(await reject({ sizeUsd: '10', collateralUsd: '2' })).toEqual([422, { code: 'order_rejected', message: 'A long on SOL needs at least $5.00 of margin' }]);
+      await placed(u, id, { sizeUsd: '5000', collateralUsd: '500' }); // within every limit
+      await placed(u, id, { side: 'Short', sizeUsd: '5000', collateralUsd: '500' });
+    } finally {
+      t.md.setRow('SOL', sol);
+    }
+  });
+
+  it('cancels a pending increase the exchange no longer accepts when it would fill, with the same reason', async () => {
+    const u = await t.user();
+    const id = practiceOf(u);
+    await base('SOL');
+    const sol = t.md.market('SOL')!;
+    const { order } = await placed(u, id, { sizeUsd: '10000', collateralUsd: '500' });
+    try {
+      t.md.setRow('SOL', { maxSizeLong: '9000' }); // longs took the pool's reserve meanwhile
+      await t.tick(at('SOL', toUnitPrice(t.md.price('SOL')!.mid, 9)));
+      const reason = 'Up to $9,000 can be opened long on SOL right now';
+      expect((await orders(u, id)).find((o) => o.id === order.id)).toMatchObject({ status: 'canceled', statusDetail: reason });
+      expect(await positions(u, id)).toEqual([]);
+      expect((await summary(u, id)).availableMargin).toBe('1250');
+      expect((await t.sim.activity(u.wallet, id))![0]).toMatchObject({ type: 'cancel', title: 'Market order cancelled', detail: reason, status: 'failed' });
+    } finally {
+      t.md.setRow('SOL', sol);
+    }
+  });
+
+  it("words the exchange's own refusals of an order within the row's limits: the minimum margin counts after fees, and its leverage limit", async () => {
+    const u = await t.user();
+    const id = practiceOf(u);
+    await base('SOL');
+    const sol = t.md.market('SOL')!;
+    const reject = async (body: Partial<SimOrderRequest>) => {
+      const res = await place(u, id, body);
+      return [res.statusCode, res.json().error];
+    };
+    // $1.00 at the row's 25x: the open and close fees come out of it, leaving less than the exchange's $1 minimum.
+    expect(await reject({ sizeUsd: '25', collateralUsd: '1' })).toEqual([422, { code: 'rejected_by_venue', message: 'A long on SOL needs at least $1.00 of margin after fees' }]);
+    await placed(u, id, { sizeUsd: '25', collateralUsd: '1.02' });
+    try {
+      t.md.setRow('SOL', { maxLeverageLong: 1_000 }); // a row above the exchange's own limit (250x, before fees)
+      expect(await reject({ sizeUsd: '3000', collateralUsd: '10' })).toEqual([422, {
+        code: 'rejected_by_venue', message: 'Leverage 300.00x is above what the exchange accepts for longs on SOL right now',
+      }]);
+    } finally {
+      t.md.setRow('SOL', sol);
+    }
+  });
+
+  it('cancels a pending increase the exchange refuses when it would fill, in the same plain words', async () => {
+    const u = await t.user();
+    const id = practiceOf(u);
+    await base('SOL');
+    const { order } = await placed(u, id, { sizeUsd: '25', collateralUsd: '1.02' });
+    // The fill price is 2% wide: a long bought at the ask and valued at the bid is down $0.50, below the $1 minimum.
+    const mid = toUnitPrice(t.md.price('SOL')!.mid, 9);
+    await t.tick({ ...at('SOL', mid), min: fromUnitPrice((mid * 99n) / 100n, 9), max: fromUnitPrice((mid * 101n) / 100n, 9) });
+    const reason = 'A long on SOL needs at least $1.00 of margin after fees';
+    expect((await orders(u, id)).find((o) => o.id === order.id)).toMatchObject({ status: 'canceled', statusDetail: reason });
+    expect((await t.sim.activity(u.wallet, id))![0]).toMatchObject({ type: 'cancel', title: 'Market order cancelled', detail: reason, status: 'failed' });
   });
 });
 

@@ -1053,3 +1053,16 @@ Pinocchio evaluated (2026-09-23; measured in a scratch copy, 59/59 LiteSVM tests
   has not opened the bucket yet); boundary-sensitive, not a code fault.
 - Vercel deploy from the export succeeded first try this time (upload 'fetch failed' is intermittent); Railway showed
   BUILDING for 5 min after the build log's healthcheck line.
+
+2026-09-25 DEPLOYED 3c53c9d (server 24b850cb…, app dpl_Bbpb92rR…): order ticket with TP/SL legs and expected P&L,
+           inline leverage, full cost breakdown (open/close fee, hourly funding+borrow, price impact, liquidation
+           price; Props charges no per-order fee today and the ticket says so), funding/borrow rates in markets,
+           trades and the CSV, 13 chart intervals (1m…1M), TP/SL guide lines on the chart, market names in positions
+           open that chart, Verify → Search (/v1/traders/:address, public, no identity fields), full Solana address
+           in the wallet dialog, practice fills on the first newer tick, instant close in the UI, candle history in
+           Postgres with a 5 s backfill gate, migrations 0006/0007 (cost columns + hot-query indexes).
+- First boot after 0005 had seriesWarmAtBoot 0 (empty table); this boot restored all 340 series from candle_windows
+  before the pre-warm ran, so the restart cost the charts nothing. Backfill reached 29/340 in 4 min with GMTrade
+  slow, then GMTrade went 'degraded' again at 09:27 IST; the gate pauses the backfill and users keep the copies.
+- Stocks report null funding/borrow and freshness 'unavailable' outside the US session; the ticket renders those
+  rows as '—' (checked in the cost-row formatter) rather than $0, so a closed market never shows a false zero cost.

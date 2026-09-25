@@ -1,12 +1,13 @@
 // Migration 0006 backfills closed_trades' cost breakdown from the fills each trip was written from. The columns exist
 // already here (the test database is migrated), so the rows are written with the defaults and the migration's UPDATE
-// statements are run again over them: they must reproduce what the writers now record.
+// statements are run again over them: they must reproduce what the writers now record. Migration 0008 (white label)
+// rewrites the order notes that named the venue, run the same way.
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { Keypair } from '@solana/web3.js';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, expect, it } from 'vitest';
-import { accounts, closedTrades, evaluations, fundedAccounts, simFills, simPositions, venueFills } from '../src/db/schema.js';
+import { accounts, closedTrades, evaluations, fundedAccounts, simFills, simOrders, simPositions, venueFills } from '../src/db/schema.js';
 import { migrationsFolder } from '../src/db/migrate.js';
 import { createDb } from '../src/db/client.js';
 import { uuidOf } from '../src/modules/chain/venue.js';
@@ -75,4 +76,26 @@ it('backfills a funded round trip from the fills of its position since the previ
   expect(by[uuidOf(`closed:${fills[1][0]}`)]).toEqual(['2.200000', '0.300000', '0.400000', '0.300000']);
   expect(by[uuidOf(`closed:${fills[4][0]}`)]).toEqual(['1.100000', '0.070000', '0.080000', '0.030000']);
   expect(Object.values(by).filter((v) => v.every((x) => x === '0.000000'))).toHaveLength(1);
+});
+
+it('0008 rewrites the order notes earlier releases stored with the venue\'s name, and no other note', async () => {
+  const wallet = key();
+  const id = `practice:${wallet}`;
+  await db.insert(accounts).values({ id, wallet, stage: 'practice', status: 'active', label: 'Practice', sizeUsd: '25000', lossAllowanceUsd: '1250', maxExposureBps: 10_000, traderShareBps: 0 });
+  const order = (clientId: string, statusDetail: string) => ({
+    accountId: id, clientId, symbol: 'SOL', marketToken: key(), side: 'Long' as const, kind: 'Market' as const, isIncrease: true, sizeUsd: '100',
+    collateralUsd: '10', slippageBps: 50, status: 'canceled' as const, statusDetail, executableFrom: new Date(),
+  });
+  await db.insert(simOrders).values([
+    order('a', 'GMTrade would not execute this order: invalid argument: insufficient collateral usd'),
+    order('b', 'Expired: GMTrade drops market orders not executed within 30 minutes'),
+    order('c', 'Cancelled by you'),
+  ]);
+  await sql.unsafe(readFileSync(`${migrationsFolder}/0008_white_label_order_notes.sql`, 'utf8'));
+  const rows = await db.select().from(simOrders).where(eq(simOrders.accountId, id)).orderBy(simOrders.clientId);
+  expect(rows.map((r) => r.statusDetail)).toEqual([
+    'The exchange would not execute this order: invalid argument: insufficient collateral usd',
+    'Expired: the exchange drops market orders not executed within 30 minutes',
+    'Cancelled by you',
+  ]);
 });

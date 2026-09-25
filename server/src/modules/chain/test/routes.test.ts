@@ -184,6 +184,7 @@ test('config, vault and payout eligibility read the program state, and say so wh
   chainAccounts.set(solTreasuryPda().toBase58(), info(new PublicKey('11111111111111111111111111111111'), Buffer.alloc(0), 2_500_000_000));
   const config = await a.get<AppConfig>('/v1/config');
   assert.deepEqual([config.status, config.body.cluster, config.body.traderShareBps, config.body.minPayoutUsdc, config.body.tiers], [200, 'mainnet-beta', 8000, '50', []]);
+  assert.ok(config.body.venueStore && !/gmtrade/i.test(JSON.stringify(config.body)), 'white label: no key or value of the public config names the venue');
 
   const vault = await a.get<VaultStats>('/v1/vault');
   assert.deepEqual(

@@ -80,7 +80,7 @@ export interface GmPosition {
 
 export function decodeGmPosition(data: Uint8Array): GmPosition {
   if (data.length !== POSITION_LAYOUT.length || !hasPrefix(data, POSITION_DISCRIMINATOR)) {
-    throw new Error('not a GMTrade Position account');
+    throw new Error('not an exchange Position account');
   }
   const L = POSITION_LAYOUT;
   return {
@@ -97,7 +97,7 @@ export function decodeGmPosition(data: Uint8Array): GmPosition {
 
 /** True while GMTrade holds the order as pending (same rule as the program's sync). */
 export function isPendingGmOrder(data: Uint8Array): boolean {
-  if (data.length <= ORDER_LAYOUT.actionState || !hasPrefix(data, ORDER_DISCRIMINATOR)) throw new Error('not a GMTrade Order account');
+  if (data.length <= ORDER_LAYOUT.actionState || !hasPrefix(data, ORDER_DISCRIMINATOR)) throw new Error('not an exchange Order account');
   return data[ORDER_LAYOUT.actionState] === 0;
 }
 
@@ -117,7 +117,7 @@ export interface GmMarketMeta {
 
 export function decodeGmMarketMeta(data: Uint8Array): GmMarketMeta {
   if (data.length < MARKET_LAYOUT.store + 32 || !hasPrefix(data, MARKET_DISCRIMINATOR)) {
-    throw new Error('not a GMTrade Market account');
+    throw new Error('not an exchange Market account');
   }
   const L = MARKET_LAYOUT;
   const flags = data[L.flags]!;

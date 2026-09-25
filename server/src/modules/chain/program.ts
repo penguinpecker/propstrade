@@ -90,7 +90,7 @@ export function createProgramReader(d: {
       };
     };
     return {
-      cluster: d.cluster, programId: d.programId.toBase58(), usdcMint: c.usdcMint.toBase58(), gmtradeStore: c.gmtradeStore.toBase58(),
+      cluster: d.cluster, programId: d.programId.toBase58(), usdcMint: c.usdcMint.toBase58(), venueStore: c.gmtradeStore.toBase58(),
       tiers: tiers.map(tier), traderShareBps: c.traderShareBps, minPayoutUsdc: micro(c.minPayout.toString()),
       paused: { newEvaluations: c.paused.newEvaluations, trading: c.paused.trading, payouts: c.paused.payouts },
       feeVault: feeVaultPda().toBase58(), capitalVault: c.capitalVault.toBase58(),

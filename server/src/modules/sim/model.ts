@@ -2,7 +2,7 @@
 //   usd    USD values, 1e20 = $1 (GMTrade)            micro  USDC amounts, 1e6 = 1 USDC (collateral token base units)
 //   unit   GMTrade unit prices: USD × 10^(20 − token decimals), as the oracle quotes min/max
 // Account money is USDC: collateral goes in and comes out of GMTrade positions as USDC.
-import type { PriceTick } from '@props/shared';
+import type { Market, PriceTick } from '@props/shared';
 import { USD_DECIMALS, decodePosition, formatFixed, parseFixed, storeIdl } from '@props/gmtrade';
 import type { ModelInput, Price } from '@props/gmsol-wasm';
 import { toUnitPrice } from '@props/sdk';
@@ -90,6 +90,34 @@ export function withPosition(market: string, position: string): string {
     b.writeBigInt64LE(changedAt, CLOCK.funding);
   }
   return b.toString('base64');
+}
+
+/** Why no new position of that size fits on a side: its room right now (Market.maxSizeLong/Short), in whole dollars. */
+export function roomText(symbol: string, way: 'long' | 'short', maxSize: string): string {
+  const whole = Math.floor(Number(maxSize));
+  return whole > 0 ? `Up to $${whole.toLocaleString('en-US')} can be opened ${way} on ${symbol} right now` : `No new ${way} can be opened on ${symbol} right now`;
+}
+
+/**
+ * The exchange's refusal of a new position (a gmsol-model error from simulateIncrease) in plain words naming the
+ * market, side and the limit it hit: its reserve or max open interest, the collateral its min collateral factor asks
+ * for after fees (leverage), or its min collateral, which fees count against. Null for any other reason.
+ */
+export function plainRefusal(err: unknown, market: Market, side: 'Long' | 'Short', size: bigint, collateral: bigint): string | null {
+  const reason = err instanceof Error ? err.message : String(err);
+  const way = side === 'Long' ? 'long' : 'short';
+  if (/^(insufficient reserve|max open interest exceeded)/.test(reason)) {
+    const room = side === 'Long' ? market.maxSizeLong : market.maxSizeShort;
+    return room !== null && usd(room) < size ? roomText(market.symbol, way, room) : `The exchange cannot open a ${way} this large on ${market.symbol} right now`;
+  }
+  if (/insufficient collateral usd|min collateral for leverage|: <= 0$/.test(reason)) {
+    return `Leverage ${(Number(size) / Number(collateral * MICRO_PER_USD)).toFixed(2)}x is above what the exchange accepts for ${way}s on ${market.symbol} right now`;
+  }
+  if (/: min collateral$/.test(reason) && market.minCollateralUsd !== null) {
+    const min = Number(market.minCollateralUsd).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return `A ${way} on ${market.symbol} needs at least $${min} of margin after fees`;
+  }
+  return null;
 }
 
 /** USD value → USDC micro units at the collateral's min price, the price GMTrade values collateral at. */

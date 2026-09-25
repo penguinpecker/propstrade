@@ -85,7 +85,7 @@ describe('stageRestriction', () => {
     expect(stageRestriction(doge, 'evaluation', USDC)).toEqual({ label: 'Not available in evaluations', reason: 'DOGE is not available in evaluations: they trade only the markets funded accounts can.' });
     expect(stageRestriction(btc, 'evaluation', USDC)).toBeNull();
     expect(stageRestriction(doge, 'practice', USDC)).toBeNull();
-    expect(stageRestriction(aave, 'practice', USDC)).toEqual({ label: 'Not available in practice', reason: 'AAVE has no USDC-only pool on GMTrade, so it cannot be traded here.' });
+    expect(stageRestriction(aave, 'practice', USDC)).toEqual({ label: 'Not available in practice', reason: 'AAVE has no USDC-only pool, so it cannot be traded here.' });
   });
 });
 

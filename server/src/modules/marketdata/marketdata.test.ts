@@ -16,7 +16,7 @@ import type { ApiError, Candle, CandleInterval, CandlesResponse, Market, MarketT
 import { model, type MarketStatus } from '@props/gmsol-wasm';
 import {
   IdlCoder, INTERVAL_SECONDS, NATIVE_INTERVALS, NO_ACCOUNT, USDC_MINT, base58Encode, decodeMarket, findProgramAddress, getMultipleAccounts,
-  priceString, pubkeyBytes, storeIdl, usdString, type Idl, type KeeperMarket, type KeeperToken,
+  parseFixed, priceString, pubkeyBytes, storeIdl, usdString, venueLimits, type Idl, type KeeperMarket, type KeeperToken,
 } from '@props/gmtrade';
 import { PropsVaultClient } from '@props/sdk';
 import { createDb, type Sql } from '../../db/client.ts';
@@ -27,6 +27,7 @@ import register, { candleCacheTtl, candleWindow, changedForDisplay, createMarket
 import { withPosition } from '../sim/model.ts';
 import { fetchAllowlist, marketConfigAddress } from './allowlist.ts';
 import { covers, createHistoryStore } from './history.ts';
+import { createUpstreams, why } from './upstreams.ts';
 
 const skip = process.env.PROPS_OFFLINE === '1';
 const dbSkip = !process.env.TEST_DATABASE_URL;
@@ -326,7 +327,7 @@ test('candle pre-warm: every market and interval after start, a resolution again
   for (const symbol of ['SOL', 'BTC', 'M7']) {
     for (const interval of NATIVE_INTERVALS) {
       const r = await get<CandlesResponse>(`/v1/candles?symbol=${symbol}&interval=${interval}`);
-      assert.deepEqual([r.status, r.body.freshness, r.body.candles.length, r.headers['cache-control']], [200, 'live', 300, LIVE], `${symbol} ${interval}`);
+      assert.deepEqual([r.status, r.body.freshness, r.body.source, r.body.candles.length, r.headers['cache-control']], [200, 'live', 'venue', 300, LIVE], `${symbol} ${interval}`);
     }
   }
   assert.equal(candles.calls.length, 11, 'every latest window came from the cache');
@@ -335,7 +336,7 @@ test('candle pre-warm: every market and interval after start, a resolution again
   for (const [interval, source] of [['30m', '15m'], ['2h', '1h'], ['6h', '1h'], ['12h', '1h'], ['1W', '1D'], ['1M', '1D']] as const) {
     const native = (await get<CandlesResponse>(`/v1/candles?symbol=SOL&interval=${source}`)).body.candles;
     const r = await get<CandlesResponse>(`/v1/candles?symbol=SOL&interval=${interval}`);
-    assert.deepEqual([r.status, r.body.freshness, r.body.source, r.headers['cache-control']], [200, 'live', 'gmtrade', LIVE], interval);
+    assert.deepEqual([r.status, r.body.freshness, r.body.source, r.headers['cache-control']], [200, 'live', 'venue', LIVE], interval);
     assert.deepEqual(r.body.candles, rollup(native, interval).filter((c) => c.time >= native[0]!.time), interval);
     assert.equal(r.body.candles.at(-1)!.time, rollup(native.slice(-1), interval)[0]!.time, `${interval} ends at the bucket in progress`);
   }
@@ -540,7 +541,7 @@ test('candle history: a restarted process serves every latest window live from t
   for (const symbol of ['SOL', 'BTC', 'M7']) {
     for (const interval of NATIVE_INTERVALS) {
       const r = await second.get<CandlesResponse>(`/v1/candles?symbol=${symbol}&interval=${interval}`);
-      assert.deepEqual([r.status, r.body.freshness, r.body.candles.length, r.headers['cache-control']], [200, 'live', 300, LIVE], `${symbol} ${interval}`);
+      assert.deepEqual([r.status, r.body.freshness, r.body.source, r.body.candles.length, r.headers['cache-control']], [200, 'live', 'venue', 300, LIVE], `${symbol} ${interval}`);
     }
   }
   assert.equal(second.candles.calls.length, 0, 'no GMTrade call');
@@ -810,6 +811,7 @@ const ROW: Market = {
   tradable: true, price: '200', priceDecimals: 2, indexTokenDecimals: 9, change24h: 1.23, volume24h: '1000.00',
   openInterestLong: '1000.00', openInterestShort: '1000.00', fundingRateHourlyLong: 0.001, fundingRateHourlyShort: -0.001, borrowRateHourlyLong: 0.002, borrowRateHourlyShort: 0.002,
   capacityLong: '1000.00', capacityShort: '1000.00', poolLiquidity: '1000.00', maxLeverage: 20, closedMaxLeverage: null,
+  maxLeverageLong: 20, maxLeverageShort: 20, maxSizeLong: '1000.00', maxSizeShort: '1000.00', minCollateralUsd: '1',
   session: 'open', freshness: 'live', updatedAt: 1_800_000_000_000,
 };
 
@@ -822,10 +824,13 @@ test('market rows: re-sent only when a figure the app shows moved past its displ
   assert.deepEqual([changed({ fundingRateHourlyShort: -0.00109 }), changed({ fundingRateHourlyShort: -0.00111 })], [false, true], 'short funding: 4 decimals');
   assert.deepEqual([changed({ borrowRateHourlyLong: 0.00209 }), changed({ borrowRateHourlyLong: 0.00211 })], [false, true], 'long borrowing: 4 decimals');
   assert.deepEqual([changed({ borrowRateHourlyShort: 0.00209 }), changed({ borrowRateHourlyShort: 0.00211 }), changed({ borrowRateHourlyShort: null })], [false, true, true], 'short borrowing: 4 decimals');
-  for (const key of ['volume24h', 'openInterestLong', 'openInterestShort', 'capacityLong', 'capacityShort', 'poolLiquidity'] as const) {
+  for (const key of ['volume24h', 'openInterestLong', 'openInterestShort', 'capacityLong', 'capacityShort', 'poolLiquidity', 'maxSizeLong', 'maxSizeShort'] as const) {
     assert.deepEqual([changed({ [key]: '1009.99' }), changed({ [key]: '1010.00' }), changed({ [key]: null })], [false, true, true], key);
   }
-  for (const patch of [{ session: 'closed' }, { freshness: 'stale' }, { tradable: false, unavailableReason: 'Not available' }, { maxLeverage: 10 }, { closedMaxLeverage: 8 }] as const) {
+  for (const patch of [
+    { session: 'closed' }, { freshness: 'stale' }, { tradable: false, unavailableReason: 'Not available' }, { maxLeverage: 10 }, { closedMaxLeverage: 8 },
+    { maxLeverageLong: 19 }, { maxLeverageShort: 19 }, { minCollateralUsd: '2' }, { minCollateralUsd: null },
+  ] as const) {
     assert.equal(changed(patch), true, JSON.stringify(patch));
   }
 
@@ -876,6 +881,63 @@ test('market rows: a funding or borrowing rate moving 0.0001 pp sends the row, a
   assert.deepEqual([sol().length, rates(sol().at(-1)!)[1]], [sent + 2, -0.010908], 'a short-funding move too');
 });
 
+test('an asset without a USDC-only pool is not listed: no row, no stream event, no chart pre-warm, and every route for it answers 404 unknown_market', async (t) => {
+  const nowSec = 1_800_000_539;
+  const { feed, get, events, candles, advance } = await stubbedStart(t, nowSec);
+  // ONDO trades on the venue only in a WGMX-USDC pool (live on 2026-09-25): Props.trade could never trade it.
+  const [index, pool] = [fakeKey('index-ondo'), fakeKey('pool-ondo')];
+  feed.tokens.set(index, {
+    pubkey: index, price: { ts: nowSec, min: '30000000000', max: '30000000000', isOpen: true },
+    meta: { name: 'ONDO', decimals: 9, precision: 4, isEnabled: true, isSynthetic: false, category: 'DeFi', indexName: null, uiSymbol: 'ONDO', uiName: null, launchTime: null, expectedProvider: 'pyth' },
+  });
+  feed.markets.set(pool, {
+    marketToken: pool, pubkey: pool, slot: null, data: null, virtualInventoryForSwaps: NO_ACCOUNT, virtualInventoryForPositions: NO_ACCOUNT,
+    meta: { name: 'ONDO/USD[WGMX-USDC]', isPure: false, isEnabled: true, indexToken: { pubkey: index }, longToken: { pubkey: fakeKey('wgmx') }, shortToken: { pubkey: USDC_MINT } },
+  });
+  await advance(65); // catalog rebuilds, 5 s stream scans and a full pre-warm pass after the add
+  assert.deepEqual((await get<Market[]>('/v1/markets')).body.map((r) => r.symbol), ['BTC', 'M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7', 'SOL']);
+  assert.ok(!events.some((e) => e.type === 'market' && e.market.symbol === 'ONDO'), 'never sent as a market row');
+  assert.ok(candles.calls.some((c) => c.tokens.includes(SOL_INDEX)) && !candles.calls.some((c) => c.tokens.includes(index)), 'never pre-warmed or backfilled');
+  for (const path of ['/v1/markets/ONDO', '/v1/markets/ONDO/trades', '/v1/candles?symbol=ONDO&interval=1h', '/v1/candles?symbol=ONDO&interval=2h', '/v1/quote?symbol=ONDO&side=Long&sizeUsd=100']) {
+    const r = await get<ApiError>(path);
+    assert.deepEqual([r.status, r.body.error.code, r.body.error.message], [404, 'unknown_market', 'unknown market ONDO'], path);
+  }
+});
+
+test('venue limits on the real EUR pool: a side\'s leverage falls as its open interest grows, and each limit is where the venue\'s own model stops accepting', () => {
+  type Recorded = { row: Market; market: string; virtualInventories: Record<string, string>; prices: Record<'index' | 'long' | 'short', { min: string; max: string }> };
+  const eur = (JSON.parse(readFileSync(new URL('../../../test/sim/fixtures/gmtrade-live.json', import.meta.url), 'utf8')) as { markets: Recorded[] }).markets
+    .find((m) => m.row.symbol === 'EUR')!;
+  const image = Buffer.from(eur.market, 'base64');
+  for (const at of [4024, 4032, 4040]) image.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000) + 86_400), at); // no accrual: exact and repeatable
+  const price = (k: 'index' | 'long' | 'short') => ({ min: BigInt(eur.prices[k].min), max: BigInt(eur.prices[k].max) });
+  const input = { market: image.toString('base64'), virtualInventories: eur.virtualInventories, prices: { index: price('index'), long: price('long'), short: price('short') } };
+  const limits = venueLimits(eur.market, model.marketStatus(input), input.prices.index);
+  // The config's min collateral factor is 0.002 (500x); shorts held $11.93M × the 2e-10 multiplier = 0.00239 (418x).
+  assert.deepEqual([limits.maxLeverageLong, limits.maxLeverageShort, limits.minCollateralUsd], [500, 418, '1']);
+  const USD = 10n ** 20n;
+  const open = (isLong: boolean, sizeUsd: bigint, leverage: number) => () => model.simulateIncrease({
+    market: input, isLong, collateralToken: USDC_MINT, collateralAmount: (sizeUsd * 1_000_000n) / (USD * BigInt(leverage)) + 1n, sizeDeltaUsd: sizeUsd,
+  });
+  assert.doesNotThrow(open(true, 1_000n * USD, 450), 'a 450x long: under the config\'s 500x');
+  assert.throws(open(false, 1_000n * USD, 450), /insufficient collateral/, 'a 450x short: above the 418x the shorts\' open interest leaves');
+  assert.doesNotThrow(open(false, 1_000n * USD, 400));
+  // The largest new short: the reserve headroom (the $40M max open interest is far off); 0.5 % more runs out of reserve.
+  const short = parseFixed(limits.maxSizeShort!, 20);
+  assert.doesNotThrow(open(false, short, 1));
+  assert.throws(open(false, (short * 1005n) / 1000n, 1), /insufficient reserve/);
+  assert.deepEqual([eur.row.maxLeverageShort, eur.row.maxSizeShort], [20, limits.maxSizeShort], 'the fixture row: the Props 20x cap is lower');
+});
+
+test('health: a failing source is reported without its URL or the venue\'s name', async () => {
+  assert.equal(why(new Error('https://price-candle-mainnet.gmtrade.xyz/graphql: HTTP 502')), 'HTTP 502');
+  assert.equal(why(new Error('https://keeper-prod-api.gmtrade.xyz/graphql: GMTrade is busy')), 'exchange is busy');
+  assert.equal(why(new Error('RPC getMultipleAccounts: HTTP 429')), 'RPC getMultipleAccounts: HTTP 429');
+  const upstreams = createUpstreams({ candles: 'fallback' }, () => {});
+  await upstreams.track('candles', async () => { throw new Error('https://price-candle-mainnet.gmtrade.xyz/graphql: HTTP 503'); }).catch(() => {});
+  assert.equal(upstreams.status('candles').lastError, 'HTTP 503');
+});
+
 /** An independent roll-up of `bars` into `interval` buckets, to check the server's: spans from the epoch, weeks
  *  from Monday 00:00 UTC, calendar months. */
 function rollup(bars: Candle[], interval: CandleInterval): Candle[] {
@@ -904,7 +966,7 @@ test("derived intervals: an older window is rolled up from the source windows it
   const from = day - 20 * 86_400;
   const url = `/v1/candles?symbol=SOL&interval=2h&from=${from}&to=${from + 4 * 7_200 + 3_599}`;
   const r = await get<CandlesResponse>(url);
-  assert.deepEqual([r.status, r.body.freshness, r.body.source, r.body.candles.length, r.headers['cache-control']], [200, 'live', 'gmtrade', 5, SETTLED]);
+  assert.deepEqual([r.status, r.body.freshness, r.body.source, r.body.candles.length, r.headers['cache-control']], [200, 'live', 'venue', 5, SETTLED]);
   assert.deepEqual(candles.single().map((c) => [c.res, c.from, c.to]), [[3_600, from, from + 9 * 3_600]]);
   assert.deepEqual(r.body.candles.map((c) => [c.time, c.open, c.close]), Array.from({ length: 5 }, (_, i) => [from + i * 7_200, 12, from + i * 7_200 + 3_600]), 'each bar closes on its second hour');
   await get<CandlesResponse>(url);
@@ -1023,7 +1085,21 @@ test('quote: the ticket\'s cost preview from GMTrade\'s model on the real SOL po
   for (const bad of ['side=Short&sizeUsd=10000&collateralUsd=0', 'side=Short&sizeUsd=10000&collateralUsd=abc', 'side=Long&sizeUsd=10000&limitPrice=0', 'side=Long&sizeUsd=10000&limitPrice=x']) {
     assert.equal((await get<ApiError>(`/v1/quote?symbol=SOL&${bad}`)).status, 400, bad);
   }
-  assert.equal((await get<ApiError>('/v1/quote?symbol=SOL&side=Short&sizeUsd=10000&collateralUsd=1')).status, 422, 'GMTrade refuses 10,000x');
+  const refused = await get<ApiError>('/v1/quote?symbol=SOL&side=Short&sizeUsd=10000&collateralUsd=1');
+  assert.deepEqual([refused.status, refused.body.error.code], [422, 'rejected_by_venue'], 'the venue refuses 10,000x');
+  assert.match(refused.body.error.message, /^The exchange would reject this order: /);
+  // The venue's own refusals of an order within the row's limits read as the engine words them, naming the limit: a
+  // long just above the long room (its reserve), and $1.00 of margin, which the fees take below the $1 minimum.
+  const over = Math.ceil(Number(row.maxSizeLong) * 1.01);
+  const reserve = await get<ApiError>(`/v1/quote?symbol=SOL&side=Long&sizeUsd=${over}&collateralUsd=${over / 2}`);
+  assert.deepEqual([reserve.status, reserve.body.error], [422, {
+    code: 'rejected_by_venue', message: `Up to $${Math.floor(Number(row.maxSizeLong)).toLocaleString('en-US')} can be opened long on SOL right now`,
+  }]);
+  const margin = await get<ApiError>('/v1/quote?symbol=SOL&side=Long&sizeUsd=20&collateralUsd=1');
+  assert.deepEqual([margin.status, margin.body.error], [422, { code: 'rejected_by_venue', message: 'A long on SOL needs at least $1.00 of margin after fees' }]);
+  // The quoted side's current limits, as the row carries them (the real pool's reserve headroom; MarketConfig's 20x).
+  assert.deepEqual([q.body.maxSizeUsd, q.body.maxLeverage, long.body.maxSizeUsd, long.body.maxLeverage], [row.maxSizeShort, row.maxLeverageShort, row.maxSizeLong, row.maxLeverageLong]);
+  assert.ok(Number(row.maxSizeShort) > 1_000_000 && row.maxLeverageShort === 20, `${row.maxSizeShort} ${row.maxLeverageShort}`);
 });
 
 test('live: fetchAnchorIdl reads the IDL GMTrade publishes onchain, identical to the vendored v0.10.0 IDL', { skip, timeout: 30_000 }, async () => {
@@ -1048,17 +1124,22 @@ test('live: routes, stream events and service API without a deployed program', {
       assert.match(r.unavailableReason!, /^Not (yet enabled|available) for funded trading/);
     }
     assert.equal(by.SOL!.unavailableReason, 'Not yet enabled for funded trading');
-    assert.match(by.AAVE!.unavailableReason!, /no USDC-only pool/);
+    assert.equal(by.AAVE, undefined, 'AAVE has no USDC-only pool (2026-09-25): not listed');
+    assert.ok(rows.every((r) => r.pools.find((p) => p.marketToken === r.marketToken)?.pure), 'every row trades on its pure pool');
+    assert.deepEqual((await get<ApiError>('/v1/candles?symbol=AAVE&interval=1h')).body.error.code, 'unknown_market');
     assert.deepEqual([by.BTC!.maxLeverage, by.EUR!.maxLeverage, by.XAU!.maxLeverage, by.NVDA!.maxLeverage], [25, 20, 15, 8]);
     assert.deepEqual([by.BTC!.closedMaxLeverage, by.EUR!.closedMaxLeverage, by.NVDA!.closedMaxLeverage], [null, 8, 8]);
     // 24h change and volume arrive after ready, whenever GMTrade's market-info and candle services answer.
+    // Out of US hours the keeper may send no stock price at all (11 of the 55 rows on 2026-09-25 07:00 UTC): a market
+    // without a price has no 24h change, so the share is of the priced ones.
+    const priced = rows.filter((r) => r.price !== null).length;
     const withStats = async () => (await get<Market[]>('/v1/markets')).body.filter((r) => r.change24h !== null && r.volume24h !== null).length;
-    for (let waited = 0; (await withStats()) < rows.length * 0.8 && waited < 60_000; waited += 1_000) await new Promise((r) => setTimeout(r, 1_000));
-    assert.ok((await withStats()) >= rows.length * 0.8, '24h change and volume');
+    for (let waited = 0; (await withStats()) < priced * 0.8 && waited < 60_000; waited += 1_000) await new Promise((r) => setTimeout(r, 1_000));
+    assert.ok((await withStats()) >= priced * 0.8, `24h change and volume: ${await withStats()} of ${priced} priced rows`);
 
     assert.equal((await get<Market>('/v1/markets/btc')).body.symbol, 'BTC');
     const missing = await get<ApiError>('/v1/markets/NOPE');
-    assert.deepEqual([missing.status, missing.body.error.code], [404, 'not_found']);
+    assert.deepEqual([missing.status, missing.body.error.code], [404, 'unknown_market']);
 
     const candles = await get<CandlesResponse>('/v1/candles?symbol=SOL&interval=15m');
     assert.equal(candles.status, 200);
@@ -1070,7 +1151,7 @@ test('live: routes, stream events and service API without a deployed program', {
     assert.equal(hours.body.candles.length, 24);
     // Derived intervals roll up the native windows just fetched: the same bars, no further wait.
     const halfHours = await get<CandlesResponse>('/v1/candles?symbol=SOL&interval=30m');
-    assert.deepEqual([halfHours.status, halfHours.body.freshness, halfHours.body.source], [200, 'live', 'gmtrade']);
+    assert.deepEqual([halfHours.status, halfHours.body.freshness, halfHours.body.source], [200, 'live', 'venue']);
     assert.deepEqual(halfHours.body.candles, rollup(candles.body.candles, '30m').filter((c) => c.time >= candles.body.candles[0]!.time));
     const twoHours = await get<CandlesResponse>(`/v1/candles?symbol=SOL&interval=2h&from=${to - 23 * 3600}&to=${to}`);
     assert.deepEqual(twoHours.body.candles, rollup(hours.body.candles, '2h'), 'the 24 hours as 12 two-hour bars');
@@ -1100,7 +1181,9 @@ test('live: routes, stream events and service API without a deployed program', {
     assert.ok(close >= 0.99 && close <= 1.21 && Math.abs(Number(quote.body.roundTripFeeUsd) - fee - close) < 1e-6, `close fee ${close}`);
     assert.ok(Number(quote.body.liquidationPrice) < Number(quote.body.executionPrice) * 0.95, `liquidation ${quote.body.liquidationPrice} for a 10x long`);
     assert.deepEqual([quote.body.collateralUsd, quote.body.orderValueUsd, quote.body.platformFeeUsd], ['1000', '10000', '0']);
-    assert.deepEqual([quote.body.fundingRateHourlyPct, quote.body.borrowRateHourlyPct], [by.SOL!.fundingRateHourlyLong, by.SOL!.borrowRateHourlyLong]);
+    const quoted = service.market('SOL')!; // the row the quote read: live rates move, and the catalog rebuilds at most once a second
+    assert.deepEqual([quote.body.fundingRateHourlyPct, quote.body.borrowRateHourlyPct], [quoted.fundingRateHourlyLong, quoted.borrowRateHourlyLong]);
+    assert.deepEqual([quote.body.maxSizeUsd, quote.body.maxLeverage], [quoted.maxSizeLong, quoted.maxLeverageLong]);
     for (const [bad, status] of [['side=Up&sizeUsd=1', 400], ['side=Long&sizeUsd=abc', 400], ['side=Long&sizeUsd=0', 400], ['side=Long&sizeUsd=90000000', 422]] as const) {
       const r = await get<ApiError>(`/v1/quote?symbol=SOL&${bad}`);
       assert.equal(r.status, status, bad);

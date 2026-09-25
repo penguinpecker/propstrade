@@ -82,7 +82,7 @@
 :root[data-theme="dark"] .market-highlight:hover { background:#24202c; }
 :root[data-theme="dark"] .favorite-button { color:#a69bad; }
 :root[data-theme="dark"] .favorite-button.selected { color:#bc96df; }
-:root[data-theme="dark"] .favorite-button.selected svg { fill:#443055; }
+:root[data-theme="dark"] .favorite-button.selected svg { fill:currentColor; }
 :root[data-theme="dark"] .steps>div>span { border-color:#584665; }
 :root[data-theme="dark"] .steps .current>span { background:#3b2850; border-color:#8b64ae; }
 :root[data-theme="dark"] .steps .done>span { background:#273c2e; border-color:#48694c; }

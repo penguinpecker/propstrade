@@ -87,7 +87,7 @@ export function stageRestriction(market, stage, usdcMint) {
   if (stage === 'practice') {
     const pool = market.pools.find(p => p.marketToken === market.marketToken);
     const usdcOnly = pool?.pure && (!usdcMint || (pool.longToken === usdcMint && pool.shortToken === usdcMint));
-    return usdcOnly ? null : { label: 'Not available in practice', reason: `${market.symbol} has no USDC-only pool on GMTrade, so it cannot be traded here.` };
+    return usdcOnly ? null : { label: 'Not available in practice', reason: `${market.symbol} has no USDC-only pool, so it cannot be traded here.` };
   }
   if (market.tradable) return null;
   return stage === 'funded'
