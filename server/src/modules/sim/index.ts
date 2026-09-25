@@ -9,10 +9,11 @@ import { createReader } from './read.ts';
 import { registerRoutes } from './routes.ts';
 
 /**
- * SIM_FILL_DELAY_MS: how long after an order (or its last update) the first fill-eligible tick may be; GMTrade keepers
- * take ~2 s. At least the rules pass interval (1 s), which is how fast every process's new orders reach the leader.
+ * SIM_FILL_DELAY_MS: how long after an evaluation order (or its last change) the first fill-eligible tick may be;
+ * GMTrade keepers take ~2 s, and an evaluation keeps that so its fills predict funded ones. Practice orders ignore it:
+ * they fill on the first tick published after the request.
  */
-const Env = z.object({ SIM_FILL_DELAY_MS: z.coerce.number().int().min(1_000).max(60_000).default(2_000) });
+const Env = z.object({ SIM_FILL_DELAY_MS: z.coerce.number().int().min(0).max(60_000).default(2_000) });
 
 export default async function register(ctx: ModuleContext) {
   const marketdata = ctx.services.marketdata;

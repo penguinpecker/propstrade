@@ -8,7 +8,7 @@ import { applyStreamEvent, candlesOptions, createQueryClient, keys } from './que
 const market = (symbol: string, updatedAt: number | null): Market => ({
   symbol, pair: `${symbol} / USD`, name: symbol, category: 'Crypto', subcategory: 'Layer 1 & 2', marketToken: 'token', pools: [], tradable: true,
   price: '100', priceDecimals: 2, indexTokenDecimals: 9, change24h: null, volume24h: null, openInterestLong: null, openInterestShort: null,
-  fundingRateHourlyLong: null, borrowRateHourlyLong: null, borrowRateHourlyShort: null, capacityLong: null, capacityShort: null,
+  fundingRateHourlyLong: null, fundingRateHourlyShort: null, borrowRateHourlyLong: null, borrowRateHourlyShort: null, capacityLong: null, capacityShort: null,
   poolLiquidity: null, maxLeverage: 25, closedMaxLeverage: null, session: 'open', freshness: 'stale', updatedAt,
 });
 const tick = (symbol: string, mid: string, ts: number) => ({ symbol, min: mid, max: mid, mid, ts, session: 'open' as const });

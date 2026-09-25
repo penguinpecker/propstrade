@@ -1,0 +1,21 @@
+/* Pages outside the terminal: the Search page, the full-address block and the rate columns (styles.css holds the rest).
+   Colours are the theme tokens from themes.css, so both themes apply. */
+.full-address{display:flex;flex-direction:column;gap:8px;min-width:0}
+.full-address code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;line-height:1.7;overflow-wrap:anywhere;color:var(--ink)}
+.full-address>span{display:flex;gap:16px;align-items:center}
+.full-address button{display:inline-flex;align-items:center;gap:5px;padding:0;font-size:11px;font-weight:600;color:var(--purple)}
+.full-address.short{flex-direction:row;align-items:center;gap:9px}
+.full-address.short code{font:inherit}
+.full-address.short button{font-size:10px}
+.data-row .full-address.short{display:inline-flex;vertical-align:middle}
+.wallet-summary .full-address{align-items:center;text-align:center;max-width:100%}
+.wallet-summary .full-address>span{justify-content:center}
+.trader-results{display:grid;gap:22px;margin-bottom:12px}
+.trader-address{display:flex;flex-direction:column;gap:8px;padding:20px 22px;border:1px solid var(--line);border-radius:7px;background:var(--surface)}
+.trader-address>span{font-size:10px;color:var(--muted)}
+.trader-results>.surface>.section-heading{padding:20px 23px;margin:0;border-bottom:1px solid var(--line-soft)}
+.records-intro{margin-top:44px}
+.records-intro h2{font-size:22px;letter-spacing:-.02em}
+.records-intro p{font-size:12px;color:var(--muted);margin-top:8px}
+.picker-rates{display:block;font-size:9px;color:var(--muted);margin-top:3px;white-space:nowrap}
+.rates-cell{font-variant-numeric:tabular-nums;white-space:nowrap}

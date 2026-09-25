@@ -255,9 +255,8 @@ try {
     await selectMarket('SOL', 'funded');
     const price = Number((await (await fetch(`${stack.apiUrl}/v1/markets/SOL`)).json()).price);
     await page.getByLabel('Order size in USD').fill('50');
-    await page.getByRole('switch', { name: 'Enable take profit and stop loss' }).click();
-    await page.locator('.dual-fields').getByLabel('Take profit').fill(String(Math.round(price * 1.2)));
-    await page.locator('.dual-fields').getByLabel('Stop loss').fill(String(Math.round(price * 0.8)));
+    await page.locator('.order-panel').getByLabel('Take profit price').fill(String(Math.round(price * 1.2)));
+    await page.locator('.order-panel').getByLabel('Stop loss price').fill(String(Math.round(price * 0.8)));
     await page.locator('.order-panel').getByRole('button', { name: 'Buy / Long SOL' }).click();
     await page.locator('.order-panel').getByRole('status').getByText('Awaiting execution…').waitFor({ timeout: 30_000 });
     const tracked = (await vault.fetchFunded(funded)).orders.filter(o => !o.order.equals(PublicKey.default));

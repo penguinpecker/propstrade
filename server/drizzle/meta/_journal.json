@@ -43,6 +43,20 @@
       "when": 1790293084012,
       "tag": "0005_candle_windows",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790300670602,
+      "tag": "0006_costs_and_fill_timing",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790303231911,
+      "tag": "0007_hot_query_indexes",
+      "breakpoints": true
     }
   ]
 }

@@ -78,12 +78,14 @@ export function createReader(db: Db, md: MarketDataService, ensurePractice: (wal
     async orders(wallet, id) {
       return (await find(wallet, id)) && orderList(db, id);
     },
-    async history(wallet, id): Promise<ClosedTrade[] | undefined> {
+    async history(wallet, id, limit): Promise<ClosedTrade[] | undefined> {
       if (!(await find(wallet, id))) return undefined;
-      const rows = await db.select().from(closedTrades).where(eq(closedTrades.accountId, id)).orderBy(desc(closedTrades.closedAt));
+      const query = db.select().from(closedTrades).where(eq(closedTrades.accountId, id)).orderBy(desc(closedTrades.closedAt)).$dynamic();
+      const rows = await (limit ? query.limit(limit) : query);
       return rows.map((t) => ({
         id: t.id, symbol: t.symbol, side: t.side, openedAt: t.openedAt.getTime(), closedAt: t.closedAt.getTime(), sizeUsd: trim(t.sizeUsd),
-        entryPrice: trim(t.entryPrice), exitPrice: trim(t.exitPrice), feesUsd: trim(t.feesUsd), netPnl: trim(t.netPnl),
+        entryPrice: trim(t.entryPrice), exitPrice: trim(t.exitPrice), feesUsd: trim(t.feesUsd), orderFeesUsd: trim(t.orderFeesUsd),
+        fundingUsd: trim(t.fundingUsd), borrowUsd: trim(t.borrowUsd), priceImpactUsd: trim(t.priceImpactUsd), netPnl: trim(t.netPnl),
         venue: t.venue, signatures: t.signatures,
       }));
     },

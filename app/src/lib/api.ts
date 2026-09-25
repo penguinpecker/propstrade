@@ -1,9 +1,23 @@
 import type {
-  AccountDetail, AccountSummary, ActivityItem, ApiError, AppConfig, CandleInterval, CandlesResponse, ClosedTrade, Fill, KycStartRequest, Market,
-  MarketTrade, Me, NonceResponse, Notification, Order, Payout, PayoutEligibility, Performance, Position, PriceImpactQuote, Pubkey,
-  SimCloseRequest, SimOrderRequest, SimOrderResponse, SimProtectionRequest, VaultStats, VerifyRequest, VerifyResult,
+  AccountDetail, AccountStatus, AccountSummary, ActivityItem, ApiError, AppConfig, CandleInterval, CandlesResponse, ClosedTrade, Decimal, Fill,
+  KycStartRequest, Market, MarketTrade, Me, Millis, NonceResponse, Notification, Order, Payout, PayoutEligibility, PayoutStatus, Performance,
+  Position, PriceImpactQuote, Pubkey, SimCloseRequest, SimOrderRequest, SimOrderResponse, SimProtectionRequest, Stage, VaultStats,
+  VerifyRequest, VerifyResult,
 } from '@props/shared';
 import { env } from './env';
+
+/**
+ * GET /v1/traders/:address: what is public about a wallet's trading (every stage; never identity data). 404
+ * `unknown_trader` for a wallet the service has not seen, 400 for a malformed address. Here until the shared contract
+ * carries it.
+ */
+export interface TraderLookup {
+  address: Pubkey;
+  accounts: { id: string; stage: Stage; status: AccountStatus; sizeUsd: Decimal; equityUsd: Decimal; createdAt: Millis }[];
+  positions: Position[];
+  trades: ClosedTrade[];
+  payouts: { id: string; status: PayoutStatus; amountUsd: Decimal; requestedAt: Millis; paidAt: Millis | null; signature: string | null }[];
+}
 
 /** A failed API call. `status` 0 means the service could not be reached at all. */
 export class ApiRequestError extends Error {
@@ -62,8 +76,9 @@ export const api = {
   marketTrades: (symbol: string, limit?: number) => request<MarketTrade[]>('GET', `/v1/markets/${id(symbol)}/trades${query({ limit })}`),
   candles: (symbol: string, interval: CandleInterval, from?: number, to?: number) =>
     request<CandlesResponse>('GET', `/v1/candles${query({ symbol, interval, from, to })}`),
-  quote: (symbol: string, side: 'Long' | 'Short', sizeUsd: string) =>
-    request<PriceImpactQuote>('GET', `/v1/quote${query({ symbol, side, sizeUsd })}`),
+  /** `collateralUsd` and `limitPrice` let the server size the close fee and the liquidation price for this order; a server that predates them ignores them. */
+  quote: (symbol: string, side: 'Long' | 'Short', sizeUsd: string, collateralUsd?: string, limitPrice?: string) =>
+    request<PriceImpactQuote>('GET', `/v1/quote${query({ symbol, side, sizeUsd, collateralUsd, limitPrice })}`),
 
   nonce: (wallet: Pubkey) => request<NonceResponse>('POST', '/v1/auth/nonce', { wallet }),
   /** Sets the session cookie. The body is not a profile: read that from /v1/me. */
@@ -94,6 +109,8 @@ export const api = {
   payout: (payoutId: string) => request<Payout>('GET', `/v1/payouts/${id(payoutId)}`),
 
   verifyRecord: (q: string) => request<VerifyResult>('GET', `/v1/verify${query({ q })}`),
+  /** A wallet's accounts, open positions, recent trades and payouts; public, so anyone can look a trader up. */
+  trader: (address: string) => request<TraderLookup>('GET', `/v1/traders/${id(address)}`),
   vault: () => request<VaultStats>('GET', '/v1/vault'),
 
   /** The trader's residence (KycStartRequest): ISO 3166-1 alpha-2 country and, for Ukraine, the ISO 3166-2 region. */

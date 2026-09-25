@@ -69,7 +69,7 @@ export function market([symbol, name, category, subcategory, price, priceDecimal
     pools: [{ marketToken, name: `${symbol}/USD[${pure ? 'USDC-USDC' : 'WSOL-USDC'}]`, pure, longToken: pure ? USDC_MINT.toBase58() : fakeKey('wsol'), shortToken: USDC_MINT.toBase58() }],
     tradable: pure, ...(pure ? {} : { unavailableReason: 'Not available for funded trading: GMTrade has no USDC-only pool for this market' }),
     price: price.toFixed(priceDecimals), priceDecimals, indexTokenDecimals, change24h: change, volume24h: String(volume),
-    openInterestLong: String(volume * 0.21), openInterestShort: String(volume * 0.13), fundingRateHourlyLong: 0.0012, borrowRateHourlyLong: 0.0008, borrowRateHourlyShort: 0,
+    openInterestLong: String(volume * 0.21), openInterestShort: String(volume * 0.13), fundingRateHourlyLong: 0.0012, fundingRateHourlyShort: -0.0009, borrowRateHourlyLong: 0.0008, borrowRateHourlyShort: 0,
     capacityLong: String(volume * 0.02), capacityShort: String(volume * 0.013), poolLiquidity: String(volume * 0.009),
     maxLeverage: { Crypto: 25, Forex: 20, Commodities: 15, Stocks: 8 }[category], closedMaxLeverage: ['Forex', 'Stocks'].includes(category) ? 8 : null,
     session: symbol === 'NVDA' ? 'closed' : 'open', ...(category === 'Stocks' ? { sessionNote: 'US regular market hours, Mon–Fri 9:30–16:00 New York time' } : {}),
@@ -100,13 +100,23 @@ function onchainMarket(m) {
     [indexMint, { owner: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', data: mint }],
   ];
 }
-const STEP = { '5m': 300, '15m': 900, '1h': 3600, '4h': 14_400, '1D': 86_400 };
+const STEP = { '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800, '1h': 3600, '2h': 7200, '4h': 14_400, '6h': 21_600, '12h': 43_200, '1D': 86_400, '1W': 604_800, '1M': 2_592_000 };
+/** Bucket start as the server aligns them: multiples of the span, weeks from Monday 00:00 UTC, months by the calendar. */
+const bucketStart = (interval, t) => {
+  if (interval === '1W') return Math.floor((t - 4 * 86_400) / 604_800) * 604_800 + 4 * 86_400;
+  if (interval === '1M') { const d = new Date(t * 1000); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth()) / 1000; }
+  return Math.floor(t / STEP[interval]) * STEP[interval];
+};
+/** 120 bars ending at the current bucket; the calendar intervals count back by their own buckets. */
 export function candles(m, interval) {
-  const step = STEP[interval], end = Math.floor(Date.now() / 1000 / step) * step, last = Number(m.price);
-  return Array.from({ length: 120 }, (_, i) => {
+  const step = STEP[interval], last = Number(m.price);
+  let end = bucketStart(interval, Math.floor(Date.now() / 1000));
+  const times = [end];
+  for (let i = 1; i < 120; i++) { end = interval === '1M' || interval === '1W' ? bucketStart(interval, end - 1) : end - step; times.unshift(end); }
+  return times.map((time, i) => {
     const drift = k => last * (1 + Math.sin((k + 1) * 0.37) * 0.004 - (119 - k) * 0.0001);
     const open = drift(i - 1), close = i === 119 ? last : drift(i);
-    return { time: end - (119 - i) * step, open, high: Math.max(open, close) * 1.0006, low: Math.min(open, close) * 0.9994, close };
+    return { time, open, high: Math.max(open, close) * 1.0006, low: Math.min(open, close) * 0.9994, close };
   });
 }
 
@@ -148,11 +158,11 @@ function createWallet(state, wallet) {
     ],
   };
   const sol = state.markets.find(m => m.symbol === 'SOL');
-  w.positions[evalActive].push({ id: 'pos-sol', symbol: 'SOL', side: 'Long', sizeUsd: '4600', sizeTokens: '30.2944', collateralUsd: '1533.33', leverage: 3, entryPrice: '145.49', markPrice: sol.price, liquidationPrice: '98.12', unrealizedPnl: '192.52', pendingFeesUsd: '0.84', takeProfit: { price: '168', orderId: 'tp-sol', status: 'awaiting_price' }, stopLoss: null, openedAt: now - 5 * HOUR, venue: 'simulated' });
+  w.positions[evalActive].push({ id: 'pos-sol', symbol: 'SOL', side: 'Long', sizeUsd: '4600', sizeTokens: '30.2944', collateralUsd: '1533.33', leverage: 3, entryPrice: '145.49', markPrice: sol.price, liquidationPrice: '98.12', unrealizedPnl: '192.52', pendingFeesUsd: '3.60', pendingBorrowUsd: '0.62', pendingFundingUsd: '0.22', closeFeeUsd: '2.76', closing: false, takeProfit: { price: '168', orderId: 'tp-sol', status: 'awaiting_price' }, stopLoss: null, openedAt: now - 5 * HOUR, venue: 'simulated' });
   w.orders[evalActive].push({ id: 'ord-eth', symbol: 'ETH', side: 'Long', kind: 'Limit', isIncrease: true, sizeUsd: '3000', collateralUsd: '1000', triggerPrice: '2580', acceptablePrice: null, status: 'awaiting_price', createdAt: now - 3 * HOUR, updatedAt: now - 3 * HOUR });
   for (const [i, [symbol, side, pnl]] of [['BTC', 'Long', '73.25'], ['XAU', 'Short', '36.20'], ['ETH', 'Long', '-49.86']].entries())
-    w.history[evalActive].push({ id: `trade-${i}`, symbol, side, openedAt: now - (i + 2) * DAY, closedAt: now - (i + 1) * DAY, sizeUsd: '5200', entryPrice: '100', exitPrice: '101', feesUsd: '3.12', netPnl: pnl, venue: 'simulated', signatures: [] });
-  w.history[funded].push({ id: 'funded-trade-0', symbol: 'BTC', side: 'Long', openedAt: now - 3 * DAY, closedAt: now - 2 * DAY, sizeUsd: '8200', entryPrice: '63842.5', exitPrice: '64412.8', feesUsd: '4.92', netPnl: '312.50', venue: 'gmtrade', signatures: [fakeSignature('funded-open'), fakeSignature('funded-close')] });
+    w.history[evalActive].push({ id: `trade-${i}`, symbol, side, openedAt: now - (i + 2) * DAY, closedAt: now - (i + 1) * DAY, sizeUsd: '5200', entryPrice: '100', exitPrice: '101', ...costs('3.12', '2.60', '0.31', '0.21', '-0.45'), netPnl: pnl, venue: 'simulated', signatures: [] });
+  w.history[funded].push({ id: 'funded-trade-0', symbol: 'BTC', side: 'Long', openedAt: now - 3 * DAY, closedAt: now - 2 * DAY, sizeUsd: '8200', entryPrice: '63842.5', exitPrice: '64412.8', ...costs('4.92', '4.10', '0.50', '0.32', '0.18'), netPnl: '312.50', venue: 'gmtrade', signatures: [fakeSignature('funded-open'), fakeSignature('funded-close')] });
   w.payouts.push(payout(w, 0, 'paid', now - 2 * DAY));
   w.payoutSeq = 1;
   state.wallets.set(wallet, w);
@@ -182,6 +192,8 @@ function payout(w, seq, status, requestedAt) {
   };
 }
 
+/** A closed trade's costs: feesUsd = orderFeesUsd + fundingUsd + borrowUsd; price impact is inside the prices. */
+const costs = (feesUsd, orderFeesUsd, fundingUsd, borrowUsd, priceImpactUsd) => ({ feesUsd, orderFeesUsd, fundingUsd, borrowUsd, priceImpactUsd });
 const gmPositionData = sizeUsd => {
   const data = Buffer.alloc(POSITION_LAYOUT.length);
   Buffer.from(POSITION_DISCRIMINATOR).copy(data, 0);
@@ -193,7 +205,7 @@ const gmPositionData = sizeUsd => {
 // ---------- server ----------
 export async function startStub() {
   const state = {
-    genesis: MAINNET_GENESIS, streamUp: true, streamDelayMs: 0, sessions: new Map(), nonces: new Map(), streams: new Set(), logouts: 0, signatures: 0,
+    genesis: MAINNET_GENESIS, streamUp: true, streamDelayMs: 0, closeDelayMs: 1000, cancelNextClose: null, sessions: new Map(), nonces: new Map(), streams: new Set(), logouts: 0, signatures: 0,
     markets: MARKETS.map(m => market(m)), wallets: new Map(), accounts: new Map(), statuses: new Map(), sent: [], simulationLogs: null, simulations: 0, blockHeight: 10, trustKeys: new Map(),
   };
   for (const t of TIERS) state.accounts.set(tierPda(t.id).toBase58(), { owner: PROGRAM_ID, encode: () => tierAccount(t) });
@@ -208,7 +220,7 @@ export async function startStub() {
       const m = state.markets.find(x => x.symbol === order.symbol);
       order.status = 'executed';
       order.updatedAt = Date.now();
-      w.positions[id].push({ id: `pos-${order.id}`, symbol: order.symbol, side: order.side, sizeUsd: order.sizeUsd, sizeTokens: String(Number(order.sizeUsd) / Number(m.price)), collateralUsd: order.collateralUsd, leverage: Number(order.sizeUsd) / Number(order.collateralUsd), entryPrice: m.price, markPrice: m.price, liquidationPrice: null, unrealizedPnl: '0', pendingFeesUsd: '0', takeProfit: null, stopLoss: null, openedAt: Date.now(), venue: 'simulated' });
+      w.positions[id].push({ id: `pos-${order.id}`, symbol: order.symbol, side: order.side, sizeUsd: order.sizeUsd, sizeTokens: String(Number(order.sizeUsd) / Number(m.price)), collateralUsd: order.collateralUsd, leverage: Number(order.sizeUsd) / Number(order.collateralUsd), entryPrice: m.price, markPrice: m.price, liquidationPrice: null, unrealizedPnl: '0', pendingFeesUsd: '0', pendingBorrowUsd: '0', pendingFundingUsd: '0', closeFeeUsd: '0', closing: false, takeProfit: null, stopLoss: null, openedAt: Date.now(), venue: 'simulated' });
       publish({ type: 'orders', accountId: id, orders: w.orders[id] }, w.wallet);
       publish({ type: 'positions', accountId: id, positions: w.positions[id] }, w.wallet);
     });
@@ -233,11 +245,15 @@ export async function startStub() {
         state.accounts.set(order, { owner: GMTRADE, data: Buffer.alloc(8) });
         later(1500, () => {
           state.accounts.delete(order);
-          const before = state.accounts.get(position)?.data.readBigUInt64LE(POSITION_LAYOUT.sizeInUsd) ?? 0n; // sizes here fit in 64 bits
-          const size = before + BigInt(decoded.data.args.sizeDeltaUsd.toString());
-          state.accounts.set(position, { owner: GMTRADE, data: gmPositionData(increase ? size : 0n) });
+          const held = state.accounts.get(position)?.data;
+          const before = held ? held.readBigUInt64LE(POSITION_LAYOUT.sizeInUsd) | (held.readBigUInt64LE(POSITION_LAYOUT.sizeInUsd + 8) << 64n) : 0n;
+          const delta = BigInt(decoded.data.args.sizeDeltaUsd.toString());
+          const size = increase ? before + delta : delta < before ? before - delta : 0n; // CLOSE_ALL (or more than the position) closes it
+          state.accounts.set(position, { owner: GMTRADE, data: gmPositionData(size) });
           const btc = state.markets.find(m => m.symbol === 'BTC');
-          w.positions[w.funded] = increase ? [{ id: position, symbol: 'BTC', side: decoded.data.args.isLong ? 'Long' : 'Short', sizeUsd: String(size / 10n ** 20n), sizeTokens: String(Number(size / 10n ** 20n) / Number(btc.price)), collateralUsd: String(Number(decoded.data.args.collateral) / 1e6), leverage: 5, entryPrice: btc.price, markPrice: btc.price, liquidationPrice: null, unrealizedPnl: '0', pendingFeesUsd: '0', takeProfit: null, stopLoss: null, openedAt: Date.now(), venue: 'gmtrade', gmPosition: position }] : [];
+          const [current] = w.positions[w.funded];
+          w.positions[w.funded] = size === 0n ? [] : increase ? [{ id: position, symbol: 'BTC', side: decoded.data.args.isLong ? 'Long' : 'Short', sizeUsd: String(size / 10n ** 20n), sizeTokens: String(Number(size / 10n ** 20n) / Number(btc.price)), collateralUsd: String(Number(decoded.data.args.collateral) / 1e6), leverage: 5, entryPrice: btc.price, markPrice: btc.price, liquidationPrice: null, unrealizedPnl: '0', pendingFeesUsd: '0', pendingBorrowUsd: '0', pendingFundingUsd: '0', closeFeeUsd: '0', closing: false, takeProfit: null, stopLoss: null, openedAt: Date.now(), venue: 'gmtrade', gmPosition: position }]
+            : [{ ...current, sizeUsd: String(size / 10n ** 20n), sizeTokens: String(Number(size / 10n ** 20n) / Number(btc.price)) }];
           publish({ type: 'positions', accountId: w.funded, positions: w.positions[w.funded] }, w.wallet);
         });
       }
@@ -377,9 +393,22 @@ export async function startStub() {
         return m ? send(res, 200, { symbol: m.symbol, interval: url.searchParams.get('interval'), candles: candles(m, url.searchParams.get('interval')), source: 'gmtrade', freshness: 'live' }) : notFound(res);
       }
       case 'GET /v1/quote': {
+        // Fixture arithmetic: fees at 6 bps a leg, a liquidation 90% of the margin away, carry from the market's rates for the side.
         const m = state.markets.find(x => x.symbol === url.searchParams.get('symbol'));
+        const side = url.searchParams.get('side');
         const size = Number(url.searchParams.get('sizeUsd'));
-        return send(res, 200, { symbol: m.symbol, side: url.searchParams.get('side'), sizeUsd: size.toFixed(6), priceImpactPct: size / 1e7, openFeeUsd: (size * 0.0006).toFixed(6), executionPrice: (Number(m.price) * (1 + size / 1e9)).toFixed(m.priceDecimals) });
+        const collateral = url.searchParams.get('collateralUsd');
+        const limit = url.searchParams.get('limitPrice');
+        const entry = limit ? Number(limit) : Number(m.price) * (1 + size / 1e9);
+        const fee = size * 0.0006;
+        const funding = side === 'Long' ? m.fundingRateHourlyLong : m.fundingRateHourlyShort, borrow = side === 'Long' ? m.borrowRateHourlyLong : m.borrowRateHourlyShort;
+        const liquidation = collateral ? entry * (1 + (side === 'Long' ? -1 : 1) * Number(collateral) * 0.9 / size) : null;
+        return send(res, 200, {
+          symbol: m.symbol, side, sizeUsd: size.toFixed(6), priceImpactPct: size / 1e7, openFeeUsd: fee.toFixed(6), executionPrice: entry.toFixed(m.priceDecimals),
+          orderValueUsd: size.toFixed(6), collateralUsd: collateral ?? null, closeFeeUsd: fee.toFixed(6), roundTripFeeUsd: (fee * 2).toFixed(6),
+          fundingRateHourlyPct: funding, borrowRateHourlyPct: borrow, hourlyCostUsd: (size * (borrow + Math.max(0, funding)) / 100).toFixed(6),
+          liquidationPrice: liquidation === null ? null : liquidation.toFixed(m.priceDecimals), platformFeeUsd: '0',
+        });
       }
       case 'GET /v1/notifications': return needWallet() || send(res, 200, w.notifications);
       case 'POST /v1/notifications/read':
@@ -429,6 +458,20 @@ export async function startStub() {
       if (needWallet()) return;
       const p = w.payouts.find(x => x.id === match[1]);
       return p ? send(res, 200, p) : notFound(res);
+    }
+    // Public: a trader by wallet address (the Search page); a wallet this stub never served is unknown.
+    if ((match = /^GET \/v1\/traders\/([^/]+)$/.exec(route))) {
+      const address = decodeURIComponent(match[1]);
+      if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address)) return send(res, 400, { error: { code: 'bad_address', message: 'Not a Solana address.' } });
+      const t = state.wallets.get(address);
+      if (!t) return send(res, 404, { error: { code: 'unknown_trader', message: 'No trader with this address.' } });
+      return send(res, 200, {
+        address,
+        accounts: t.accounts.map(a => ({ id: a.id, stage: a.stage, status: a.status, sizeUsd: a.rules.sizeUsd, equityUsd: a.equity, createdAt: a.createdAt })),
+        positions: Object.values(t.positions).flat(),
+        trades: Object.values(t.history).flat().sort((a, b) => b.closedAt - a.closedAt).slice(0, 50),
+        payouts: t.payouts.map(p => ({ id: p.id, status: p.status, amountUsd: p.traderAmount, requestedAt: p.requestedAt, paidAt: p.status === 'paid' ? p.resolvedAt : null, signature: p.paySignature ?? null })),
+      });
     }
     if ((match = /^GET \/v1\/markets\/(\w+)\/trades$/.exec(route))) {
       const m = state.markets.find(x => x.symbol === match[1]);
@@ -480,12 +523,24 @@ export async function startStub() {
       const id = decodeURIComponent(match[1]);
       const position = (w.positions[id] ?? []).find(p => p.id === decodeURIComponent(match[2]));
       if (!position) return notFound(res);
-      later(1000, () => {
-        w.positions[id] = w.positions[id].filter(p => p !== position);
-        w.history[id].unshift({ id: `closed-${position.id}`, symbol: position.symbol, side: position.side, openedAt: position.openedAt, closedAt: Date.now(), sizeUsd: position.sizeUsd, entryPrice: position.entryPrice, exitPrice: position.markPrice, feesUsd: '1.20', netPnl: position.unrealizedPnl, venue: 'simulated', signatures: [] });
+      // Like the engine: the close order is listed while it waits, then the fill drops the position (or, when the test
+      // asked for it through state.cancelNextClose, the order is canceled with that reason and the position stays).
+      const order = { id: `close-${position.id}-${w.nextId++}`, symbol: position.symbol, side: position.side, kind: 'Market', isIncrease: false, sizeUsd: position.sizeUsd, collateralUsd: null, triggerPrice: null, acceptablePrice: null, status: 'awaiting_execution', createdAt: Date.now(), updatedAt: Date.now() };
+      w.orders[id].push(order);
+      const cancel = state.cancelNextClose;
+      state.cancelNextClose = null;
+      later(state.closeDelayMs, () => {
+        order.updatedAt = Date.now();
+        if (cancel) { order.status = 'canceled'; order.statusDetail = cancel; }
+        else {
+          order.status = 'executed';
+          w.positions[id] = w.positions[id].filter(p => p !== position);
+          w.history[id].unshift({ id: `closed-${position.id}`, symbol: position.symbol, side: position.side, openedAt: position.openedAt, closedAt: Date.now(), sizeUsd: position.sizeUsd, entryPrice: position.entryPrice, exitPrice: position.markPrice, ...costs('1.20', '1.10', '0.06', '0.04', '-0.02'), netPnl: position.unrealizedPnl, venue: 'simulated', signatures: [] });
+        }
+        publish({ type: 'orders', accountId: id, orders: w.orders[id] }, w.wallet);
         publish({ type: 'positions', accountId: id, positions: w.positions[id] }, w.wallet);
       });
-      return send(res, 200, { order: { id: `close-${position.id}`, symbol: position.symbol, side: position.side, kind: 'Market', isIncrease: false, sizeUsd: position.sizeUsd, collateralUsd: null, triggerPrice: null, acceptablePrice: null, status: 'awaiting_execution', createdAt: Date.now(), updatedAt: Date.now() }, account: account(w, id) });
+      return send(res, 200, { order, account: account(w, id) });
     }
     if ((match = /^PUT \/v1\/sim\/([^/]+)\/positions\/([^/]+)\/protection$/.exec(route))) {
       if (needWallet()) return;

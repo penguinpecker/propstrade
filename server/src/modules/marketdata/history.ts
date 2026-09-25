@@ -76,29 +76,30 @@ export function createHistoryStore(sql: Sql, track: <T>(call: () => Promise<T>) 
       if (pending.length > MAX_UNWRITTEN) pending.splice(0, pending.length - MAX_UNWRITTEN);
     },
 
-    /** Writes the queued windows: the latest ones replace their series' previous one, then all are upserted, then the
-     *  series that gained a settled window are evicted beyond KEEP_BARS (oldest fetched first). A failed write keeps
-     *  them for the next flush. Returns whether everything queued was written. */
+    /** Writes the queued windows in one transaction: the latest ones replace their series' previous one, then all are
+     *  upserted, then the series that gained a settled window are evicted beyond KEEP_BARS (oldest fetched first); a
+     *  crash between the steps rolls all of them back, so a series never loses the latest window it restores from. A
+     *  failed write keeps them for the next flush. Returns whether everything queued was written. */
     async flush(): Promise<boolean> {
       if (!pending.length) return true;
       const batch = [...new Map(pending.map((w) => [`${seriesKey(w)}:${w.start}`, w])).values()]; // one row per key: the last queued
       pending = [];
       try {
-        await track(async () => {
+        await track(() => sql.begin(async (tx) => {
           const latest = [...new Map(batch.filter((w) => !w.settled).map((w) => [seriesKey(w), w])).values()];
           if (latest.length) {
-            await sql`delete from candle_windows w
+            await tx`delete from candle_windows w
               using unnest(${latest.map((w) => w.symbol)}::text[], ${latest.map((w) => w.res)}::int[], ${latest.map((w) => w.start)}::bigint[]) as v(symbol, resolution, start_time)
               where w.symbol = v.symbol and w.resolution = v.resolution and not w.settled and w.start_time <> v.start_time`;
           }
-          await sql`insert into candle_windows ${sql(batch.map((w) => ({
+          await tx`insert into candle_windows ${tx(batch.map((w) => ({
             symbol: w.symbol, resolution: w.res, start_time: w.start, end_time: w.end, candles: JSON.stringify(w.candles), fetched_at: new Date(w.at).toISOString(), settled: w.settled,
           })))} on conflict (symbol, resolution, start_time) do update
             set end_time = excluded.end_time, candles = excluded.candles, fetched_at = excluded.fetched_at, settled = excluded.settled`;
           const grown = [...new Map(batch.filter((w) => w.settled).map((w) => [seriesKey(w), w])).values()];
           if (grown.length) {
             // A settled window goes once the ones fetched after it already hold KEEP_BARS bars of the series.
-            await sql`delete from candle_windows w using (
+            await tx`delete from candle_windows w using (
                 select symbol, resolution, start_time,
                   sum(bars) over (partition by symbol, resolution order by fetched_at desc, start_time rows between unbounded preceding and current row) - bars as before
                 from (
@@ -106,9 +107,9 @@ export function createHistoryStore(sql: Sql, track: <T>(call: () => Promise<T>) 
                   where settled and (symbol, resolution) in (select * from unnest(${grown.map((w) => w.symbol)}::text[], ${grown.map((w) => w.res)}::int[]))
                 ) s) s
               where w.symbol = s.symbol and w.resolution = s.resolution and w.start_time = s.start_time and s.before >= ${KEEP_BARS}`;
-            stored = (await sql<{ count: number }[]>`select count(*)::int as count from candle_windows where settled`)[0]!.count;
+            stored = (await tx<{ count: number }[]>`select count(*)::int as count from candle_windows where settled`)[0]!.count;
           }
-        });
+        }));
         return true;
       } catch {
         pending = batch.concat(pending).slice(-MAX_UNWRITTEN);

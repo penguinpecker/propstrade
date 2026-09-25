@@ -11,6 +11,7 @@ import { ORDER_DISCRIMINATOR, PROPS_VAULT_PROGRAM_ID, decodeGmPosition, ownerPda
 import type { OrderRemoval, TradeEvent } from '@props/gmtrade';
 import { model, type ModelInput } from '@props/gmsol-wasm';
 import { accountEvents, accounts, closedTrades, evaluations, fundedAccounts, gmOrders, venueFills } from '../../../db/schema.ts';
+import { gmUsd } from '../reader.ts';
 import { createFundedProvider, money } from '../funded.ts';
 import type { ProgramReader } from '../program.ts';
 import type { Notice } from '../projector.ts';
@@ -82,6 +83,14 @@ test('a GMTrade round trip nets exactly what the owner\'s USDC did', () => {
   assert.ok(net < -391 && net > -392);
   assert.equal(trade.sizeUsd, '61030');
   assert.deepEqual(trade.signatures, [...new Set(trip.map((e) => e.signature))]);
+  // The breakdown sums the fills; feesUsd keeps meaning order fees + funding + borrowing (price impact sits in the P&L).
+  const total = (key: 'feeUsd' | 'fundingUsd' | 'borrowUsd' | 'priceImpactUsd') => fills.reduce((sum, f) => sum + Number(f[key]), 0);
+  assert.deepEqual(
+    [trade.orderFeesUsd, trade.fundingUsd, trade.borrowUsd, trade.priceImpactUsd].map(Number).map((v) => v.toFixed(5)),
+    [total('feeUsd'), total('fundingUsd'), total('borrowUsd'), total('priceImpactUsd')].map((v) => v.toFixed(5)),
+  );
+  assert.equal(Number(trade.feesUsd).toFixed(5), (Number(trade.orderFeesUsd) + Number(trade.fundingUsd) + Number(trade.borrowUsd)).toFixed(5));
+  assert.ok(Number(trade.orderFeesUsd) > 0 && Number(trade.borrowUsd) > 0);
   const incPrices = trip.filter((e) => e.isIncrease).map((e) => Number(e.executionPrice) / 1e11);
   assert.ok(Number(trade.entryPrice) > Math.min(...incPrices) && Number(trade.entryPrice) < Math.max(...incPrices));
 });
@@ -214,7 +223,22 @@ test('funded valuation: equity = size − allowance + value, with the GMTrade mo
   assert.ok(Math.abs(Number(p!.entryPrice) - Number(open.executionPrice) / 1e11) < 1e-6, `entry ${p!.entryPrice}`);
   assert.ok(Math.abs(p!.leverage - 10_000 / usd(status.netValue)) < 0.001, `leverage ${p!.leverage} = size / net value`);
   assert.ok(Number(p!.liquidationPrice) < Number(p!.entryPrice));
-  assert.equal(Number(p!.unrealizedPnl), Number(usd(status.pendingPnl).toFixed(6)));
+  // Net, as the sim values its rows and as the account sums it: net value minus collateral, the pending costs split out.
+  assert.equal(Number(p!.unrealizedPnl), Number(usd(status.netValue - collateral).toFixed(6)));
+  assert.equal(p!.unrealizedPnl, s.unrealizedPnl, 'one position: the row and the account agree');
+  assert.ok(Number(p!.unrealizedPnl) < Number(usd(status.pendingPnl).toFixed(6)), 'below the gross price P&L by the pending costs');
+  assert.deepEqual(
+    [p!.pendingBorrowUsd, p!.pendingFundingUsd, p!.closeFeeUsd, p!.pendingFeesUsd, p!.closing],
+    [gmUsd(status.pendingBorrowingFeeValue), gmUsd(status.pendingFundingFeeValue), gmUsd(status.closeOrderFeeValue),
+      gmUsd(status.pendingBorrowingFeeValue + status.pendingFundingFeeValue + status.closeOrderFeeValue), false],
+  );
+  assert.ok(Number(p!.closeFeeUsd) > 0.9);
+  // A pending market decrease of the whole size marks the row as closing.
+  await t.db.insert(gmOrders).values({
+    address: key(), fundedAccount: funded, marketToken: SOL_MARKET, symbol: 'SOL', side: 'Long', kind: 'Market', isIncrease: false, sizeUsd: '10000',
+    acceptablePrice: '100', status: 'awaiting_execution', createSignature: 'close', createdAt: new Date(),
+  });
+  assert.equal((await provider.positionsOf(v, funded))[0]!.closing, true);
 });
 
 test('lamports sent to a closed GMTrade address do not make it a GMTrade account: no position, the order is gone', async () => {

@@ -12,10 +12,11 @@ import { inflateSync } from 'node:zlib';
 import BN from 'bn.js';
 import Fastify from 'fastify';
 import { Connection, PublicKey } from '@solana/web3.js';
-import type { ApiError, Candle, CandlesResponse, Market, MarketTrade, PriceImpactQuote, PriceTick, StreamEvent } from '@props/shared';
+import type { ApiError, Candle, CandleInterval, CandlesResponse, Market, MarketTrade, PriceImpactQuote, PriceTick, StreamEvent } from '@props/shared';
+import { model, type MarketStatus } from '@props/gmsol-wasm';
 import {
-  IdlCoder, INTERVAL_SECONDS, NO_ACCOUNT, USDC_MINT, base58Encode, decodeMarket, findProgramAddress, getMultipleAccounts, pubkeyBytes,
-  type Idl, type KeeperMarket, type KeeperToken,
+  IdlCoder, INTERVAL_SECONDS, NATIVE_INTERVALS, NO_ACCOUNT, USDC_MINT, base58Encode, decodeMarket, findProgramAddress, getMultipleAccounts,
+  priceString, pubkeyBytes, storeIdl, usdString, type Idl, type KeeperMarket, type KeeperToken,
 } from '@props/gmtrade';
 import { PropsVaultClient } from '@props/sdk';
 import { createDb, type Sql } from '../../db/client.ts';
@@ -23,6 +24,7 @@ import { runMigrations } from '../../db/migrate.ts';
 import { recreateDatabase, testDatabaseUrl } from '../../../test/db.ts';
 import type { ModuleContext } from '../types.ts';
 import register, { candleCacheTtl, candleWindow, changedForDisplay, createMarketData, type MarketDataOptions } from './index.ts';
+import { withPosition } from '../sim/model.ts';
 import { fetchAllowlist, marketConfigAddress } from './allowlist.ts';
 import { covers, createHistoryStore } from './history.ts';
 
@@ -246,7 +248,7 @@ async function stubbedModule(t: TestContext, opts: { sql?: Sql; warnings?: strin
   /** Moves the clock ahead a second at a time, letting each timer's asynchronous work finish before the next second
    *  (with a database, its I/O too). */
   const advance = async (seconds: number) => { for (let i = 0; i < seconds; i++) { t.mock.timers.tick(1_000); await settle(); if (opts.sql) await io(); } };
-  return { service, get, candles, events, tick, advance, settle, stop, jump: (sec: number) => t.mock.timers.setTime(sec * 1000) };
+  return { service, get, candles, events, feed, tick, advance, settle, stop, jump: (sec: number) => t.mock.timers.setTime(sec * 1000) };
 }
 
 /** The module on mock timers (the clock starts at `nowSec`). */
@@ -322,12 +324,23 @@ test('candle pre-warm: every market and interval after start, a resolution again
     ...PREWARM.flatMap((res) => { const w = candleWindow(res, boundary - 29); return chunks.map((tokens) => [true, tokens, res, w.start, w.end]); }),
   ]);
   for (const symbol of ['SOL', 'BTC', 'M7']) {
-    for (const interval of Object.keys(INTERVAL_SECONDS)) {
+    for (const interval of NATIVE_INTERVALS) {
       const r = await get<CandlesResponse>(`/v1/candles?symbol=${symbol}&interval=${interval}`);
       assert.deepEqual([r.status, r.body.freshness, r.body.candles.length, r.headers['cache-control']], [200, 'live', 300, LIVE], `${symbol} ${interval}`);
     }
   }
   assert.equal(candles.calls.length, 11, 'every latest window came from the cache');
+  // A derived interval's latest window is its source's latest window rolled up: from the copy, no call of its own. The
+  // bucket the copy starts inside of is left out (it would show as a whole bar); the bucket in progress is the last.
+  for (const [interval, source] of [['30m', '15m'], ['2h', '1h'], ['6h', '1h'], ['12h', '1h'], ['1W', '1D'], ['1M', '1D']] as const) {
+    const native = (await get<CandlesResponse>(`/v1/candles?symbol=SOL&interval=${source}`)).body.candles;
+    const r = await get<CandlesResponse>(`/v1/candles?symbol=SOL&interval=${interval}`);
+    assert.deepEqual([r.status, r.body.freshness, r.body.source, r.headers['cache-control']], [200, 'live', 'gmtrade', LIVE], interval);
+    assert.deepEqual(r.body.candles, rollup(native, interval).filter((c) => c.time >= native[0]!.time), interval);
+    assert.equal(r.body.candles.at(-1)!.time, rollup(native.slice(-1), interval)[0]!.time, `${interval} ends at the bucket in progress`);
+  }
+  assert.deepEqual((await get<CandlesResponse>('/v1/candles?symbol=SOL&interval=30m')).body.candles.length, 150, '300 15m bars, the first inside a 30m bucket');
+  assert.equal(candles.calls.length, 11, 'no GMTrade call for a derived window');
   // 24h change comes from the warm 5m copy: the close (= bucket time) of the last candle completed 24 h ago.
   await advance(1); // the catalog rebuilds once a second
   const open = Math.floor((boundary - 29 - 86_400 - 300) / 300) * 300;
@@ -381,6 +394,33 @@ test('candles: a window with no copy waits for the pre-warm batch GMTrade is ans
   candles.release(true); // the batch lands, then its own fetch
   const r = await sol;
   assert.deepEqual([r.status, r.body.freshness, r.body.candles.length], [200, 'live', 300]);
+});
+
+test('candles: a settled window nobody holds never queues behind the pre-warm batch: 503 after its own 4 s, and at once while GMTrade is down', { timeout: 20_000 }, async (t) => {
+  const boundary = 1_800_000_600;
+  const { get, candles, advance, settle } = await stubbedStart(t, boundary - 61);
+  candles.hang((c) => (c.batch ? c.to - c.from > 3_600 : true)); // fills and single-token calls hang; the small 24h-change request does not
+  await advance(1); // the first pass: stuck on the 1h fill's first batch
+  const from = boundary - 20 * 86_400;
+  const window = (k: number) => `/v1/candles?symbol=SOL&interval=5m&from=${from + k * 30_000}&to=${from + k * 30_000 + 99 * 300}`;
+  const first = get<ApiError>(window(0));
+  await settle();
+  assert.equal(candles.single().length, 1, 'its own fetch runs, behind the batch');
+  t.mock.timers.tick(4_000); // CANDLE_WAIT_MS, the batch still in flight
+  const r = await first;
+  assert.deepEqual([r.status, r.body.error.code, r.headers['retry-after']], [503, 'unavailable', '5']);
+  // The batch and the fetch fail, then the next batch and another fetch: three failures, the source is down.
+  candles.release(false);
+  await settle();
+  const second = get<ApiError>(window(1));
+  await settle();
+  t.mock.timers.tick(4_000);
+  assert.equal((await second).status, 503);
+  candles.release(false);
+  await settle();
+  const third = await get<ApiError>(window(2)); // no clock tick: answered at once
+  assert.deepEqual([third.status, third.body.error.code, third.headers['retry-after']], [503, 'unavailable', '5']);
+  assert.equal(candles.single().length, 2, 'no fetch while GMTrade is down');
 });
 
 test('candle pre-warm: a market the batch answer leaves out gets no copy, so a request fetches it', async (t) => {
@@ -466,7 +506,7 @@ test('candles: a window with no copy waits for GMTrade, then answers 503 with re
   const third = await get<CandlesResponse>(url);
   assert.deepEqual([third.status, third.body.freshness, third.body.candles.length, third.headers['cache-control']], [200, 'live', 100, SETTLED], 'a new call, not the failure');
   assert.equal(candles.single().length, 2);
-  const bad = await get<ApiError>('/v1/candles?symbol=SOL&interval=2h');
+  const bad = await get<ApiError>('/v1/candles?symbol=SOL&interval=7m');
   assert.deepEqual([bad.status, bad.headers['cache-control']], [400, 'no-store']);
 });
 
@@ -498,7 +538,7 @@ test('candle history: a restarted process serves every latest window live from t
   first.jump(boundary - 30); // a new process 30 s later, on the same table
   const second = await stubbedModule(t, { sql });
   for (const symbol of ['SOL', 'BTC', 'M7']) {
-    for (const interval of Object.keys(INTERVAL_SECONDS)) {
+    for (const interval of NATIVE_INTERVALS) {
       const r = await second.get<CandlesResponse>(`/v1/candles?symbol=${symbol}&interval=${interval}`);
       assert.deepEqual([r.status, r.body.freshness, r.body.candles.length, r.headers['cache-control']], [200, 'live', 300, LIVE], `${symbol} ${interval}`);
     }
@@ -561,6 +601,22 @@ test('candle history: a delayed answer (a copy completed from the price record) 
   await advance(1);
   const after = await untilStored(() => sql<{ start_time: string; end_time: string }[]>`select start_time, end_time from candle_windows where symbol = 'SOL' and resolution = 300 and settled`);
   assert.deepEqual(after.map((x) => [Number(x.start_time), Number(x.end_time)]), [[boundary - 1_500, boundary + 600]], "GMTrade's answer, once it landed");
+});
+
+test('candles: a copy the price record completes through the bucket in progress is live while the copy is under ten minutes old, delayed after', { skip: dbSkip }, async (t) => {
+  const sql = await freshTables();
+  const boundary = 1_800_000_600;
+  const { get, candles, advance, jump } = await stubbedStart(t, boundary - 61, { sql });
+  await advance(1); // the 5m copy, fetched at boundary - 60, ends at boundary - 300
+  candles.hang(true); // GMTrade stops answering; the record goes on: minutes from boundary - 300 to boundary + 840
+  await sql`insert into price_bars ${sql(Array.from({ length: 20 }, (_, i) => ({ symbol: 'SOL', t: boundary - 300 + i * 60, open: '1', high: '1', low: '1', close: '1' })))}`;
+  jump(boundary + 240); // five minutes after the copy
+  const live = await get<CandlesResponse>('/v1/candles?symbol=SOL&interval=5m');
+  assert.deepEqual([live.status, live.body.freshness, live.body.candles.length, live.body.candles.at(-1)!.time, live.headers['cache-control']], [200, 'live', 300, boundary, LIVE]);
+  jump(boundary + 840); // fifteen minutes after the copy: complete to the bucket in progress, still 'delayed'
+  const old = await get<CandlesResponse>('/v1/candles?symbol=SOL&interval=5m');
+  assert.deepEqual([old.status, old.body.freshness, old.body.candles.at(-1)!.time, old.headers['cache-control']], [200, 'delayed', boundary + 600, 'no-store']);
+  assert.equal(candles.single().length, 2, 'a refresh of each key runs meanwhile');
 });
 
 test("candle history: a series' latest window is rewritten when it rotates or five minutes after its last write, not by every pre-warm", { skip: dbSkip }, async (t) => {
@@ -628,6 +684,18 @@ test("candle history store: a series keeps its newest-fetched windows up to the 
   assert.equal(covers([{ start: 0, end: 240 }], 0, 300, 60), false, 'short of the end');
 });
 
+test("candle history store: a flush is one transaction: a failed upsert leaves the series' rotated latest window in place", { skip: dbSkip }, async () => {
+  const sql = await freshTables();
+  const store = createHistoryStore(sql, (call) => call());
+  const window = (start: number, end: number) => ({ symbol: 'SOL', res: 60, start, end, candles: [], settled: false, at: 1_000 });
+  store.put(window(0, 59_940));
+  assert.equal(await store.flush(), true);
+  store.put(window(60_000, Number.NaN)); // the upsert fails (bigint rejects NaN) after the rotated row's delete
+  assert.equal(await store.flush(), false);
+  const latest = await sql<{ start_time: string }[]>`select start_time from candle_windows where not settled`;
+  assert.deepEqual(latest.map((r) => Number(r.start_time)), [0], 'the delete was rolled back with it');
+});
+
 test("candle backfill: after the first pre-warm pass, one aligned page per visit while GMTrade is idle and quick, stopping at its history start; a restart resumes from the table", { skip: dbSkip }, async (t) => {
   const sql = await freshTables();
   const boundary = 1_800_000_600;
@@ -649,28 +717,44 @@ test("candle backfill: after the first pre-warm pass, one aligned page per visit
   first.candles.hang(true); // a request whose window nobody has (10 days back: inside GMTrade's history, beyond every copy): its fetch is in flight
   const user = first.get<CandlesResponse>(`/v1/candles?symbol=SOL&interval=5m&from=${boundary - 10 * 86_400}&to=${boundary - 10 * 86_400 + 99 * 300}`);
   await io();
-  await first.advance(2);
+  await first.advance(3);
   assert.equal(pages(first).length, 1, 'no page while a request fetch is in flight');
-  first.candles.release(true); // answered after 2 s on the clock: too slow for the backfill until a quicker answer
+  first.candles.release(true); // answered after 3 s on the clock: slow, not too slow for the backfill
   first.candles.hang(false);
   await first.settle();
   assert.equal((await user).status, 200);
   await first.advance(2);
-  assert.equal(pages(first).length, 1, 'no page after a slow answer');
-  await first.advance(58); // the pre-warm's minute: quick answers again
-  assert.deepEqual(pages(first)[1], [BTC_INDEX, 300, pageOf(300, 1).start, pageOf(300, 1).end], 'then the next series, BTC 5m');
+  assert.deepEqual(pages(first)[1], [BTC_INDEX, 300, pageOf(300, 1).start, pageOf(300, 1).end], 'the next visit fetches the next series, BTC 5m');
 
-  const fetchedSoFar = pages(first).length;
-  first.candles.hang(true); // the next page fails: the source is degraded until a call succeeds (the pre-warm, a minute later)
+  // A page answered in 4 s, then one that fails ('degraded' until a call succeeds): neither pauses the walk.
+  let fetchedSoFar = pages(first).length;
+  first.candles.hang(true);
   await first.advance(2);
   assert.equal(pages(first).length, fetchedSoFar + 1);
-  first.candles.release(false);
+  await first.advance(4);
+  first.candles.release(true); // 4 s on the clock
+  await first.settle();
+  await first.advance(2);
+  assert.equal(pages(first).length, fetchedSoFar + 2, 'a page after a 4 s answer');
+  first.candles.release(false); // that one fails
   first.candles.hang(false);
   await first.settle();
+  await first.advance(2);
+  assert.equal(pages(first).length, fetchedSoFar + 3, 'a page while the source is degraded');
+  // Three failures in a row make the source 'down': the walk pauses until a call succeeds (the pre-warm, a minute later).
+  fetchedSoFar = pages(first).length;
+  first.candles.hang(true);
+  for (let i = 0; i < 3; i++) {
+    await first.advance(2);
+    first.candles.release(false);
+    await first.settle();
+  }
+  first.candles.hang(false);
+  assert.equal(pages(first).length, fetchedSoFar + 3);
   await first.advance(4);
-  assert.equal(pages(first).length, fetchedSoFar + 1, 'no page while the source is degraded');
+  assert.equal(pages(first).length, fetchedSoFar + 3, 'no page while the source is down');
   await first.advance(60);
-  assert.ok(pages(first).length > fetchedSoFar + 1, 'resumed once the pre-warm succeeded');
+  assert.ok(pages(first).length > fetchedSoFar + 3, 'resumed once the pre-warm succeeded');
 
   const secondHour = () => first.candles.pages().some((c) => c.tokens[0] === BTC_INDEX && c.res === 3_600 && c.from === pageOf(3_600, 2).start);
   await advanceUntil(first, secondHour, 300, "BTC 1h's second page");
@@ -680,7 +764,7 @@ test("candle backfill: after the first pre-warm pass, one aligned page per visit
   const fetched = first.candles.pages();
   assert.equal(fetched.filter((c) => c.tokens[0] === BTC_INDEX && c.res === 3_600).length, 2, 'the empty page is never asked for again');
   assert.equal(new Set(fetched.map((c) => `${c.tokens[0]}:${c.res}:${c.from}`)).size, 9 * 12, 'per market: 1h two pages, 5m and 15m four each, 4h and 1D one empty each');
-  assert.equal(fetched.length, 9 * 12 + 1, 'each page once, plus the attempt that failed');
+  assert.equal(fetched.length, 9 * 12 + 4, 'each page once, plus the four attempts that failed');
   assert.equal(progress(first).windowsStored, 9 * 12 + 1, "the pages and the request's window");
   await first.stop();
 
@@ -724,7 +808,7 @@ const ROW: Market = {
   symbol: 'SOL', pair: 'SOL / USD', name: 'Solana', category: 'Crypto', subcategory: 'Layer 1 & 2', marketToken: SOL_POOL,
   pools: [{ marketToken: SOL_POOL, name: 'SOL/USD[USDC-USDC]', pure: true, longToken: USDC_MINT, shortToken: USDC_MINT }],
   tradable: true, price: '200', priceDecimals: 2, indexTokenDecimals: 9, change24h: 1.23, volume24h: '1000.00',
-  openInterestLong: '1000.00', openInterestShort: '1000.00', fundingRateHourlyLong: 0.001, borrowRateHourlyLong: 0.002, borrowRateHourlyShort: 0.002,
+  openInterestLong: '1000.00', openInterestShort: '1000.00', fundingRateHourlyLong: 0.001, fundingRateHourlyShort: -0.001, borrowRateHourlyLong: 0.002, borrowRateHourlyShort: 0.002,
   capacityLong: '1000.00', capacityShort: '1000.00', poolLiquidity: '1000.00', maxLeverage: 20, closedMaxLeverage: null,
   session: 'open', freshness: 'live', updatedAt: 1_800_000_000_000,
 };
@@ -733,9 +817,11 @@ test('market rows: re-sent only when a figure the app shows moved past its displ
   const changed = (patch: Partial<Market>) => changedForDisplay(ROW, { ...ROW, ...patch });
   assert.equal(changed({}), false);
   assert.equal(changed({ price: '201', updatedAt: ROW.updatedAt! + 1 }), false, 'price and updatedAt travel in the ticks');
-  assert.equal(changed({ borrowRateHourlyLong: 0.9, borrowRateHourlyShort: 0.9 }), false, 'borrow rates are not shown');
   assert.deepEqual([changed({ change24h: 1.239 }), changed({ change24h: 1.24 })], [false, true], '24h change: 2 decimals');
   assert.deepEqual([changed({ fundingRateHourlyLong: 0.00109 }), changed({ fundingRateHourlyLong: 0.0011 })], [false, true], 'funding: 4 decimals');
+  assert.deepEqual([changed({ fundingRateHourlyShort: -0.00109 }), changed({ fundingRateHourlyShort: -0.00111 })], [false, true], 'short funding: 4 decimals');
+  assert.deepEqual([changed({ borrowRateHourlyLong: 0.00209 }), changed({ borrowRateHourlyLong: 0.00211 })], [false, true], 'long borrowing: 4 decimals');
+  assert.deepEqual([changed({ borrowRateHourlyShort: 0.00209 }), changed({ borrowRateHourlyShort: 0.00211 }), changed({ borrowRateHourlyShort: null })], [false, true, true], 'short borrowing: 4 decimals');
   for (const key of ['volume24h', 'openInterestLong', 'openInterestShort', 'capacityLong', 'capacityShort', 'poolLiquidity'] as const) {
     assert.deepEqual([changed({ [key]: '1009.99' }), changed({ [key]: '1010.00' }), changed({ [key]: null })], [false, true, true], key);
   }
@@ -754,6 +840,190 @@ test('market rows: re-sent only when a figure the app shows moved past its displ
   tick('SOL', 201n, false);
   await advance(5);
   assert.deepEqual(rows().slice(19), ['SOL:closed'], 'a session change sends that row');
+});
+
+test('market rows: a funding or borrowing rate moving 0.0001 pp sends the row, a smaller move does not; both sides of funding travel', async (t) => {
+  const { feed, events, tick, advance } = await stubbedStart(t, 1_800_000_539);
+  const status: MarketStatus = {
+    fundingRatePerSecondForLong: 10n ** 12n, fundingRatePerSecondForShort: -3n * 10n ** 12n, borrowingRatePerSecondForLong: 0n, borrowingRatePerSecondForShort: 2n * 10n ** 12n,
+    openInterestForLong: 3_000n * 10n ** 20n, openInterestForShort: 1_000n * 10n ** 20n, liquidityForLong: 10n ** 24n, liquidityForShort: 10n ** 24n,
+    poolValueForLong: 10n ** 24n, poolValueForShort: 10n ** 24n, minCollateralFactorForLong: 0n, minCollateralFactorForShort: 0n,
+  };
+  t.mock.method(model, 'marketStatus', () => status);
+  // SOL's pool gets a Market account image (not Closed, min_collateral_factor 5e18 = 20x) and USDC a price, so the
+  // catalog runs the (mocked) model on it.
+  const image = Buffer.alloc(9_168);
+  image.writeBigUInt64LE(5n * 10n ** 18n, storeIdl.offsetOf('Market', 'config.min_collateral_factor'));
+  feed.accounts.set(SOL_POOL, { data: image.toString('base64'), slot: 1 });
+  feed.tokens.set(USDC_MINT, {
+    pubkey: USDC_MINT, price: { ts: 1_800_000_539, min: '100000000000000', max: '100000000000000', isOpen: true },
+    meta: { name: 'USDC', decimals: 6, precision: 4, isEnabled: true, isSynthetic: false, category: 'Other', indexName: null, uiSymbol: 'USDC', uiName: null, launchTime: null, expectedProvider: 'pyth' },
+  });
+  const sol = () => events.flatMap((e) => (e.type === 'market' && e.market.symbol === 'SOL' ? [e.market] : []));
+  const rates = (m: Market) => [m.fundingRateHourlyLong, m.fundingRateHourlyShort, m.borrowRateHourlyLong, m.borrowRateHourlyShort];
+  const scan = async () => { tick('SOL', 200n); await advance(5); }; // the same price keeps the row's freshness live through the 5 s scan
+  await scan(); // SOL's row carries rates now
+  assert.deepEqual([rates(sol().at(-1)!), sol().at(-1)!.maxLeverage], [[0.0036, -0.0108, 0, 0.0072], 20]); // 1e12 /s × 3600 × 100 / 1e20
+  const sent = sol().length;
+  status.borrowingRatePerSecondForShort += 10n ** 10n; // +0.000036 pp/h: under the display precision
+  await scan();
+  assert.equal(sol().length, sent, 'a move under 0.0001 pp sends nothing');
+  status.borrowingRatePerSecondForShort += 2n * 10n ** 10n; // +0.000108 pp/h since the row was sent
+  await scan();
+  assert.deepEqual([sol().length, rates(sol().at(-1)!)[3]], [sent + 1, 0.007308], 'a borrowing move of 0.0001 pp sends the row');
+  status.fundingRatePerSecondForShort -= 3n * 10n ** 10n; // −0.000108 pp/h
+  await scan();
+  assert.deepEqual([sol().length, rates(sol().at(-1)!)[1]], [sent + 2, -0.010908], 'a short-funding move too');
+});
+
+/** An independent roll-up of `bars` into `interval` buckets, to check the server's: spans from the epoch, weeks
+ *  from Monday 00:00 UTC, calendar months. */
+function rollup(bars: Candle[], interval: CandleInterval): Candle[] {
+  const bucket = (t: number) => {
+    const d = new Date(t * 1000);
+    if (interval === '1W') return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - (d.getUTCDay() + 6) % 7) / 1000;
+    if (interval === '1M') return Date.UTC(d.getUTCFullYear(), d.getUTCMonth()) / 1000;
+    return Math.floor(t / INTERVAL_SECONDS[interval]) * INTERVAL_SECONDS[interval];
+  };
+  const out = new Map<number, Candle>();
+  for (const c of bars) {
+    const time = bucket(c.time);
+    const b = out.get(time);
+    if (b) { b.high = Math.max(b.high, c.high); b.low = Math.min(b.low, c.low); b.close = c.close; }
+    else out.set(time, { time, open: c.open, high: c.high, low: c.low, close: c.close });
+  }
+  return [...out.values()];
+}
+
+test("derived intervals: an older window is rolled up from the source windows it spans through the native path (one fetch, then its own cache key); a window of more than 2,000 source bars answers its newest part; before the source's history it is empty", async (t) => {
+  const boundary = 1_800_000_600;
+  const { get, candles, advance } = await stubbedStart(t, boundary - 61);
+  await advance(1); // the first pass: 11 calls
+  const day = Math.floor((boundary - 61) / 86_400) * 86_400;
+  // Five 2h buckets 20 days back: fetched once, as one 1h window of ten bars (the twelfth call).
+  const from = day - 20 * 86_400;
+  const url = `/v1/candles?symbol=SOL&interval=2h&from=${from}&to=${from + 4 * 7_200 + 3_599}`;
+  const r = await get<CandlesResponse>(url);
+  assert.deepEqual([r.status, r.body.freshness, r.body.source, r.body.candles.length, r.headers['cache-control']], [200, 'live', 'gmtrade', 5, SETTLED]);
+  assert.deepEqual(candles.single().map((c) => [c.res, c.from, c.to]), [[3_600, from, from + 9 * 3_600]]);
+  assert.deepEqual(r.body.candles.map((c) => [c.time, c.open, c.close]), Array.from({ length: 5 }, (_, i) => [from + i * 7_200, 12, from + i * 7_200 + 3_600]), 'each bar closes on its second hour');
+  await get<CandlesResponse>(url);
+  assert.equal(candles.single().length, 1, 'the second request is a hit');
+  // Ten years of months: the source span is capped at 2,000 days, from the first month start inside them.
+  const months = await get<CandlesResponse>(`/v1/candles?symbol=SOL&interval=1M&from=${day - 3_650 * 86_400}&to=${day - 1}`);
+  const fetch = candles.single()[1]!;
+  assert.ok(fetch.res === 86_400 && (fetch.to - fetch.from) / 86_400 + 1 <= 2_000, `${(fetch.to - fetch.from) / 86_400 + 1} source bars`);
+  assert.ok(fetch.from >= day - 2_000 * 86_400 && new Date(fetch.from * 1000).getUTCDate() === 1, `starts on the first month start within the cap (${fetch.from})`);
+  assert.deepEqual([months.status, months.body.freshness, months.headers['cache-control']], [200, 'live', LIVE], 'its last month is in progress: cached for seconds');
+  assert.ok(months.body.candles.length >= 64 && months.body.candles.length <= 67, `${months.body.candles.length} months`);
+  assert.ok(months.body.candles.every((c) => new Date(c.time * 1000).getUTCDate() === 1 && new Date(c.time * 1000).getUTCHours() === 0), 'month starts');
+  assert.deepEqual([months.body.candles[0]!.time, months.body.candles.at(-1)!.close], [fetch.from, fetch.to], 'from the first month fetched to the last day fetched');
+  // Before GMTrade's history (an empty answer, for a window beyond the 300-day 1D copy): empty and final, as a native window is.
+  candles.since(day);
+  const none = await get<CandlesResponse>(`/v1/candles?symbol=SOL&interval=1W&from=${day - 400 * 86_400}&to=${day - 350 * 86_400}`);
+  assert.deepEqual([none.status, none.body.freshness, none.body.candles, none.headers['cache-control']], [200, 'live', [], SETTLED]);
+  assert.equal(candles.single().length, 3, 'fetched once');
+  const bad = await get<ApiError>(`/v1/candles?symbol=SOL&interval=1W&from=${day}&to=${day - 14 * 86_400}`);
+  assert.deepEqual([bad.status, bad.body.error.code], [400, 'bad_request']);
+});
+
+test('derived intervals: 1m and 3m come from the price record with its unwritten tail from memory, bucket-aligned; before the record they answer empty', { skip: dbSkip }, async (t) => {
+  const sql = await freshTables();
+  const boundary = 1_800_000_600;
+  const { get, candles, tick, advance } = await stubbedStart(t, boundary - 61, { sql });
+  await advance(1);
+  const nowMin = boundary - 60; // a multiple of 180
+  // Thirty recorded minutes up to a minute ago, then two ticks in the minute in progress (not written yet).
+  await sql`insert into price_bars ${sql(Array.from({ length: 30 }, (_, i) => ({ symbol: 'SOL', t: nowMin - (30 - i) * 60, open: String(100 + i), high: String(102 + i), low: String(99 + i), close: String(101 + i) })))}`;
+  tick('SOL', 201n);
+  tick('SOL', 199n);
+  const minutes = await get<CandlesResponse>('/v1/candles?symbol=SOL&interval=1m');
+  assert.deepEqual([minutes.status, minutes.body.freshness, minutes.body.source, minutes.body.candles.length, minutes.headers['cache-control']], [200, 'live', 'record', 31, LIVE]);
+  assert.deepEqual(minutes.body.candles[0], { time: nowMin - 1_800, open: 100, high: 102, low: 99, close: 101 });
+  assert.deepEqual(minutes.body.candles.at(-1), { time: nowMin, open: 201, high: 201, low: 199, close: 199 }, 'the minute in progress, from the ticks');
+  const threes = await get<CandlesResponse>('/v1/candles?symbol=SOL&interval=3m');
+  assert.deepEqual([threes.status, threes.body.freshness, threes.body.source, threes.body.candles.length], [200, 'live', 'record', 11]);
+  assert.ok(threes.body.candles.every((c) => c.time % 180 === 0), 'bucket-aligned');
+  assert.deepEqual(threes.body.candles[0], { time: nowMin - 1_800, open: 100, high: 104, low: 99, close: 103 }, 'three minutes to a bar');
+  assert.deepEqual(threes.body.candles.at(-1), { time: nowMin, open: 201, high: 201, low: 199, close: 199 });
+  const before = await get<CandlesResponse>(`/v1/candles?symbol=SOL&interval=3m&from=${nowMin - 10 * 86_400}&to=${nowMin - 9 * 86_400}`);
+  assert.deepEqual([before.status, before.body.freshness, before.body.candles, before.headers['cache-control']], [200, 'live', [], SETTLED], 'history starts with the record');
+  assert.equal(candles.calls.length, 11, 'no GMTrade call');
+});
+
+/** The real SOL/USD[USDC-USDC] Market account and virtual inventory (the gmsol-wasm fixture), clocks a day ahead so
+ *  accrual is a no-op, put into the stub feed with the fixture's prices, so the quote runs GMTrade's model for real. */
+function loadSolMarket(feed: NonNullable<MarketDataOptions['feed']>) {
+  const f = JSON.parse(readFileSync(new URL('../../../../packages/gmsol-wasm/test/fixtures/sol-usdc-usdc.json', import.meta.url), 'utf8')) as {
+    market: string; virtualInventories: Record<string, string>; prices: Record<'index' | 'long' | 'short', { min: string; max: string }>;
+  };
+  const image = Buffer.from(f.market, 'base64');
+  for (const at of [4024, 4032, 4040]) image.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000) + 86_400), at);
+  feed.accounts.set(SOL_POOL, { data: image.toString('base64'), slot: 1 });
+  const [vi] = Object.keys(f.virtualInventories) as [string];
+  feed.accounts.set(vi, { data: f.virtualInventories[vi]!, slot: 1 });
+  feed.markets.get(SOL_POOL)!.virtualInventoryForPositions = vi;
+  const ts = Math.floor(Date.now() / 1000);
+  feed.tokens.get(SOL_INDEX)!.price = { ts, min: f.prices.index.min, max: f.prices.index.max, isOpen: true };
+  feed.tokens.set(USDC_MINT, {
+    pubkey: USDC_MINT, price: { ts, min: f.prices.short.min, max: f.prices.short.max, isOpen: true },
+    meta: { name: 'USDC', decimals: 6, precision: 4, isEnabled: true, isSynthetic: false, category: 'Other', indexName: null, uiSymbol: 'USDC', uiName: null, launchTime: null, expectedProvider: 'pyth' },
+  });
+  return { image: image.toString('base64'), virtualInventories: { [vi]: f.virtualInventories[vi]! }, prices: f.prices };
+}
+
+test('quote: the ticket\'s cost preview from GMTrade\'s model on the real SOL pool — close fee, round trip, hourly cost, liquidation price', { timeout: 30_000 }, async (t) => {
+  const { feed, get, service } = await stubbedModule(t);
+  const sol = loadSolMarket(feed);
+  await new Promise((r) => setTimeout(r, 1_100)); // the catalog rebuilds after a second: SOL's row now carries the rates
+  const row = service.market('SOL')!;
+  assert.ok(row.fundingRateHourlyLong !== null && row.fundingRateHourlyShort !== null && row.borrowRateHourlyShort !== null);
+  const usd = (v: bigint) => Number(v) / 1e20;
+  const prices = { index: { min: BigInt(sol.prices.index.min), max: BigInt(sol.prices.index.max) }, long: { min: BigInt(sol.prices.long.min), max: BigInt(sol.prices.long.max) }, short: { min: BigInt(sol.prices.short.min), max: BigInt(sol.prices.short.max) } };
+  const bare = { market: sol.image, virtualInventories: sol.virtualInventories, prices };
+
+  // A $10,000 short at $1,000 margin. The open fee and impact come from the pool as it is; the close fee and the
+  // liquidation price from the resulting position valued in the pool, as the positions table will show them.
+  const q = await get<PriceImpactQuote>('/v1/quote?symbol=SOL&side=Short&sizeUsd=10000&collateralUsd=1000');
+  assert.equal(q.status, 200, JSON.stringify(q.body));
+  const open = model.simulateIncrease({ market: bare, isLong: false, collateralToken: USDC_MINT, collateralAmount: 1_000_000_000n, sizeDeltaUsd: 10_000n * 10n ** 20n });
+  const status = model.positionStatus({ ...bare, market: withPosition(sol.image, open.position.account) }, open.position.account);
+  assert.deepEqual(
+    [q.body.openFeeUsd, q.body.closeFeeUsd, q.body.roundTripFeeUsd, q.body.liquidationPrice, q.body.collateralUsd, q.body.orderValueUsd, q.body.sizeUsd, q.body.platformFeeUsd],
+    [usdString(open.fees.orderFeeValue), usdString(status.closeOrderFeeValue), usdString(open.fees.orderFeeValue + status.closeOrderFeeValue),
+      priceString(status.liquidationPrice!, 9, 4), '1000', '10000', '10000', '0'],
+  );
+  // Shorts are the larger side of this pool: opening one worsens the balance (1.2 bp), closing it improves it (1 bp).
+  const [openFee, closeFee] = [Number(q.body.openFeeUsd), Number(q.body.closeFeeUsd)];
+  assert.ok(Math.abs(openFee - 1.2) < 0.01 && Math.abs(closeFee - 1) < 0.01 && closeFee < openFee, `open ${openFee} close ${closeFee}`);
+  assert.ok(Number(q.body.liquidationPrice) > Number(q.body.executionPrice) * 1.05 && Number(q.body.liquidationPrice) < Number(q.body.executionPrice) * 1.12,
+    `a 10x short liquidates a bit under 10% above its entry (min collateral 4%), got ${q.body.liquidationPrice} vs ${q.body.executionPrice}`);
+  // Rates are the side's, hourly cost = (borrowing + funding when this side pays) × size, per hour.
+  assert.deepEqual([q.body.fundingRateHourlyPct, q.body.borrowRateHourlyPct], [row.fundingRateHourlyShort, row.borrowRateHourlyShort]);
+  assert.ok(row.fundingRateHourlyShort! > 0 && row.borrowRateHourlyShort! > 0, 'shorts pay both here');
+  assert.ok(Math.abs(Number(q.body.hourlyCostUsd) - ((row.fundingRateHourlyShort! + row.borrowRateHourlyShort!) / 100) * 10_000) < 1e-6, q.body.hourlyCostUsd!);
+
+  // The long side receives funding (never credited here) and pays no borrowing: its hourly cost is nothing.
+  const long = await get<PriceImpactQuote>('/v1/quote?symbol=SOL&side=Long&sizeUsd=10000&collateralUsd=1000');
+  assert.ok(row.fundingRateHourlyLong! < 0 && row.borrowRateHourlyLong === 0, `long rates ${row.fundingRateHourlyLong} ${row.borrowRateHourlyLong}`);
+  assert.deepEqual([long.body.fundingRateHourlyPct, long.body.borrowRateHourlyPct, long.body.hourlyCostUsd], [row.fundingRateHourlyLong, 0, '0']);
+  assert.ok(Number(long.body.liquidationPrice) < Number(long.body.executionPrice) * 0.95, `long liquidation ${long.body.liquidationPrice}`);
+  assert.ok(Math.abs(Number(long.body.closeFeeUsd) - 1.2) < 0.01, 'closing a long worsens the balance here: 1.2 bp');
+
+  // Without collateral the quote prices at 1x (as before); the fees do not depend on the margin.
+  const lever = await get<PriceImpactQuote>('/v1/quote?symbol=SOL&side=Short&sizeUsd=10000');
+  assert.deepEqual([lever.body.collateralUsd, lever.body.openFeeUsd, lever.body.closeFeeUsd], [null, q.body.openFeeUsd, q.body.closeFeeUsd]);
+  assert.ok(Number(lever.body.liquidationPrice) > Number(q.body.liquidationPrice), 'more margin, a farther liquidation');
+  // A limit order is priced at its limit price.
+  const limitPrice = (Number(q.body.executionPrice) * 0.97).toFixed(4);
+  const limit = await get<PriceImpactQuote>(`/v1/quote?symbol=SOL&side=Long&sizeUsd=10000&collateralUsd=1000&limitPrice=${limitPrice}`);
+  assert.equal(limit.status, 200, JSON.stringify(limit.body));
+  assert.ok(Math.abs(Number(limit.body.executionPrice) / Number(limitPrice) - 1) < 0.001, `priced at the limit: ${limit.body.executionPrice} vs ${limitPrice}`);
+  assert.ok(Number(limit.body.liquidationPrice) < Number(limitPrice) && Number(limit.body.liquidationPrice) < Number(long.body.liquidationPrice));
+  for (const bad of ['side=Short&sizeUsd=10000&collateralUsd=0', 'side=Short&sizeUsd=10000&collateralUsd=abc', 'side=Long&sizeUsd=10000&limitPrice=0', 'side=Long&sizeUsd=10000&limitPrice=x']) {
+    assert.equal((await get<ApiError>(`/v1/quote?symbol=SOL&${bad}`)).status, 400, bad);
+  }
+  assert.equal((await get<ApiError>('/v1/quote?symbol=SOL&side=Short&sizeUsd=10000&collateralUsd=1')).status, 422, 'GMTrade refuses 10,000x');
 });
 
 test('live: fetchAnchorIdl reads the IDL GMTrade publishes onchain, identical to the vendored v0.10.0 IDL', { skip, timeout: 30_000 }, async () => {
@@ -798,7 +1068,16 @@ test('live: routes, stream events and service API without a deployed program', {
     const to = Math.floor(Date.now() / 1000 / 3600) * 3600;
     const hours = await get<CandlesResponse>(`/v1/candles?symbol=SOL&interval=1h&from=${to - 23 * 3600}&to=${to}`);
     assert.equal(hours.body.candles.length, 24);
-    for (const bad of ['symbol=SOL&interval=2h', 'symbol=SOL&interval=toString', 'interval=1h', 'symbol=SOL&interval=1h&from=7200&to=3600', 'symbol=SOL&interval=5m&from=0', 'symbol=SOL&interval=1h&from=-1']) {
+    // Derived intervals roll up the native windows just fetched: the same bars, no further wait.
+    const halfHours = await get<CandlesResponse>('/v1/candles?symbol=SOL&interval=30m');
+    assert.deepEqual([halfHours.status, halfHours.body.freshness, halfHours.body.source], [200, 'live', 'gmtrade']);
+    assert.deepEqual(halfHours.body.candles, rollup(candles.body.candles, '30m').filter((c) => c.time >= candles.body.candles[0]!.time));
+    const twoHours = await get<CandlesResponse>(`/v1/candles?symbol=SOL&interval=2h&from=${to - 23 * 3600}&to=${to}`);
+    assert.deepEqual(twoHours.body.candles, rollup(hours.body.candles, '2h'), 'the 24 hours as 12 two-hour bars');
+    const weeks = await get<CandlesResponse>('/v1/candles?symbol=SOL&interval=1W');
+    assert.ok(weeks.body.candles.length >= 20, `${weeks.body.candles.length} weeks (GMTrade's SOL 1D history starts 2026-04-10: 25 on 2026-09-25)`);
+    assert.ok(weeks.body.candles.every((c) => new Date(c.time * 1000).getUTCDay() === 1), 'weeks start on Monday');
+    for (const bad of ['symbol=SOL&interval=7m', 'symbol=SOL&interval=toString', 'interval=1h', 'symbol=SOL&interval=1h&from=7200&to=3600', 'symbol=SOL&interval=5m&from=0', 'symbol=SOL&interval=1h&from=-1']) {
       const r = await get<ApiError>(`/v1/candles?${bad}`);
       assert.deepEqual([r.status, r.body.error.code], [400, 'bad_request'], bad);
     }
@@ -811,12 +1090,17 @@ test('live: routes, stream events and service API without a deployed program', {
       assert.match(t.price, DECIMAL);
     }
 
-    const quote = await get<PriceImpactQuote>('/v1/quote?symbol=SOL&side=Long&sizeUsd=10000');
+    const quote = await get<PriceImpactQuote>('/v1/quote?symbol=SOL&side=Long&sizeUsd=10000&collateralUsd=1000');
     assert.equal(quote.status, 200);
     const fee = Number(quote.body.openFeeUsd);
     assert.ok(fee >= 0.99 && fee <= 1.21, `open fee ${fee} for $10k at 0.010-0.012%`);
     assert.ok(Math.abs(quote.body.priceImpactPct) < 0.5);
     assert.ok(Math.abs(Number(quote.body.executionPrice) / Number(by.SOL!.price) - 1) < 0.01);
+    const close = Number(quote.body.closeFeeUsd);
+    assert.ok(close >= 0.99 && close <= 1.21 && Math.abs(Number(quote.body.roundTripFeeUsd) - fee - close) < 1e-6, `close fee ${close}`);
+    assert.ok(Number(quote.body.liquidationPrice) < Number(quote.body.executionPrice) * 0.95, `liquidation ${quote.body.liquidationPrice} for a 10x long`);
+    assert.deepEqual([quote.body.collateralUsd, quote.body.orderValueUsd, quote.body.platformFeeUsd], ['1000', '10000', '0']);
+    assert.deepEqual([quote.body.fundingRateHourlyPct, quote.body.borrowRateHourlyPct], [by.SOL!.fundingRateHourlyLong, by.SOL!.borrowRateHourlyLong]);
     for (const [bad, status] of [['side=Up&sizeUsd=1', 400], ['side=Long&sizeUsd=abc', 400], ['side=Long&sizeUsd=0', 400], ['side=Long&sizeUsd=90000000', 422]] as const) {
       const r = await get<ApiError>(`/v1/quote?symbol=SOL&${bad}`);
       assert.equal(r.status, status, bad);

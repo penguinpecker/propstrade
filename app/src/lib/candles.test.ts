@@ -1,8 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CandlesResponse } from '@props/shared';
-import { SNAPSHOT_BARS, SNAPSHOT_MAX_AGE_MS, SNAPSHOT_PAIRS, applyTick, readCandleSnapshot, writeCandleSnapshot } from './candles';
+import { INTERVALS, INTERVAL_SECONDS, SNAPSHOT_BARS, SNAPSHOT_MAX_AGE_MS, SNAPSHOT_PAIRS, applyTick, bucketNext, bucketStart, isInterval, readCandleSnapshot, writeCandleSnapshot } from './candles';
 
 const last = { time: 3600, open: 100, high: 105, low: 99, close: 102 };
+
+describe('intervals', () => {
+  it('offers the 13 chart intervals, shortest first, each with its span', () => {
+    expect(INTERVALS).toEqual(['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1D', '1W', '1M']);
+    expect(INTERVALS.map(i => INTERVAL_SECONDS[i])).toEqual([60, 180, 300, 900, 1800, 3600, 7200, 14_400, 21_600, 43_200, 86_400, 604_800, 2_592_000]);
+    expect(isInterval('3m')).toBe(true);
+    for (const bad of ['7m', '1d', 1, null, 'constructor']) expect(isInterval(bad)).toBe(false);
+  });
+
+  it('starts weeks on Monday 00:00 UTC and months on the first, as the server does; the rest are multiples of the span', () => {
+    const wed = Date.UTC(2026, 8, 23, 15, 42) / 1000; // Wednesday 2026-09-23
+    expect(bucketStart('1W', wed)).toBe(Date.UTC(2026, 8, 21) / 1000);
+    expect(bucketNext('1W', wed)).toBe(Date.UTC(2026, 8, 28) / 1000);
+    expect(bucketStart('1M', wed)).toBe(Date.UTC(2026, 8, 1) / 1000);
+    expect(bucketNext('1M', wed)).toBe(Date.UTC(2026, 9, 1) / 1000);
+    expect(bucketNext('1M', Date.UTC(2026, 11, 31) / 1000)).toBe(Date.UTC(2027, 0, 1) / 1000);
+    expect(bucketStart('3m', 1_700_000_150)).toBe(1_700_000_100);
+    expect(bucketNext('12h', wed)).toBe(Date.UTC(2026, 8, 24) / 1000);
+  });
+});
 
 describe('applyTick', () => {
   it('moves the close, high and low of the current candle', () => {
@@ -13,6 +33,15 @@ describe('applyTick', () => {
   it('opens the next candle at the previous close', () => {
     expect(applyTick(last, 103, 7_200_000, '1h')).toEqual({ time: 7200, open: 102, high: 103, low: 102, close: 103 });
     expect(applyTick(last, 101, 86_400_000, '1D')).toEqual({ time: 86_400, open: 102, high: 102, low: 101, close: 101 });
+  });
+
+  it('keeps a weekly candle through its Monday-aligned week and a monthly one through its calendar month', () => {
+    const week = { ...last, time: Date.UTC(2026, 8, 21) / 1000 }; // Monday
+    expect(applyTick(week, 104, Date.UTC(2026, 8, 27, 23, 59), '1W')).toMatchObject({ time: week.time, close: 104 });
+    expect(applyTick(week, 104, Date.UTC(2026, 8, 28), '1W')).toMatchObject({ time: Date.UTC(2026, 8, 28) / 1000, open: 102 });
+    const month = { ...last, time: Date.UTC(2026, 9, 1) / 1000 };
+    expect(applyTick(month, 104, Date.UTC(2026, 9, 31, 12), '1M')).toMatchObject({ time: month.time });
+    expect(applyTick(month, 104, Date.UTC(2026, 10, 1), '1M')).toMatchObject({ time: Date.UTC(2026, 10, 1) / 1000 });
   });
 
   it('ignores prices older than the last candle and a chart without candles', () => {

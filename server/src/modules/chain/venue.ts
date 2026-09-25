@@ -154,17 +154,19 @@ export function roundTrip(accountId: string, fills: Fill[]) {
     const size = list.reduce((s, f) => s + d6(f.sizeUsd), 0n);
     return size === 0n ? last.price : formatFixed(list.reduce((s, f) => s + d6(f.sizeUsd) * d18(f.price), 0n) / size, 18, 18);
   };
+  const sum = (of: (f: Fill) => bigint, list = fills) => list.reduce((s, f) => s + of(f), 0n);
   const costs = (f: Fill) => d6(f.feeUsd) + d6(f.fundingUsd) + d6(f.borrowUsd);
   const increases = fills.filter((f) => f.isIncrease);
   const decreases = fills.filter((f) => !f.isIncrease);
-  const net = decreases.reduce((s, f) => s + d6(f.realizedPnl ?? '0'), 0n) - increases.reduce((s, f) => s + costs(f), 0n);
+  const net = sum((f) => d6(f.realizedPnl ?? '0'), decreases) - sum(costs, increases);
   const peak = fills.reduce((m, f) => (d6(f.sizeAfterUsd) > m ? d6(f.sizeAfterUsd) : m), 0n);
   return {
     id: uuidOf(`closed:${last.venueId}`), accountId, symbol: last.symbol, side: last.side, venue: 'gmtrade' as const,
     openedAt: fills[0]!.ts, closedAt: last.ts,
     sizeUsd: fmt6(peak > 0n ? peak : d6(last.sizeUsd)), // peak size; a trip indexed from its closing fill only has the fill
     entryPrice: weighted(increases), exitPrice: weighted(decreases),
-    feesUsd: fmt6(fills.reduce((s, f) => s + costs(f), 0n)), netPnl: fmt6(net),
+    feesUsd: fmt6(sum(costs)), orderFeesUsd: fmt6(sum((f) => d6(f.feeUsd))), fundingUsd: fmt6(sum((f) => d6(f.fundingUsd))),
+    borrowUsd: fmt6(sum((f) => d6(f.borrowUsd))), priceImpactUsd: fmt6(sum((f) => d6(f.priceImpactUsd))), netPnl: fmt6(net),
     signatures: [...new Set(fills.map((f) => f.signature))],
   };
 }
@@ -383,9 +385,13 @@ export function createVenue(d: VenueDeps) {
 
   /** Positions whose last snapshot is not flat: read them even after a sync freed their slot, to record the close. */
   async function openSnapshots(funded: string): Promise<string[]> {
-    const latest = await d.db.selectDistinctOn([gmPositionSnapshots.position], { position: gmPositionSnapshots.position, sizeUsd: gmPositionSnapshots.sizeUsd })
-      .from(gmPositionSnapshots).where(eq(gmPositionSnapshots.fundedAccount, funded))
-      .orderBy(gmPositionSnapshots.position, desc(gmPositionSnapshots.slot));
+    // The account's positions from the (funded_account, position) index, then each one's newest row by primary key:
+    // a distinct-on over every snapshot of the account sorted thousands of rows a tick once it had traded for a while.
+    const seen = d.db.selectDistinct({ position: gmPositionSnapshots.position }).from(gmPositionSnapshots)
+      .where(eq(gmPositionSnapshots.fundedAccount, funded)).as('seen');
+    const last = d.db.select({ position: gmPositionSnapshots.position, sizeUsd: gmPositionSnapshots.sizeUsd }).from(gmPositionSnapshots)
+      .where(eq(gmPositionSnapshots.position, seen.position)).orderBy(desc(gmPositionSnapshots.slot)).limit(1).as('last');
+    const latest = await d.db.select({ position: last.position, sizeUsd: last.sizeUsd }).from(seen).crossJoinLateral(last);
     return latest.filter((r) => d6(r.sizeUsd) !== 0n).map((r) => r.position);
   }
 

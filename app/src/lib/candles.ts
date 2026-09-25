@@ -1,13 +1,34 @@
 import type { Candle, CandleInterval, CandlesResponse } from '@props/shared';
 
-export const INTERVAL_SECONDS: Record<CandleInterval, number> = { '5m': 300, '15m': 900, '1h': 3600, '4h': 14_400, '1D': 86_400 };
+/** Bucket span; a month's is nominal (30 days): week and month buckets follow the calendar (bucketStart). */
+export const INTERVAL_SECONDS: Record<CandleInterval, number> = {
+  '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1_800, '1h': 3_600, '2h': 7_200, '4h': 14_400, '6h': 21_600, '12h': 43_200,
+  '1D': 86_400, '1W': 604_800, '1M': 2_592_000,
+};
+/** Every interval the chart offers, shortest first. */
+export const INTERVALS = Object.keys(INTERVAL_SECONDS) as CandleInterval[];
+export const isInterval = (value: unknown): value is CandleInterval => typeof value === 'string' && Object.hasOwn(INTERVAL_SECONDS, value);
+const MONDAY_EPOCH = 4 * 86_400; // 1970-01-05 00:00 UTC, the first Monday after the epoch
+// The server's bucket rule (packages/gmtrade/src/candles.ts), copied rather than imported: the app does not depend on
+// that package (it pulls graphql-ws and the node WASM in).
+/** Start (unix seconds) of the `interval` bucket holding `t`: multiples of the span, except weeks (Monday 00:00 UTC) and months (calendar, UTC). */
+export function bucketStart(interval: CandleInterval, t: number): number {
+  if (interval === '1W') return Math.floor((t - MONDAY_EPOCH) / 604_800) * 604_800 + MONDAY_EPOCH;
+  if (interval === '1M') { const d = new Date(t * 1000); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth()) / 1000; }
+  return Math.floor(t / INTERVAL_SECONDS[interval]) * INTERVAL_SECONDS[interval];
+}
+/** Start of the bucket after the one holding `t`. */
+export function bucketNext(interval: CandleInterval, t: number): number {
+  if (interval === '1M') { const d = new Date(t * 1000); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1) / 1000; }
+  return bucketStart(interval, t) + INTERVAL_SECONDS[interval];
+}
 
 /**
  * The last candle moved by a live price at `ts` (ms): the same bucket updates it, a later bucket opens a new candle at
  * the previous close. Returns null for a price older than the last candle.
  */
 export function applyTick(last: Candle | null | undefined, price: number, ts: number, interval: CandleInterval): Candle | null {
-  const time = Math.floor(ts / 1000 / INTERVAL_SECONDS[interval]) * INTERVAL_SECONDS[interval];
+  const time = bucketStart(interval, Math.floor(ts / 1000));
   if (!last || time < last.time) return null;
   if (time === last.time) return { ...last, high: Math.max(last.high, price), low: Math.min(last.low, price), close: price };
   return { time, open: last.close, high: Math.max(last.close, price), low: Math.min(last.close, price), close: price };

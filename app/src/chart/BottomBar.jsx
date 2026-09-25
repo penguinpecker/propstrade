@@ -10,7 +10,7 @@ const RANGES = [
   { label: '3m', name: '3 months', interval: '4h', days: 91 },
   { label: '6m', name: '6 months', interval: '4h', days: 182 },
   { label: '1y', name: '1 year', interval: '1D', days: 365 },
-  { label: '5y', name: '5 years', interval: '1D', days: 1826 },
+  { label: '5y', name: '5 years', interval: '1W', days: 1826 },
 ];
 
 function Clock() {

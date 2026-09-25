@@ -84,7 +84,7 @@ try {
     const page = await context.newPage();
     await page.goto(`${siteUrl}/#/trade/practice`);
     const entry = row(page.locator('.order-panel'), 'Estimated entry');
-    await page.locator('.order-panel').getByText('Trading fee').waitFor();
+    await page.locator('.order-panel').getByText('Open fee').waitFor();
     await page.waitForFunction(() => /64,4\d\d/.test(document.querySelector('.execution-details')?.innerText ?? ''));
     await context.route(/\/v1\/quote\?symbol=ETH/, () => undefined); // ETH's quote is still loading
     await page.locator('.watchlist-bar').getByRole('button', { name: /^ETH/ }).click();

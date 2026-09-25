@@ -1,6 +1,6 @@
-import React, { useId, useLayoutEffect, useRef } from 'react';
-import { ArrowUpRight, ArrowRight, ArrowLeft, Bitcoin, CircleDollarSign, Cpu, Euro, PoundSterling, Smartphone, Check, X, ChevronDown, Info, ExternalLink, Star, TriangleAlert, Wallet } from 'lucide-react';
-import { bpsPercent, date, freshnessLabel, usd, utcTime } from './data.js';
+import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { ArrowUpRight, ArrowRight, ArrowLeft, Bitcoin, CircleDollarSign, Copy, Cpu, Euro, PoundSterling, Smartphone, Check, X, ChevronDown, Info, ExternalLink, Star, TriangleAlert, Wallet } from 'lucide-react';
+import { bpsPercent, date, explorerAddress, freshnessLabel, shortAddress, usd, utcTime } from './data.js';
 
 export function Brand({ compact = false }) {
   return <a href="#/" className="brand" aria-label="Props.trade home"><img src="/brand/symbol.svg" alt="" />{!compact && <span>Props<span className="brand-dot">.</span>trade</span>}</a>;
@@ -83,6 +83,16 @@ export function LineGraph({ points, height = 220, muted = false, showLabels = tr
 }
 export function Steps({ active = 1, labels = ['Choose account', 'Connect wallet', 'Start evaluation'] }) { return <div className="steps">{labels.map((label, i) => <div key={label} className={`${i + 1 === active ? 'current' : ''} ${i + 1 < active ? 'done' : ''}`}><span>{i + 1 < active ? <Check size={13} /> : i + 1}</span>{label}{i < labels.length - 1 && <div className="step-rule" />}</div>)}</div>; }
 export function InlineLink({ href, children, external = false }) { return <a href={href} className="inline-link" {...external ? { target: '_blank', rel: 'noreferrer' } : {}}>{children}{external ? <ExternalLink size={13} /> : <ArrowUpRight size={14} />}</a>; }
+/**
+ * A Solana address with a copy button whose label says when the copy worked, and its explorer page. In full, wrapped,
+ * wherever the address is the point; `short` in a dense table, where the full address is the hover and the copy.
+ */
+export function FullAddress({ address, short = false }) {
+  const [outcome, setOutcome] = useState(null); // 'Copied' | 'Copy failed', shown as the button's label for a moment
+  useEffect(() => { if (!outcome) return; const id = setTimeout(() => setOutcome(null), 1800); return () => clearTimeout(id); }, [outcome]);
+  const copy = () => navigator.clipboard.writeText(address).then(() => setOutcome('Copied'), () => setOutcome('Copy failed'));
+  return <div className={`full-address ${short ? 'short' : ''}`}><code title={short ? address : undefined}>{short ? shortAddress(address) : address}</code><span><button type="button" onClick={copy}><Copy size={12} /> {outcome ?? 'Copy'}</button>{!short && <InlineLink href={explorerAddress(address)} external>Explorer</InlineLink>}</span></div>;
+}
 /** Rules in the AccountRules shape (an account's pinned terms, or `tierRules(tier)` before purchase). */
 export function RuleList({ rules }) { const size = Number(rules.sizeUsd), share = pct => bpsPercent(Math.round(pct * 10_000)); return <div className="rule-list"><DataRow label="Profit target" value={rules.profitTargetUsd == null ? 'None' : `${share(Number(rules.profitTargetUsd) / size)} · ${usd(rules.profitTargetUsd, 0)}`} /><DataRow label="Maximum drawdown" value={`${share(Number(rules.lossAllowanceUsd) / size)} · ${usd(rules.lossAllowanceUsd, 0)}`} /><DataRow label="Drawdown type" value="Static · includes open P&L" /><DataRow label="Daily loss limit" value="None" /><DataRow label="Time limit" value="None" /><DataRow label="Your profit share" value={bpsPercent(rules.traderShareBps)} /></div>; }
 /** Loading state for a section. */
