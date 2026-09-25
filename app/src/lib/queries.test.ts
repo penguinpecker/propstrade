@@ -9,7 +9,8 @@ const market = (symbol: string, updatedAt: number | null): Market => ({
   symbol, pair: `${symbol} / USD`, name: symbol, category: 'Crypto', subcategory: 'Layer 1 & 2', marketToken: 'token', pools: [], tradable: true,
   price: '100', priceDecimals: 2, indexTokenDecimals: 9, change24h: null, volume24h: null, openInterestLong: null, openInterestShort: null,
   fundingRateHourlyLong: null, fundingRateHourlyShort: null, borrowRateHourlyLong: null, borrowRateHourlyShort: null, capacityLong: null, capacityShort: null,
-  poolLiquidity: null, maxLeverage: 25, closedMaxLeverage: null, session: 'open', freshness: 'stale', updatedAt,
+  poolLiquidity: null, maxLeverage: 25, closedMaxLeverage: null, maxLeverageLong: 25, maxLeverageShort: 25, maxSizeLong: null, maxSizeShort: null, minCollateralUsd: null,
+  session: 'open', freshness: 'stale', updatedAt,
 });
 const tick = (symbol: string, mid: string, ts: number) => ({ symbol, min: mid, max: mid, mid, ts, session: 'open' as const });
 const account = { id: 'acc', equity: '25000' } as AccountSummary;
@@ -110,7 +111,7 @@ function memory(entries: Record<string, string> = {}) {
 
 describe('candles', () => {
   const hour = Math.floor(Date.now() / 3_600_000) * 3600; // the current bar: a saved copy that ends before the fetch's window is not read
-  const candles = (symbol: string): CandlesResponse => ({ symbol, interval: '1h', candles: [{ time: hour, open: 1, high: 2, low: 1, close: 2 }], source: 'gmtrade', freshness: 'live' });
+  const candles = (symbol: string): CandlesResponse => ({ symbol, interval: '1h', candles: [{ time: hour, open: 1, high: 2, low: 1, close: 2 }], source: 'venue', freshness: 'live' });
   /** What the browser keeps of a fetch (lib/candles.ts), dated `at`. */
   const saved = (symbol: string, at: number) => JSON.stringify({ at, candles: candles(symbol).candles });
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });

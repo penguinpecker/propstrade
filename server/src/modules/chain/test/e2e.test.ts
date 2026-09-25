@@ -265,7 +265,7 @@ test('chain module against solana-test-validator: index, jobs, funded lifecycle,
     const p = (await get<Payout>(`/v1/payouts/${payout2.toBase58()}`, session.cookie)).body;
     return p.status === 'rejected' && p;
   }, 30_000, 'payout rejected');
-  assert.deepEqual([rejected.reasonCode, rejected.reason], [2, 'Requested profit does not match the account\'s GMTrade trade history']);
+  assert.deepEqual([rejected.reasonCode, rejected.reason], [2, 'Requested profit does not match the account\'s exchange trade history']);
   assert.equal(enumName((await vault.fetch('payoutRequest', payout2))!.status), 'rejected');
 
   // ---- closure by an operator (admin API → sealed close_funded job) → closed account, principal back in the vault ledger

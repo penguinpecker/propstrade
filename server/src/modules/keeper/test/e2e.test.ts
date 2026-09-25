@@ -287,9 +287,9 @@ test('keeper against solana-test-validator: top-up, session-guard close with a c
     }, 20_000, 'upgrade handled');
     assert.ok(upgrade.detectedAt);
     const status = second.service.status();
-    assert.deepEqual([status.leader, status.gmtradeUpgrade?.slot, status.gmtradeUpgrade?.detectedAt, status.gmtradeUpgrade?.acknowledgedAt],
+    assert.deepEqual([status.leader, status.venueUpgrade?.slot, status.venueUpgrade?.detectedAt, status.venueUpgrade?.acknowledgedAt],
       [true, baseline.slot, upgrade.detectedAt!.getTime(), null]);
-    assert.ok(status.gmtradeUpgrade!.restrictedAt! >= upgrade.detectedAt!.getTime(), 'health shows when the restriction pass finished');
+    assert.ok(status.venueUpgrade!.restrictedAt! >= upgrade.detectedAt!.getTime(), 'health shows when the restriction pass finished');
     await until(async () => (await t.db.select().from(fundedAccounts).where(eq(fundedAccounts.status, 'restricted'))).length === 1, 20_000, 'restriction indexed');
 
     // Lifting Alice's restriction before the upgrade is acknowledged does not stick: the keeper restricts her again.
@@ -302,7 +302,7 @@ test('keeper against solana-test-validator: top-up, session-guard close with a c
     const ack = await adminPost(`/v1/admin/gmtrade-deploys/${baseline.slot}/acknowledge`);
     assert.equal(ack.status, 200);
     assert.equal((await adminPost(`/v1/admin/gmtrade-deploys/${baseline.slot}/acknowledge`)).status, 409);
-    await until(async () => second.service.status().gmtradeUpgrade?.acknowledgedAt === ack.body.acknowledgedAt, 20_000, 'acknowledgement seen by the keeper');
+    await until(async () => second.service.status().venueUpgrade?.acknowledgedAt === ack.body.acknowledgedAt, 20_000, 'acknowledgement seen by the keeper');
     await until(async () => (await t.db.select().from(fundedAccounts).where(eq(fundedAccounts.address, fundedA.toBase58())))[0]!.status === 'restricted', 20_000, 'restriction indexed again');
     assert.equal((await adminPost(`/v1/admin/funded/${fundedA.toBase58()}/lift-restriction`)).status, 200);
     await until(async () => enumName((await vault.fetchFunded(fundedA))!.status) === 'active', 30_000, 'Alice active again');

@@ -54,7 +54,7 @@ const MARKETS = [
   ['ETH', 'Ethereum', 'Crypto', 'Layer 1 & 2', 2641.82, 2, 8, 86_400_000, 1.86],
   ['SOL', 'Solana', 'Crypto', 'Layer 1 & 2', 151.84, 2, 9, 42_800_000, 4.12],
   ['TAO', 'Bittensor', 'Crypto', 'Other', 312.4, 2, 9, 3_100_000, -3.4],
-  ['FARTCOIN', 'Fartcoin', 'Crypto', 'Meme', 0.8123, 4, 6, 1_900_000, 7.8],
+  ['DOGE', 'Dogecoin', 'Crypto', 'Meme', 0.23417, 5, 8, 1_900_000, 7.8],
   ['XAU', 'Gold', 'Commodities', 'Metals', 2674.3, 2, 8, 18_200_000, 0.64],
   ['EUR', 'Euro / US Dollar', 'Forex', 'Majors', 1.11482, 5, 8, 9_600_000, -0.12],
   ['USDJPY', 'US Dollar / Japanese Yen', 'Forex', 'Majors', 147.214, 3, 8, 7_200_000, 0.21],
@@ -63,15 +63,20 @@ const MARKETS = [
 ];
 export function market([symbol, name, category, subcategory, price, priceDecimals, indexTokenDecimals, volume, change], now = Date.now()) {
   const marketToken = fakeKey(`market:${symbol}`);
-  const pure = symbol !== 'FARTCOIN';
+  // Every listed market has a USDC-only pool (the API leaves out assets without one); DOGE is not on the funded allowlist.
+  const allowlisted = symbol !== 'DOGE';
+  const maxLeverage = { Crypto: 25, Forex: 20, Commodities: 15, Stocks: 8 }[category];
   return {
     symbol, pair: symbol === 'USDJPY' ? 'USD / JPY' : `${symbol} / USD`, name, category, subcategory, marketToken,
-    pools: [{ marketToken, name: `${symbol}/USD[${pure ? 'USDC-USDC' : 'WSOL-USDC'}]`, pure, longToken: pure ? USDC_MINT.toBase58() : fakeKey('wsol'), shortToken: USDC_MINT.toBase58() }],
-    tradable: pure, ...(pure ? {} : { unavailableReason: 'Not available for funded trading: GMTrade has no USDC-only pool for this market' }),
+    pools: [{ marketToken, name: `${symbol}/USD[USDC-USDC]`, pure: true, longToken: USDC_MINT.toBase58(), shortToken: USDC_MINT.toBase58() }],
+    tradable: allowlisted, ...(allowlisted ? {} : { unavailableReason: 'Not available for funded trading' }),
     price: price.toFixed(priceDecimals), priceDecimals, indexTokenDecimals, change24h: change, volume24h: String(volume),
     openInterestLong: String(volume * 0.21), openInterestShort: String(volume * 0.13), fundingRateHourlyLong: 0.0012, fundingRateHourlyShort: -0.0009, borrowRateHourlyLong: 0.0008, borrowRateHourlyShort: 0,
     capacityLong: String(volume * 0.02), capacityShort: String(volume * 0.013), poolLiquidity: String(volume * 0.009),
-    maxLeverage: { Crypto: 25, Forex: 20, Commodities: 15, Stocks: 8 }[category], closedMaxLeverage: ['Forex', 'Stocks'].includes(category) ? 8 : null,
+    maxLeverage, closedMaxLeverage: ['Forex', 'Stocks'].includes(category) ? 8 : null,
+    // What the exchange takes for a new position now: ETH's long room is small and its shorts are capped lower (the ticket's limits).
+    maxLeverageLong: maxLeverage, maxLeverageShort: symbol === 'ETH' ? 10 : maxLeverage,
+    maxSizeLong: symbol === 'ETH' ? '2500' : String(volume * 0.02), maxSizeShort: String(volume * 0.013), minCollateralUsd: symbol === 'XAU' ? null : '1',
     session: symbol === 'NVDA' ? 'closed' : 'open', ...(category === 'Stocks' ? { sessionNote: 'US regular market hours, Mon–Fri 9:30–16:00 New York time' } : {}),
     freshness: 'live', updatedAt: now,
   };
@@ -162,7 +167,7 @@ function createWallet(state, wallet) {
   w.orders[evalActive].push({ id: 'ord-eth', symbol: 'ETH', side: 'Long', kind: 'Limit', isIncrease: true, sizeUsd: '3000', collateralUsd: '1000', triggerPrice: '2580', acceptablePrice: null, status: 'awaiting_price', createdAt: now - 3 * HOUR, updatedAt: now - 3 * HOUR });
   for (const [i, [symbol, side, pnl]] of [['BTC', 'Long', '73.25'], ['XAU', 'Short', '36.20'], ['ETH', 'Long', '-49.86']].entries())
     w.history[evalActive].push({ id: `trade-${i}`, symbol, side, openedAt: now - (i + 2) * DAY, closedAt: now - (i + 1) * DAY, sizeUsd: '5200', entryPrice: '100', exitPrice: '101', ...costs('3.12', '2.60', '0.31', '0.21', '-0.45'), netPnl: pnl, venue: 'simulated', signatures: [] });
-  w.history[funded].push({ id: 'funded-trade-0', symbol: 'BTC', side: 'Long', openedAt: now - 3 * DAY, closedAt: now - 2 * DAY, sizeUsd: '8200', entryPrice: '63842.5', exitPrice: '64412.8', ...costs('4.92', '4.10', '0.50', '0.32', '0.18'), netPnl: '312.50', venue: 'gmtrade', signatures: [fakeSignature('funded-open'), fakeSignature('funded-close')] });
+  w.history[funded].push({ id: 'funded-trade-0', symbol: 'BTC', side: 'Long', openedAt: now - 3 * DAY, closedAt: now - 2 * DAY, sizeUsd: '8200', entryPrice: '63842.5', exitPrice: '64412.8', ...costs('4.92', '4.10', '0.50', '0.32', '0.18'), netPnl: '312.50', venue: 'exchange', signatures: [fakeSignature('funded-open'), fakeSignature('funded-close')] });
   w.payouts.push(payout(w, 0, 'paid', now - 2 * DAY));
   w.payoutSeq = 1;
   state.wallets.set(wallet, w);
@@ -252,7 +257,7 @@ export async function startStub() {
           state.accounts.set(position, { owner: GMTRADE, data: gmPositionData(size) });
           const btc = state.markets.find(m => m.symbol === 'BTC');
           const [current] = w.positions[w.funded];
-          w.positions[w.funded] = size === 0n ? [] : increase ? [{ id: position, symbol: 'BTC', side: decoded.data.args.isLong ? 'Long' : 'Short', sizeUsd: String(size / 10n ** 20n), sizeTokens: String(Number(size / 10n ** 20n) / Number(btc.price)), collateralUsd: String(Number(decoded.data.args.collateral) / 1e6), leverage: 5, entryPrice: btc.price, markPrice: btc.price, liquidationPrice: null, unrealizedPnl: '0', pendingFeesUsd: '0', pendingBorrowUsd: '0', pendingFundingUsd: '0', closeFeeUsd: '0', closing: false, takeProfit: null, stopLoss: null, openedAt: Date.now(), venue: 'gmtrade', gmPosition: position }]
+          w.positions[w.funded] = size === 0n ? [] : increase ? [{ id: position, symbol: 'BTC', side: decoded.data.args.isLong ? 'Long' : 'Short', sizeUsd: String(size / 10n ** 20n), sizeTokens: String(Number(size / 10n ** 20n) / Number(btc.price)), collateralUsd: String(Number(decoded.data.args.collateral) / 1e6), leverage: 5, entryPrice: btc.price, markPrice: btc.price, liquidationPrice: null, unrealizedPnl: '0', pendingFeesUsd: '0', pendingBorrowUsd: '0', pendingFundingUsd: '0', closeFeeUsd: '0', closing: false, takeProfit: null, stopLoss: null, openedAt: Date.now(), venue: 'exchange', gmPosition: position }]
             : [{ ...current, sizeUsd: String(size / 10n ** 20n), sizeTokens: String(Number(size / 10n ** 20n) / Number(btc.price)) }];
           publish({ type: 'positions', accountId: w.funded, positions: w.positions[w.funded] }, w.wallet);
         });
@@ -340,7 +345,7 @@ export async function startStub() {
     switch (route) {
       case 'GET /v1/config':
         return send(res, 200, {
-          cluster: 'mainnet-beta', programId: PROGRAM_ID, usdcMint: USDC_MINT.toBase58(), gmtradeStore: 'CTDLvGGXnoxvqLyTpGzdGLg9pD6JexKxKXSV8tqqo8bN',
+          cluster: 'mainnet-beta', programId: PROGRAM_ID, usdcMint: USDC_MINT.toBase58(), venueStore: 'CTDLvGGXnoxvqLyTpGzdGLg9pD6JexKxKXSV8tqqo8bN',
           tiers: TIERS,
           traderShareBps: 8000, minPayoutUsdc: '50', paused: { newEvaluations: false, trading: false, payouts: false }, feeVault: feeVaultPda().toBase58(), capitalVault: capitalVaultAddress().toBase58(),
         });
@@ -390,7 +395,7 @@ export async function startStub() {
       case 'GET /v1/markets': return send(res, 200, state.markets);
       case 'GET /v1/candles': {
         const m = state.markets.find(x => x.symbol === url.searchParams.get('symbol'));
-        return m ? send(res, 200, { symbol: m.symbol, interval: url.searchParams.get('interval'), candles: candles(m, url.searchParams.get('interval')), source: 'gmtrade', freshness: 'live' }) : notFound(res);
+        return m ? send(res, 200, { symbol: m.symbol, interval: url.searchParams.get('interval'), candles: candles(m, url.searchParams.get('interval')), source: 'venue', freshness: 'live' }) : notFound(res);
       }
       case 'GET /v1/quote': {
         // Fixture arithmetic: fees at 6 bps a leg, a liquidation 90% of the margin away, carry from the market's rates for the side.
@@ -403,11 +408,16 @@ export async function startStub() {
         const fee = size * 0.0006;
         const funding = side === 'Long' ? m.fundingRateHourlyLong : m.fundingRateHourlyShort, borrow = side === 'Long' ? m.borrowRateHourlyLong : m.borrowRateHourlyShort;
         const liquidation = collateral ? entry * (1 + (side === 'Long' ? -1 : 1) * Number(collateral) * 0.9 / size) : null;
+        // As the exchange's model does: its minimum margin counts after the open and close fees.
+        if (collateral && m.minCollateralUsd !== null && Number(collateral) - 2 * fee < Number(m.minCollateralUsd)) {
+          return send(res, 422, { error: { code: 'rejected_by_venue', message: `A ${side.toLowerCase()} on ${m.symbol} needs at least $${Number(m.minCollateralUsd).toFixed(2)} of margin after fees` } });
+        }
         return send(res, 200, {
           symbol: m.symbol, side, sizeUsd: size.toFixed(6), priceImpactPct: size / 1e7, openFeeUsd: fee.toFixed(6), executionPrice: entry.toFixed(m.priceDecimals),
           orderValueUsd: size.toFixed(6), collateralUsd: collateral ?? null, closeFeeUsd: fee.toFixed(6), roundTripFeeUsd: (fee * 2).toFixed(6),
           fundingRateHourlyPct: funding, borrowRateHourlyPct: borrow, hourlyCostUsd: (size * (borrow + Math.max(0, funding)) / 100).toFixed(6),
           liquidationPrice: liquidation === null ? null : liquidation.toFixed(m.priceDecimals), platformFeeUsd: '0',
+          maxSizeUsd: side === 'Long' ? m.maxSizeLong : m.maxSizeShort, maxLeverage: side === 'Long' ? m.maxLeverageLong : m.maxLeverageShort,
         });
       }
       case 'GET /v1/notifications': return needWallet() || send(res, 200, w.notifications);

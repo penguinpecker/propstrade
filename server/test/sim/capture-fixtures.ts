@@ -22,7 +22,7 @@ await feed.start();
 const pairs = new Map((await fetchPairs()).map((p) => [p.pool_id, p]));
 const catalog = () => buildCatalog({
   feed, pairs, opens24h: new Map(), now: Date.now(),
-  limits: ({ category, pureUsdc }) => ({ tradable: pureUsdc, ...LIMITS[category] }),
+  limits: ({ category }) => ({ tradable: true, ...LIMITS[category] }),
   onError: (marketToken, err) => console.warn('model rejected', marketToken, err),
 });
 const rows = new Map<string, Market>(catalog().filter((m) => SYMBOLS.includes(m.symbol)).map((m) => [m.symbol, m]));

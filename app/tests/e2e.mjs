@@ -6,6 +6,7 @@
 // 3. Drives the data and transaction flows: markets, live candles, a simulated order through fill and close, a funded
 //    order built with @props/sdk, signed by the test wallet and sent to the stub RPC, checkout, payout request, verify,
 //    vault, notifications, CSV export and the footer's live-stream states.
+// 4. White label: no route or dialog names the venue (GMTrade) in its title, meta tags, text or labelling attributes.
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -38,11 +39,12 @@ const csp = contentSecurityPolicy(process.env);
 const site = await preview({ root: appDir, logLevel: 'error', build: { outDir }, preview: { host: '127.0.0.1', port: 4198, headers: { 'content-security-policy': csp } } });
 const siteUrl = site.resolvedUrls.local[0].replace(/\/$/, '');
 
-// Expected console noise, all caused on purpose by the stub: anonymous /v1/me (401), the stream outage (503) and the
-// candles of a saved market that is not in the catalog (404).
+// Expected console noise, all caused on purpose by the stub: anonymous /v1/me (401), the stream outage (503), the
+// candles of a saved market that is not in the catalog (404) and the exchange refusing a quoted order (422).
 const expected = msg => /status of 401/.test(msg.text()) && msg.location().url.endsWith('/v1/me')
   || /503|ERR_INCOMPLETE_CHUNKED_ENCODING/.test(msg.text()) && (msg.location().url.endsWith('/v1/stream') || /EventSource/.test(msg.text()))
-  || /status of 404/.test(msg.text()) && (msg.location().url.includes('/v1/candles?symbol=ZZZ') || msg.location().url.includes('/v1/traders/'));
+  || /status of 404/.test(msg.text()) && (msg.location().url.includes('/v1/candles?symbol=ZZZ') || msg.location().url.includes('/v1/traders/'))
+  || /status of 422/.test(msg.text()) && msg.location().url.includes('/v1/quote?');
 function watchConsole(page) {
   const errors = [];
   page.on('console', msg => { if (msg.type() === 'error' && !expected(msg)) errors.push(msg.text()); });
@@ -64,6 +66,38 @@ async function signedInContext(browser, key, options = {}) {
 const settle = page => page.waitForFunction(() => !document.querySelector('#main .spinner, #main .chart-skeleton'), null, { timeout: 8_000 }).catch(() => undefined);
 /** Forgets the candles this browser saved (lib/candles.ts): a copy younger than staleTime is shown without a fetch. */
 const forgetCandles = page => page.evaluate(() => { for (const key of Object.keys(localStorage)) if (key.startsWith('props.candles.')) localStorage.removeItem(key); });
+/** Where the page names the venue: the title, meta tags, rendered text, labelling attributes and link targets (white label). */
+const brandLeaks = page => page.evaluate(() => {
+  const hits = [];
+  const test = (where, value) => { const at = value?.search(/gmtrade/i) ?? -1; if (at >= 0) hits.push(`${where}: …${value.slice(Math.max(0, at - 50), at + 50)}…`); };
+  test('title', document.title);
+  for (const meta of document.querySelectorAll('meta')) test(`meta ${meta.name || meta.getAttribute('property') || ''}`, meta.content);
+  test('text', document.body.innerText);
+  for (const el of document.querySelectorAll('[title], [aria-label], [aria-valuetext], [placeholder], [alt], [data-tip], a[href]'))
+    for (const name of ['title', 'aria-label', 'aria-valuetext', 'placeholder', 'alt', 'data-tip', 'href']) test(`${el.tagName.toLowerCase()}[${name}]`, el.getAttribute(name));
+  return hits;
+});
+/**
+ * The x of a native range thumb's centre, measured in a screenshot: a band 4-7 px above the 4 px track's centre, which only
+ * the 16 px thumb reaches. The first and last columns that differ from the band's left end bound its chord.
+ */
+async function thumbCenter(page, slider) {
+  const box = await slider.boundingBox();
+  const clip = { x: Math.floor(box.x) - 12, y: Math.round(box.y + box.height / 2) - 7, width: Math.ceil(box.width) + 24, height: 3 };
+  const png = await page.screenshot({ clip });
+  const [first, last] = await page.evaluate(async bytes => {
+    const image = await createImageBitmap(new Blob([new Uint8Array(bytes)], { type: 'image/png' }));
+    const g = new OffscreenCanvas(image.width, image.height).getContext('2d');
+    g.drawImage(image, 0, 0);
+    const { data, width, height } = g.getImageData(0, 0, image.width, image.height);
+    const differs = (i, j) => Math.abs(data[i] - data[j]) + Math.abs(data[i + 1] - data[j + 1]) + Math.abs(data[i + 2] - data[j + 2]) > 90;
+    const columns = [];
+    for (let x = 0; x < width; x += 1) for (let y = 0; y < height; y += 1) if (differs((y * width + x) * 4, y * width * 4)) { columns.push(x); break; }
+    return [columns[0], columns.at(-1)];
+  }, [...png]);
+  if (first === undefined) throw new Error('no thumb found above the track');
+  return clip.x + (first + last + 1) / 2;
+}
 
 const browser = await chromium.launch({ channel: 'chrome', headless: true });
 let failures = 0;
@@ -105,6 +139,7 @@ try {
           if (signedIn) assert.equal(await page.locator('.wallet-button').innerText(), short(keys[2].address), 'not signed in');
           const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
           assert.ok(overflow <= 0, `horizontal overflow of ${overflow}px`);
+          assert.deepEqual(await brandLeaks(page), [], 'the page names the venue');
           const found = errors.splice(0);
           assert.equal(found.length, 0, `console errors: ${found.join(' | ')}`);
         });
@@ -269,7 +304,7 @@ try {
       await page.getByRole('tab', { name: 'Forex' }).click();
       assert.deepEqual(await rows.locator('strong').filter({ hasText: '/' }).allInnerTexts(), ['EUR / USD', 'USD / JPY']);
       await page.getByRole('tab', { name: 'All markets' }).click();
-      await page.getByLabel('Search market directory').fill('fart');
+      await page.getByLabel('Search market directory').fill('doge');
       assert.equal(await rows.count(), 1);
       await rows.getByText('Not available for funded trading').waitFor();
       await page.getByLabel('Search market directory').fill('tao');
@@ -304,10 +339,10 @@ try {
       assert.deepEqual(await chips.allTextContents(), ['All Crypto 5', 'Layer 1 & 2 3', 'Meme 1', 'Other 1']);
       assert.equal(await chips.first().getAttribute('aria-pressed'), 'true');
       await search.fill('coin');
-      assert.deepEqual(await pairs(), ['BTC / USD', 'FARTCOIN / USD']);
+      assert.deepEqual(await pairs(), ['BTC / USD', 'DOGE / USD']);
       await chips.filter({ hasText: 'Meme' }).click();
       assert.deepEqual([await chips.filter({ hasText: 'Meme' }).getAttribute('aria-pressed'), await chips.first().getAttribute('aria-pressed')], ['true', 'false']);
-      assert.deepEqual(await pairs(), ['FARTCOIN / USD']);
+      assert.deepEqual(await pairs(), ['DOGE / USD']);
       // Keyboard only: the tabs are one Tab stop (the selected tab) where the arrow keys, Home and End select; Tab then
       // reaches the chips and Space presses one. Focus stays on what was operated.
       await search.fill('');
@@ -424,7 +459,7 @@ try {
       assert.equal(await inBar('EUR').count(), 0, 'EUR is still in the watchlist bar');
     });
 
-    await check('chart: GMTrade candles, OHLC of the last candle, and live ticks move it', async () => {
+    await check('chart: candles, OHLC of the last candle, and live ticks move it', async () => {
       await page.goto(`${siteUrl}/#/trade/practice`);
       await page.locator('.price-chart canvas').first().waitFor();
       await page.mouse.move(0, 0); // no crosshair: the legend shows the latest candle
@@ -435,7 +470,7 @@ try {
       await page.locator('.market-price').getByText('64,600.00').waitFor();
       for (const interval of ['5m', '4h', '1D', '1h']) { // back to 1h: the interval is kept in the browser now, and the checks below expect 1h
         await page.locator('.timeframes').getByRole('button', { name: interval, exact: true }).click();
-        await legend.getByText(`BTC / USD · ${interval} · GMTrade`).waitFor();
+        await legend.getByText(`BTC / USD · ${interval} · Props.trade`).waitFor();
       }
       state.markets.find(m => m.symbol === 'BTC').price = '64600.00';
     });
@@ -462,9 +497,9 @@ try {
       await page.getByRole('button', { name: 'Remove all drawings (1)' }).waitFor();
       await page.locator('.tv-pane-legend').getByText('RSI 14').waitFor();
       await page.getByRole('button', { name: /^1y:/ }).click();
-      await page.locator('.tv-legend-main').getByText('BTC / USD · 1D · GMTrade').waitFor();
+      await page.locator('.tv-legend-main').getByText('BTC / USD · 1D · Props.trade').waitFor();
       await page.locator('.timeframes').getByRole('button', { name: '1h', exact: true }).click();
-      await page.locator('.tv-legend-main').getByText('BTC / USD · 1h · GMTrade').waitFor();
+      await page.locator('.tv-legend-main').getByText('BTC / USD · 1h · Props.trade').waitFor();
     });
 
     await check('chart at 1366x768: it stays in its row, every drawing tool can be reached, the saved-copy note is whole, and Delete only acts with focus in the chart', async () => {
@@ -478,7 +513,7 @@ try {
         const [bottom, positions] = await Promise.all([page.locator('.chart-section .tv-bottom').boundingBox(), page.locator('.positions-panel').boundingBox()]);
         assert.ok(bottom.y + bottom.height <= positions.y + 0.5, `the chart's bottom bar ends ${Math.round(bottom.y + bottom.height - positions.y)}px inside the positions panel`);
         const source = page.locator('.chart-section .tv-source');
-        await source.getByText("saved copy while GMTrade's charts recover").waitFor();
+        await source.getByText('saved copy while the charts recover').waitFor();
         assert.equal(await source.evaluate(el => el.scrollWidth - el.clientWidth), 0, 'the saved-copy note is cut short');
         const until = async (predicate, message) => { for (const start = Date.now(); Date.now() - start < 5_000; await page.waitForTimeout(50)) if (await predicate()) return; throw new Error(message); };
         const toolbar = page.locator('.chart-section .tv-drawbar-tools');
@@ -522,15 +557,61 @@ try {
       await page.route('**/v1/markets', async route => { await Promise.all([candles, chart]); await route.continue(); });
       try {
         await page.goto(`${siteUrl}/#/trade/practice`);
-        await page.locator('.tv-legend-main').getByText('ETH / USD · 1h · GMTrade').waitFor({ timeout: 8_000 });
+        await page.locator('.tv-legend-main').getByText('ETH / USD · 1h · Props.trade').waitFor({ timeout: 8_000 });
         assert.equal(await candles, 'ETH');
         await page.evaluate(() => localStorage.setItem('props.market', '"ZZZ"'));
         await page.reload();
-        await page.locator('.tv-legend-main').getByText('BTC / USD · 1h · GMTrade').waitFor();
+        await page.locator('.tv-legend-main').getByText('BTC / USD · 1h · Props.trade').waitFor();
         assert.equal(await page.evaluate(() => localStorage.getItem('props.market')), '"BTC"');
       } finally {
         page.off('request', seen);
         await page.unroute('**/v1/markets');
+      }
+    });
+
+    await check('removed markets: a watched market the catalog no longer lists leaves the watchlist (a saved chart market falls back to BTC, above)', async () => {
+      await page.goto(`${siteUrl}/#/trade/practice`);
+      await page.evaluate(() => localStorage.setItem('props.favorites', JSON.stringify(['BTC', 'ZZZ', 'ETH', 'SOL', 'XAU'])));
+      await page.reload();
+      await page.locator('.watchlist-bar').getByRole('button', { name: /^XAU/ }).waitFor();
+      await page.waitForFunction(() => !JSON.parse(localStorage.getItem('props.favorites') ?? '[]').includes('ZZZ'), null, { timeout: 5_000 });
+      assert.deepEqual(await page.evaluate(() => JSON.parse(localStorage.getItem('props.favorites'))), ['BTC', 'ETH', 'SOL', 'XAU']);
+    });
+
+    await check('watchlist across tabs and the tab title: a star in one tab shows in the other without a reload, a star there keeps it; the tab reads the market and its price, and the page title comes back off the terminal', async () => {
+      await page.goto(`${siteUrl}/#/trade/practice`);
+      const before = await page.evaluate(() => localStorage.getItem('props.favorites'));
+      const other = await page.context().newPage();
+      try {
+        await other.goto(`${siteUrl}/#/trade/practice`);
+        const inBar = (p, symbol) => p.locator('.watchlist-bar').getByRole('button', { name: new RegExp(`^${symbol}`) });
+        const star = async (p, symbol) => {
+          await p.locator('.watchlist-bar').getByRole('button', { name: 'Add a market to your watchlist' }).click();
+          const dialog = p.getByRole('dialog', { name: 'Find a market' });
+          await dialog.getByRole('button', { name: `Add ${symbol} to watchlist` }).click();
+          await dialog.getByRole('button', { name: `Remove ${symbol} from watchlist` }).waitFor();
+          await p.keyboard.press('Escape');
+          await dialog.waitFor({ state: 'detached' });
+        };
+        await inBar(page, 'BTC').waitFor();
+        await inBar(other, 'BTC').waitFor();
+        await star(page, 'EUR');
+        await inBar(other, 'EUR').waitFor({ timeout: 5_000 });
+        await star(other, 'NVDA');
+        await inBar(page, 'NVDA').waitFor({ timeout: 5_000 });
+        assert.equal(await inBar(page, 'EUR').count(), 1, "the other tab's star saved its older list over EUR");
+        const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('props.favorites')));
+        assert.ok(saved.includes('EUR') && saved.includes('NVDA'), `saved watchlist ${saved}`);
+
+        const shown = (await page.locator('.market-select strong').innerText()).split(' / ')[0];
+        await page.waitForFunction(symbol => new RegExp(`^${symbol} [0-9,.]+ — Props\\.trade$`).test(document.title), shown, { timeout: 5_000 });
+        await inBar(page, 'EUR').click();
+        await page.waitForFunction(() => /^EUR [0-9,.]+ — Props\.trade$/.test(document.title), null, { timeout: 5_000 });
+        await page.goto(`${siteUrl}/#/accounts`);
+        await page.waitForFunction(() => document.title === 'Props.trade — Trading workspace', null, { timeout: 5_000 });
+      } finally {
+        await other.close();
+        await page.evaluate(value => value === null ? localStorage.removeItem('props.favorites') : localStorage.setItem('props.favorites', value), before);
       }
     });
 
@@ -544,22 +625,22 @@ try {
         await forgetCandles(page);
         await page.reload();
         const legend = page.locator('.tv-legend-main');
-        await legend.getByText('BTC / USD · 1h · GMTrade').waitFor();
+        await legend.getByText('BTC / USD · 1h · Props.trade').waitFor();
         await expectEventually(() => ['ETH 1h', 'SOL 1h', 'XAU 1h'].every(k => asked.includes(k)), `the watchlist's candles were not prefetched: ${asked}`);
         stub.publish({ type: 'price', ticks: [{ symbol: 'BTC', min: '64650', max: '64650', mid: '64650', ts: Date.now() + 2_000, session: 'open' }] });
         await legend.getByText('C64,650.00').waitFor();
         const before = asked.length;
         await page.locator('.watchlist-bar').getByRole('button', { name: /^ETH/ }).click();
-        await legend.getByText('ETH / USD · 1h · GMTrade').waitFor();
+        await legend.getByText('ETH / USD · 1h · Props.trade').waitFor();
         await page.locator('.watchlist-bar').getByRole('button', { name: /^BTC/ }).click();
-        await legend.getByText('BTC / USD · 1h · GMTrade').waitFor();
+        await legend.getByText('BTC / USD · 1h · Props.trade').waitFor();
         assert.equal(asked.length, before, `a tick or a watchlist click fetched candles again: ${asked.slice(before)}`);
         await page.locator('.timeframes').getByRole('button', { name: '4h', exact: true }).click();
-        await legend.getByText('BTC / USD · 4h · GMTrade').waitFor();
+        await legend.getByText('BTC / USD · 4h · Props.trade').waitFor();
         await expectEventually(() => ['ETH 4h', 'SOL 4h', 'XAU 4h'].every(k => asked.includes(k)), `the watchlist's candles were not prefetched for the new interval: ${asked}`);
         assert.equal(asked.filter(k => k === 'ETH 1h').length, 1, `ETH 1h was fetched more than once: ${asked}`);
         await page.locator('.timeframes').getByRole('button', { name: '1h', exact: true }).click();
-        await legend.getByText('BTC / USD · 1h · GMTrade').waitFor();
+        await legend.getByText('BTC / USD · 1h · Props.trade').waitFor();
       } finally {
         page.off('request', seen);
       }
@@ -613,7 +694,7 @@ try {
       await page.getByLabel('Order size in USD').fill('1000');
       await page.locator('.order-panel').getByRole('button', { name: 'Buy / Long BTC' }).click();
       await page.locator('.order-panel').getByText('Awaiting execution…').waitFor();
-      await page.locator('.order-panel').getByText('Simulated order filled at the live GMTrade price.').waitFor({ timeout: 10_000 });
+      await page.locator('.order-panel').getByText('Simulated order filled at the live price.').waitFor({ timeout: 10_000 });
       const row = page.locator('.position-table tbody tr').filter({ hasText: 'BTC / USD' });
       await row.waitFor();
       await row.getByRole('button', { name: /Close/ }).click();
@@ -645,7 +726,7 @@ try {
       await page.getByText('Funded 25K').first().waitFor();
       await page.getByLabel('Order size in USD').fill('1000');
       await page.locator('.order-panel').getByRole('button', { name: 'Buy / Long BTC' }).click();
-      await page.locator('.order-panel').getByText('BTC long executed on GMTrade.').waitFor({ timeout: 10_000 });
+      await page.locator('.order-panel').getByText('BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
       const [open] = sent('openPosition');
       assert.ok(open, 'no open_position transaction reached the RPC');
       assert.equal(open.data.args.isLong, true);
@@ -665,7 +746,7 @@ try {
       await page.locator('.order-panel').getByRole('alert').getByText('Total exposure above the account limit.').waitFor();
       assert.equal(state.signatures, before, 'the wallet was asked to sign a failing transaction');
       await page.locator('.order-panel').getByRole('button', { name: 'Buy / Long BTC' }).click();
-      await page.locator('.order-panel').getByText('BTC long executed on GMTrade.').waitFor({ timeout: 10_000 });
+      await page.locator('.order-panel').getByText('BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
       assert.equal(state.signatures, before + 1);
     });
 
@@ -677,7 +758,7 @@ try {
       await dialog.getByRole('slider').fill('50');
       await dialog.getByRole('button', { name: 'Send close order' }).click();
       await row.getByRole('status').getByText('Closing…').waitFor({ timeout: 5_000 });
-      await page.getByText('Close executed by GMTrade.').waitFor({ timeout: 10_000 });
+      await page.getByText('Close executed by the exchange.').waitFor({ timeout: 10_000 });
       await row.getByRole('button', { name: /Close/ }).waitFor({ timeout: 5_000 }); // still here at half its size, and closable again
       assert.equal(await row.getByRole('status').count(), 0, 'the row still reads Closing…');
       await row.locator('small', { hasText: /^\$1,000\.00 · / }).waitFor();
@@ -750,15 +831,22 @@ try {
       await rules.getByRole('button', { name: 'Back to program details' }).click();
       await page.goto(`${siteUrl}/#/get-funded`);
       await main.getByRole('button', { name: /Resume trading|Continue to activation/ }).waitFor();
-      // FARTCOIN has no USDC-only pool: not in evaluations (their own copy), not in practice either.
-      for (const [stage, copy] of [['evaluation', 'FARTCOIN is not available in evaluations: they trade only the markets funded accounts can.'], ['practice', 'FARTCOIN has no USDC-only pool on GMTrade, so it cannot be traded here.']]) {
+      // DOGE is not on the funded allowlist: not in evaluations (their own copy). Practice trades every listed market: each
+      // has a USDC-only pool (the markets without one are not listed).
+      const pickDoge = async stage => {
         await page.goto(`${siteUrl}/#/trade/${stage}`);
         await page.locator('.order-panel').waitFor();
         await page.keyboard.press('Control+k');
-        await page.getByRole('dialog', { name: 'Find a market' }).getByRole('button', { name: /^FARTCOIN/ }).click();
-        await page.locator('.order-panel').getByText(copy).waitFor();
-        assert.ok(await page.locator('.order-panel').getByRole('button', { name: /Buy \/ Long FARTCOIN/ }).isDisabled(), `${stage}: the order can still be submitted`);
-      }
+        await page.getByRole('dialog', { name: 'Find a market' }).getByRole('button', { name: /^DOGE/ }).click();
+        await page.locator('.market-select strong', { hasText: /^DOGE/ }).waitFor();
+      };
+      await pickDoge('evaluation');
+      await page.locator('.order-panel').getByText('DOGE is not available in evaluations: they trade only the markets funded accounts can.').waitFor();
+      assert.ok(await page.locator('.order-panel').getByRole('button', { name: /Buy \/ Long DOGE/ }).isDisabled(), 'evaluation: the order can still be submitted');
+      await pickDoge('practice');
+      await page.getByLabel('Order size in USD').fill('100');
+      await page.locator('.order-panel').getByRole('button', { name: /Buy \/ Long DOGE/ }).and(page.locator(':enabled')).waitFor();
+      assert.equal(await page.locator('.order-panel').getByText(/not available|USDC-only pool/).count(), 0, 'practice restricts a listed market');
       await page.goto(`${siteUrl}/#/trade/funded`);
     });
 
@@ -837,7 +925,7 @@ try {
       assert.match(csv[0], /^Time \(UTC\),Type,Event/);
     });
 
-    await check('positions show where GMTrade liquidates them and the margin backing them', async () => {
+    await check('positions show where the exchange liquidates them and the margin backing them', async () => {
       await page.goto(`${siteUrl}/#/trade/evaluation`); // Evaluation 25K, selected by the activity check
       const row = page.locator('.position-table tbody tr').filter({ hasText: 'SOL / USD' });
       await row.waitFor();
@@ -866,9 +954,17 @@ try {
       await ticket.getByText('10× leverage').waitFor();
       assert.equal(await rowValue('Required margin'), '$100.00');
       assert.equal(await page.getByRole('dialog').count(), 0, 'a dialog opened');
-      await ticket.getByLabel('Leverage').fill('20'); // the slider: Crypto allows up to 25×
+      await ticket.getByLabel('Leverage').focus(); // the slider: the arrow keys step it by 1× (Crypto allows up to 25×)
+      for (let i = 0; i < 10; i += 1) await page.keyboard.press('ArrowRight');
       await ticket.getByText('20× leverage').waitFor();
+      assert.equal(await ticket.getByLabel('Leverage').getAttribute('aria-valuetext'), '20×');
       assert.equal(await rowValue('Required margin'), '$50.00');
+      // Page Up / Page Down move to the next label's value either way (not a tenth of the track, stuck at 1×).
+      for (const [key, shown] of [['PageDown', '10×'], ['PageDown', '5×'], ['Home', '1×'], ['PageUp', '2×'], ['PageUp', '5×'], ['End', '25×'], ['PageDown', '10×'], ['PageUp', '25×']]) {
+        await page.keyboard.press(key);
+        await ticket.getByText(`${shown} leverage`).waitFor();
+        assert.equal(await ticket.getByLabel('Leverage').getAttribute('aria-valuetext'), shown, key);
+      }
       await ticket.getByRole('button', { name: 'Max 25×' }).click();
       await ticket.getByText('25× leverage').waitFor();
       await ticket.locator('.execution-details').getByText(/Est\. liquidation price/).waitFor();
@@ -909,6 +1005,110 @@ try {
       await ticket.getByRole('button', { name: 'Buy / Long' }).click();
     });
 
+    await check('ticket: the side\'s leverage and size limits from the market row cap both sliders, a size or margin outside them is explained under the size and blocks the order, and a stream update moves them', async () => {
+      await page.goto(`${siteUrl}/#/trade/evaluation`);
+      await showMarket('ETH'); // the fixture's ETH: $2,500 of room for a new long, shorts up to 10×
+      const ticket = page.locator('.order-panel');
+      const size = page.getByLabel('Order size in USD');
+      const submit = ticket.getByRole('button', { name: /^Buy \/ Long ETH/ });
+      const side = name => ticket.getByRole('button', { name, exact: true });
+      await ticket.getByRole('button', { name: 'Max 25×' }).click();
+      await ticket.getByText('25× leverage').waitFor();
+      await size.fill('3000');
+      await ticket.getByText('Up to $2,500 can be opened long on ETH right now.').waitFor();
+      assert.ok(await submit.isDisabled(), 'an order above the exchange\'s room can be sent');
+      // The message sits under the size field, in the ticket's error style.
+      assert.ok(await ticket.locator('.field:has([aria-label="Order size in USD"]) + p.field-error').isVisible(), 'the message is not right under the size field');
+      // The size slider's 100% is the room (below this account's buying power), and the size input's max.
+      await ticket.getByRole('button', { name: '100%', exact: true }).click();
+      assert.equal(await size.inputValue(), '2500');
+      assert.equal(await size.getAttribute('max'), '2500');
+      assert.equal(await ticket.getByText(/can be opened long/).count(), 0);
+      await submit.and(page.locator(':enabled')).waitFor();
+      await size.fill('4'); // $0.16 of margin at 25×, below the exchange's $1 minimum
+      await ticket.getByText('The minimum margin on ETH is $1.00.').waitFor();
+      assert.ok(await submit.isDisabled(), 'an order below the minimum margin can be sent');
+      // $1.00 at 25×: at the minimum, but the fees come out of it first. The exchange's model refuses it (the quote runs
+      // it), and the ticket says so under the size in the server's words, once.
+      await size.fill('25');
+      await ticket.getByText('A long on ETH needs at least $1.00 of margin after fees.').waitFor();
+      assert.ok(await ticket.locator('.field:has([aria-label="Order size in USD"]) ~ p.field-error').filter({ hasText: 'after fees' }).isVisible());
+      assert.equal(await ticket.locator('p.field-error').count(), 1, (await ticket.locator('p.field-error').allInnerTexts()).join(' | '));
+      assert.ok(await submit.isDisabled(), 'an order the exchange refuses can be sent');
+      await size.fill('30'); // $1.20: enough after the fees
+      await ticket.getByText(/after fees/).waitFor({ state: 'detached' });
+      await submit.and(page.locator(':enabled')).waitFor();
+      // Shorts are capped at 10×: switching side clamps the chosen leverage, and switching back keeps the clamp.
+      await size.fill('1000');
+      await side('Sell / Short').click();
+      await ticket.getByText('10× leverage').waitFor();
+      await ticket.getByRole('button', { name: 'Max 10×' }).waitFor();
+      assert.equal(await ticket.getByLabel('Leverage').getAttribute('aria-valuetext'), '10×');
+      await side('Buy / Long').click();
+      await ticket.getByRole('button', { name: 'Max 25×' }).waitFor();
+      await ticket.getByText('10× leverage').waitFor();
+      // A market row from the stream lowers the long limits: the ticket follows at once.
+      const eth = state.markets.find(m => m.symbol === 'ETH');
+      stub.publish({ type: 'market', market: { ...eth, maxLeverageLong: 8, maxSizeLong: '800' } });
+      await ticket.getByRole('button', { name: 'Max 8×' }).waitFor();
+      await ticket.getByText('8× leverage').waitFor();
+      await ticket.getByText('Up to $800 can be opened long on ETH right now.').waitFor();
+      assert.ok(await submit.isDisabled());
+      // No room left on the side: the ticket says so as the server does, not "Up to $0".
+      stub.publish({ type: 'market', market: { ...eth, maxSizeLong: '0.4' } });
+      await ticket.getByText('No new long can be opened on ETH right now.').waitFor();
+      assert.ok(await submit.isDisabled());
+      stub.publish({ type: 'market', market: eth });
+      await ticket.getByRole('button', { name: 'Max 25×' }).waitFor();
+      await ticket.getByText(/can be opened long/).waitFor({ state: 'detached' });
+      // A funded ticket takes the same limits.
+      await page.goto(`${siteUrl}/#/trade/funded`);
+      await ticket.locator('.badge').getByText('Funded', { exact: true }).waitFor();
+      await size.fill('3000');
+      await ticket.getByText('Up to $2,500 can be opened long on ETH right now.').waitFor();
+      assert.ok(await submit.isDisabled(), 'a funded order above the exchange\'s room can be sent');
+      await size.fill('1000');
+      await showMarket('BTC');
+      await ticket.getByRole('button', { name: '5×', exact: true }).click();
+    });
+
+    await check('ticket: every leverage and size label sits under the thumb at its own value (flush with the track at its ends), and the label rows keep their height and fonts, at 1280 and 390 px', async () => {
+      await page.goto(`${siteUrl}/#/trade/evaluation`);
+      await showMarket('BTC');
+      for (const width of [1280, 390]) {
+        await page.setViewportSize({ width, height: 900 });
+        try {
+          if (width < 800) await page.locator('.mobile-trade-action').click();
+          const ticket = page.locator('.order-panel');
+          await page.getByLabel('Order size in USD').fill('1000');
+          for (const [name, row] of [['Leverage', ticket.locator('.leverage-presets')], ['Percentage of buying power', ticket.locator('.size-presets:not(.leverage-presets)')]]) {
+            const slider = ticket.getByLabel(name, { exact: true });
+            const labels = row.getByRole('button');
+            const count = await labels.count();
+            assert.ok(count >= 4, `${name}: ${count} labels`);
+            for (let i = 0; i < count; i += 1) {
+              const label = labels.nth(i);
+              const text = await label.innerText();
+              await label.click();
+              const at = await slider.evaluate(el => (Number(el.value) - Number(el.min)) / (Number(el.max) - Number(el.min)));
+              const [track, box, thumb] = [await slider.boundingBox(), await label.boundingBox(), await thumbCenter(page, slider)];
+              // The first and last labels stay flush with the track's ends (the thumb's outer edge there) and span the thumb's centre.
+              const off = at <= 0 ? box.x - track.x : at >= 1 ? box.x + box.width - (track.x + track.width) : box.x + box.width / 2 - thumb;
+              assert.ok(Math.abs(off) <= 2, `${width}px ${name} ${text} (at ${at.toFixed(3)}): ${off.toFixed(1)} px from the thumb`);
+              assert.ok(thumb >= box.x && thumb <= box.x + box.width, `${width}px ${name} ${text}: the thumb (${thumb}) is not over its label (${box.x}–${box.x + box.width})`);
+            }
+            const [rowBox, heights, fonts] = [await row.boundingBox(), await labels.evaluateAll(list => list.map(b => b.getBoundingClientRect().height)), await labels.evaluateAll(list => [...new Set(list.map(b => getComputedStyle(b).fontSize))])];
+            assert.ok(Math.abs(rowBox.height - Math.max(...heights)) < 0.5, `${width}px ${name}: the label row is ${rowBox.height}px for ${Math.max(...heights)}px labels`);
+            assert.deepEqual(fonts, [width <= 800 ? '10px' : '8px'], `${width}px ${name}: label fonts ${fonts}`);
+          }
+        } finally {
+          if (width < 800) await page.getByRole('button', { name: 'Close order form' }).click({ timeout: 2_000 }).catch(() => undefined);
+          await page.setViewportSize({ width: 1920, height: 1080 });
+        }
+      }
+      await page.locator('.order-panel').getByRole('button', { name: '5×', exact: true }).click();
+    });
+
     await check('chart: the interval menu lists all 13 by group, a pick asks for its candles, a star pins it to the bar, and both survive a reload', async () => {
       const asked = [];
       const seen = request => { const url = new URL(request.url()); if (url.pathname === '/v1/candles' && !url.searchParams.has('from')) asked.push(url.searchParams.get('interval')); };
@@ -924,7 +1124,7 @@ try {
         assert.deepEqual(await menu.getByRole('menuitemradio').allInnerTexts(), ['1 minute', '3 minutes', '5 minutes', '15 minutes', '30 minutes', '1 hour', '2 hours', '4 hours', '6 hours', '12 hours', '1 day', '1 week', '1 month']);
         assert.deepEqual(await menu.getByRole('group').evaluateAll(list => list.map(g => g.getAttribute('aria-label'))), ['Minutes', 'Hours', 'Days']);
         await menu.getByRole('menuitemradio', { name: '3 minutes' }).click();
-        await page.locator('.tv-legend-main').getByText('BTC / USD · 3m · GMTrade').waitFor();
+        await page.locator('.tv-legend-main').getByText('BTC / USD · 3m · Props.trade').waitFor();
         assert.ok(asked.includes('3m'), `intervals asked for: ${asked}`);
         assert.deepEqual(await bar.getByRole('button').allInnerTexts(), ['3m', '5m', '15m', '1h', '4h', '1D', ''], 'the chosen interval joins the bar while it is not pinned');
         await bar.getByRole('button', { name: 'More intervals' }).click();
@@ -933,11 +1133,11 @@ try {
         await page.keyboard.press('Escape');
         await menu.waitFor({ state: 'detached' });
         await page.reload();
-        await page.locator('.tv-legend-main').getByText('BTC / USD · 3m · GMTrade').waitFor();
+        await page.locator('.tv-legend-main').getByText('BTC / USD · 3m · Props.trade').waitFor();
         assert.deepEqual(await bar.getByRole('button').allInnerTexts(), ['3m', '5m', '15m', '1h', '4h', '1D', '1W', '']);
         assert.deepEqual(await page.evaluate(() => [localStorage.getItem('props.chart-interval'), localStorage.getItem('props.chart-intervals')]), ['"3m"', '["5m","15m","1h","4h","1D","1W"]']);
         await bar.getByRole('button', { name: '1h', exact: true }).click();
-        await page.locator('.tv-legend-main').getByText('BTC / USD · 1h · GMTrade').waitFor();
+        await page.locator('.tv-legend-main').getByText('BTC / USD · 1h · Props.trade').waitFor();
       } finally {
         page.off('request', seen);
       }
@@ -979,7 +1179,7 @@ try {
         await showMarket('SOL');
         await page.getByLabel('Order size in USD').fill('1000');
         await page.locator('.order-panel').getByRole('button', { name: 'Buy / Long SOL' }).click();
-        await page.locator('.order-panel').getByText('Simulated order filled at the live GMTrade price.').waitFor({ timeout: 10_000 });
+        await page.locator('.order-panel').getByText('Simulated order filled at the live price.').waitFor({ timeout: 10_000 });
         const rows = page.locator('.position-table tbody tr').filter({ hasText: 'SOL / USD' });
         await expectEventually(async () => await rows.count() === 2, 'the new SOL position is not listed');
         const row = rows.nth(1); // the one just opened
@@ -1117,6 +1317,77 @@ try {
       const dialog = page.getByRole('dialog', { name: 'Find a market' });
       await dialog.locator('.picker-row').filter({ hasText: 'BTC / USD' }).getByText('F +0.0012% / -0.0009%').waitFor();
       await page.keyboard.press('Escape');
+    });
+
+    await check('white label: no terminal state, tab, dialog or page names the venue (text, title, meta, labelling attributes, links)', async () => {
+      const found = [];
+      const sweep = async where => { for (const hit of await brandLeaks(page)) found.push(`${where} · ${hit}`); };
+      const dialog = page.getByRole('dialog');
+      const inDialog = async (where, open) => { await open(); await dialog.first().waitFor(); await sweep(where); await page.keyboard.press('Escape'); await dialog.first().waitFor({ state: 'detached' }); };
+      const ticket = page.locator('.order-panel');
+      const btc = state.markets.find(m => m.symbol === 'BTC');
+      for (const stage of ['evaluation', 'funded']) {
+        await page.goto(`${siteUrl}/#/trade/${stage}`);
+        await showMarket('BTC');
+        const row = page.locator('.position-table tbody tr').first();
+        await row.waitFor();
+        await page.locator('.price-chart canvas').first().waitFor();
+        await sweep(`${stage} terminal`);
+        await page.locator('.trade-feed').getByRole('tab', { name: 'Liquidity' }).click();
+        await sweep(`${stage} liquidity`);
+        await page.locator('.trade-feed').getByRole('tab', { name: 'Recent trades' }).click();
+        await inDialog(`${stage} close`, () => row.getByRole('button', { name: /^Close/ }).click());
+        await inDialog(`${stage} protection`, () => row.locator('.position-protection').click());
+        await inDialog(`${stage} slippage`, () => ticket.locator('.execution-details').getByRole('button', { name: /%/ }).click());
+        await inDialog(`${stage} chart`, () => page.getByRole('button', { name: 'Indicators', exact: true }).click());
+        await page.getByRole('tab', { name: /^Open orders/ }).click();
+        await sweep(`${stage} open orders`);
+        await page.getByRole('tab', { name: 'Trade history' }).click();
+        await page.getByRole('button', { name: /^View trade/ }).first().waitFor();
+        await sweep(`${stage} trade history`);
+        await inDialog(`${stage} trade record`, () => page.getByRole('button', { name: /^View trade/ }).first().click());
+        await page.getByRole('tab', { name: /^Positions/ }).click();
+        // A price that is not live (the chart's overlay, the funded ticket's refusal), with and without a last update.
+        for (const market of [{ ...btc, freshness: 'unavailable', updatedAt: null }, { ...btc, freshness: 'stale', updatedAt: Date.now() - 60_000 }]) {
+          stub.publish({ type: 'market', market });
+          await page.locator('.stale-overlay').waitFor();
+          await sweep(`${stage} ${market.freshness} price`);
+        }
+        stub.publish({ type: 'market', market: { ...btc, updatedAt: Date.now() } });
+        await page.locator('.stale-overlay').waitFor({ state: 'detached' });
+        // A market whose session is closed.
+        await page.keyboard.press('Control+k');
+        await page.getByRole('dialog', { name: 'Find a market' }).getByRole('button', { name: /^NVDA/ }).click();
+        await ticket.getByText(/is closed\./).waitFor();
+        await sweep(`${stage} closed market`);
+        await showMarket('BTC');
+      }
+      for (const [where, open] of [
+        ['market picker', () => page.keyboard.press('Control+k')],
+        ['account switcher', () => page.locator('.active-account').click()],
+        ['wallet', () => page.locator('.wallet-button').click()],
+        ['rules', () => page.locator('footer').getByRole('button', { name: 'Rules' }).click()],
+        ['help', () => page.locator('footer').getByRole('button', { name: 'Help' }).click()],
+        ['notifications', () => page.locator('header').getByRole('button', { name: /^Notifications/ }).click()],
+      ]) await inDialog(where, open);
+      await page.goto(`${siteUrl}/#/settings`);
+      for (const section of ['Preferences', 'Notifications', 'Wallet & session']) { await page.locator('.settings-nav').getByRole('button', { name: section }).click(); await sweep(`settings ${section}`); }
+      await page.goto(`${siteUrl}/#/activity`);
+      for (const tab of ['All activity', 'Trades', 'Payouts', 'Account']) { await page.getByRole('tab', { name: tab, exact: true }).click(); await sweep(`activity ${tab}`); }
+      await page.goto(`${siteUrl}/#/search?trader=${keys[0].address}`);
+      await main.locator('.trader-results').waitFor();
+      await sweep('search: a trader');
+      await page.getByLabel('Search verification records').fill(w.funded);
+      await page.getByRole('button', { name: 'Find record' }).click();
+      await main.getByText('Funded account activated').waitFor();
+      await sweep('search: a record');
+      await inDialog('search: evidence', () => main.getByRole('button', { name: 'Inspect record' }).click());
+      await page.goto(`${siteUrl}/#/vault`);
+      await inDialog('vault ledger record', () => main.getByRole('button', { name: 'Inspect Seed capital added' }).click());
+      await page.goto(`${siteUrl}/#/markets`);
+      await page.locator('.markets-table tbody tr').first().waitFor();
+      await sweep('markets');
+      assert.deepEqual(found, [], `the venue is named:\n${found.join('\n')}`);
     });
 
     await check('no unexpected console errors during the data and transaction flows', async () => {

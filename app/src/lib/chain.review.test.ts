@@ -27,8 +27,8 @@ describe('failure reasons for GMTrade errors raised through the vault CPI', () =
     `Program ${VAULT} failed: custom program error: 0x${code.toString(16)}`,
   ];
 
-  it('names GMTrade, not a generic network rejection, for GMTrade MarketClosed (6127)', () => {
-    expect(describeFailure({ InstructionError: [2, { Custom: 6127 }] }, cpi(6127))).toMatch(/GMTrade/);
+  it('names the exchange, not a generic network rejection, for GMTrade MarketClosed (6127)', () => {
+    expect(describeFailure({ InstructionError: [2, { Custom: 6127 }] }, cpi(6127))).toMatch(/^The exchange rejected the order/);
   });
 
   it('does not report GMTrade NotEnoughExecutionFee (6034) as the vault error with the same number', () => {

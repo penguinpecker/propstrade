@@ -139,12 +139,12 @@ test('fills sync: resumes where GMTrade\'s indexer stops, writes the round trip 
 
 test('order sync: the order account, then GMTrade\'s removal record, decide executed or canceled; unknown until known', async () => {
   const { funded } = await fundedAccount();
-  const [filled, rejected, pending, stuck, unindexed] = [key(), key(), key(), key(), key()];
+  const [filled, rejected, pending, stuck, unindexed, named] = [key(), key(), key(), key(), key(), key()];
   const order = (address: string) => ({
     address, fundedAccount: funded, marketToken: SOL_MARKET, symbol: 'SOL', side: 'Long' as const, kind: 'Market' as const, isIncrease: true,
     sizeUsd: '100', collateralUsd: '10', acceptablePrice: '200', status: 'awaiting_execution' as const, createSignature: 'create', createdAt: new Date(),
   });
-  await t.db.insert(gmOrders).values([filled, rejected, pending, stuck, unindexed].map(order));
+  await t.db.insert(gmOrders).values([filled, rejected, pending, stuck, unindexed, named].map(order));
   // GMTrade Order accounts: state byte 9 = 0 pending, 1 completed (still open: its escrow ATA was missing).
   const orderAccount = (state: number) => {
     const data = Buffer.alloc(2_200);
@@ -157,6 +157,8 @@ test('order sync: the order account, then GMTrade\'s removal record, decide exec
   const removals: OrderRemoval[] = [
     { id: '1', order: filled, kind: 'MarketIncrease', state: 'Completed', reason: 'executed', ts: Date.now(), slot: 1 },
     { id: '2', order: rejected, kind: 'MarketIncrease', state: 'Cancelled', reason: 'executed', ts: Date.now(), slot: 1 },
+    // The indexer's reason is free text from the venue: its name and links never reach the trader.
+    { id: '4', order: named, kind: 'MarketIncrease', state: 'Cancelled', reason: 'GMTrade keeper: https://keeper-prod-api.gmtrade.xyz/orders rejected at execution', ts: Date.now(), slot: 1 },
   ];
   const venue = createVenue({
     db: t.db, rpc: rpc as never, client: offlineClient(), reader, log: silentLog, notify: async () => {},
@@ -165,7 +167,11 @@ test('order sync: the order account, then GMTrade\'s removal record, decide exec
   await venue.syncOrders(funded);
   const by = Object.fromEntries((await t.db.select().from(gmOrders).where(eq(gmOrders.fundedAccount, funded))).map((o) => [o.address, o]));
   assert.equal(by[filled]!.status, 'executed');
-  assert.deepEqual([by[rejected]!.status, by[rejected]!.statusDetail], ['canceled', 'GMTrade could not execute this order (executed)']);
+  assert.deepEqual([by[rejected]!.status, by[rejected]!.statusDetail], ['canceled', 'The exchange could not execute this order (executed)']);
+  assert.deepEqual([by[named]!.status, by[named]!.statusDetail], ['canceled', 'The exchange could not execute this order (exchange keeper: rejected at execution)']);
+  const cancels = await t.db.select().from(accountEvents).where(eq(accountEvents.accountId, funded));
+  assert.equal(cancels.length, 2);
+  assert.ok(cancels.every((e) => e.type === 'cancel' && !/gmtrade/i.test(`${e.title} ${e.detail}`)), JSON.stringify(cancels.map((e) => e.detail)));
   assert.deepEqual([by[pending]!.status, by[pending]!.closedAt], ['awaiting_execution', null]);
   assert.equal(by[stuck]!.status, 'executed');
   assert.equal(by[unindexed]!.status, 'unknown');
@@ -219,7 +225,7 @@ test('funded valuation: equity = size − allowance + value, with the GMTrade mo
   assert.equal((await provider.list(trader)).length, 1);
 
   const [p] = await provider.positionsOf(v, funded);
-  assert.deepEqual([p!.symbol, p!.side, p!.sizeUsd, p!.venue], ['SOL', 'Long', '10000', 'gmtrade']);
+  assert.deepEqual([p!.symbol, p!.side, p!.sizeUsd, p!.venue], ['SOL', 'Long', '10000', 'exchange']);
   assert.ok(Math.abs(Number(p!.entryPrice) - Number(open.executionPrice) / 1e11) < 1e-6, `entry ${p!.entryPrice}`);
   assert.ok(Math.abs(p!.leverage - 10_000 / usd(status.netValue)) < 0.001, `leverage ${p!.leverage} = size / net value`);
   assert.ok(Number(p!.liquidationPrice) < Number(p!.entryPrice));

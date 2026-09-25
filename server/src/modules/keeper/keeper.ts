@@ -70,7 +70,7 @@ const big = (v: { toString(): string }) => BigInt(v.toString());
 export function createKeeper(d: KeeperDeps) {
   const { db, rpc, client } = d;
   const clock = d.now ?? Date.now;
-  const status: KeeperStatus = { leader: false, lastTickAt: null, gmtradeUpgrade: null };
+  const status: KeeperStatus = { leader: false, lastTickAt: null, venueUpgrade: null };
   let indexerCheckedAt = 0;
 
   // ---------- reading an account ----------
@@ -191,7 +191,7 @@ export function createKeeper(d: KeeperDeps) {
     if (cancelled.length && (step.kind === 'breach' || step.kind === 'session')) {
       await d.notify(trader, {
         kind: 'risk', title: cancelled.length === 1 ? 'Pending order cancelled' : 'Pending orders cancelled', href,
-        body: `An account holds at most 8 GMTrade orders, so to place its closing order the risk service cancelled your ${cancelled.join(', ')}.`,
+        body: `An account holds at most 8 exchange orders, so to place its closing order the risk service cancelled your ${cancelled.join(', ')}.`,
       });
     }
     // The trader hears of a breach from the indexed AccountBreached event (chain projector).
@@ -278,7 +278,7 @@ export function createKeeper(d: KeeperDeps) {
     }
     const current = (await newest())!;
     const [upgrade] = await db.select().from(gmtradeDeploys).where(isNotNull(gmtradeDeploys.detectedAt)).orderBy(desc(gmtradeDeploys.slot)).limit(1);
-    status.gmtradeUpgrade = upgrade ? {
+    status.venueUpgrade = upgrade ? {
       slot: upgrade.slot, detectedAt: upgrade.detectedAt!.getTime(), restrictedAt: upgrade.handledAt?.getTime() ?? null, acknowledgedAt: upgrade.acknowledgedAt?.getTime() ?? null,
     } : null;
     return { pending: !current.acknowledgedAt, slot: current.slot };
@@ -412,7 +412,7 @@ export function createKeeper(d: KeeperDeps) {
         .where(and(eq(gmtradeDeploys.slot, upgrade.slot), isNull(gmtradeDeploys.handledAt))).returning({ at: gmtradeDeploys.handledAt });
       if (restricted) {
         d.alerts.send(`gmtrade-restricted:${upgrade.slot}`, 'warning', 'Every active funded account is restricted after the GMTrade upgrade: once the new release is reviewed, acknowledge it, then lift each restriction (POST /v1/admin/funded/:id/lift-restriction)');
-        if (status.gmtradeUpgrade?.slot === upgrade.slot) status.gmtradeUpgrade.restrictedAt = restricted.at!.getTime();
+        if (status.venueUpgrade?.slot === upgrade.slot) status.venueUpgrade.restrictedAt = restricted.at!.getTime();
       }
     }
     await reviewPayouts(config, upgrade.pending);
@@ -444,5 +444,5 @@ export function createKeeper(d: KeeperDeps) {
     }
   }
 
-  return { run, status: (): KeeperStatus => ({ ...status, gmtradeUpgrade: status.gmtradeUpgrade && { ...status.gmtradeUpgrade } }) };
+  return { run, status: (): KeeperStatus => ({ ...status, venueUpgrade: status.venueUpgrade && { ...status.venueUpgrade } }) };
 }

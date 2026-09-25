@@ -133,7 +133,7 @@ try {
     await selectMarket('SOL', 'practice');
     await page.getByLabel('Order size in USD').fill('100');
     await page.locator('.order-panel').getByRole('button', { name: 'Buy / Long SOL' }).click();
-    await page.locator('.order-panel').getByText('Simulated order filled at the live GMTrade price.').waitFor({ timeout: 20_000 });
+    await page.locator('.order-panel').getByText('Simulated order filled at the live price.').waitFor({ timeout: 20_000 });
     const [fill] = await sql`select f.price from sim_fills f where f.account_id = ${`practice:${trader.address}`} and f.is_increase`;
     const live = await (await fetch(`${stack.apiUrl}/v1/markets/SOL`)).json();
     assert.ok(Math.abs(Number(fill.price) / Number(live.price) - 1) < 0.01, `filled at ${fill.price}, live ${live.price}`);
@@ -178,7 +178,7 @@ try {
     await selectMarket('BTC', 'evaluation');
     await page.getByLabel('Order size in USD').fill('200');
     await page.locator('.order-panel').getByRole('button', { name: 'Buy / Long BTC' }).click();
-    await page.locator('.order-panel').getByText('Simulated order filled at the live GMTrade price.').waitFor({ timeout: 20_000 });
+    await page.locator('.order-panel').getByText('Simulated order filled at the live price.').waitFor({ timeout: 20_000 });
     const [open] = await sql`select price from sim_fills where account_id = ${evaluation.toBase58()} and is_increase`;
     assert.ok(Math.abs(Number(open.price) / entry - 1) < 0.001, `opened at ${open.price}, pinned ${entry}`);
     await api('PUT', '/v1/test/prices/BTC', { price: String(Math.round(entry * 1.01)) });
@@ -270,7 +270,7 @@ try {
     const orderRows = page.locator('.positions-panel tbody tr');
     await until('three open orders in the UI', async () => (await orderRows.count()) === 3);
     await orderRows.filter({ hasText: 'Long · Market' }).getByRole('button', { name: 'Cancel' }).click();
-    await page.getByText('Order canceled on GMTrade.').waitFor({ timeout: 30_000 });
+    await page.getByText('Order canceled on the exchange.').waitFor({ timeout: 30_000 });
     await page.locator('.order-panel').getByRole('status').waitFor({ state: 'detached' }); // the ticket stops waiting for an execution
     assert.equal(await page.locator('.order-panel').getByText(/did not execute/).count(), 0, 'a trader cancel is not reported as a venue failure');
     await until('every tracked order to be gone onchain', async () => (await vault.fetchFunded(funded)).orders.every(o => o.order.equals(PublicKey.default)), 90_000);

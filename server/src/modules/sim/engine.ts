@@ -33,8 +33,8 @@ import {
 } from './book.ts';
 import { tradesRoot } from '@props/shared/merkle';
 import {
-  MICRO_PER_USD, micro, microText, modelInput, priceText, quoteFor, stampPosition, tickUnits, triggered, trim, unitOf, usd,
-  usdText, withinAcceptable,
+  MICRO_PER_USD, micro, microText, modelInput, plainRefusal, priceText, quoteFor, roomText, stampPosition, tickUnits, triggered, trim,
+  unitOf, usd, usdText, withinAcceptable,
 } from './model.ts';
 
 const PRACTICE = { sizeUsd: '25000', lossAllowanceUsd: '1250', maxExposureBps: 10_000 } as const;
@@ -93,6 +93,25 @@ const hrefOf = (a: Pick<AccountRow, 'id' | 'stage'>) => `/account/${a.stage}?id=
 /** "Evaluation 10K PT-9Kq3…": tells a wallet's same-size accounts apart in notifications. */
 const nameOf = (a: Pick<AccountRow, 'id' | 'stage' | 'label'>) => (a.stage === 'practice' ? a.label : `${a.label} ${shortIdOf(a)}`);
 const sizeLabel = (sizeUsd: string) => `${Number(sizeUsd) / 1000}K`;
+
+/**
+ * Why an increase of `size` (USD, 1e20 = $1) on `collateral` (USDC micro) breaks what the exchange accepts for a new
+ * position on that side right now (Market maxSize*, maxLeverage* with the Props limit in it, minCollateralUsd), naming
+ * the market, side and current limit; null when it breaks none. Checked when the order is placed and again when it
+ * would fill: the exchange cancels an order its limits no longer allow, and so does the engine.
+ */
+function venueBreach(market: Market, side: 'Long' | 'Short', size: bigint, collateral: bigint): string | null {
+  const [way, maxSize, maxLeverage] = side === 'Long'
+    ? ['long', market.maxSizeLong, market.maxLeverageLong] as const : ['short', market.maxSizeShort, market.maxLeverageShort] as const;
+  if (maxSize !== null && size > usd(maxSize)) return roomText(market.symbol, way, maxSize);
+  if (size * 10_000n > BigInt(Math.round(maxLeverage * 10_000)) * collateral * MICRO_PER_USD) {
+    return `Leverage ${(Number(size) / Number(collateral * MICRO_PER_USD)).toFixed(2)}x is above the ${maxLeverage}x limit for ${way}s on ${market.symbol}`;
+  }
+  if (market.minCollateralUsd !== null && collateral < micro(market.minCollateralUsd)) {
+    return `A ${way} on ${market.symbol} needs at least ${money(market.minCollateralUsd)} of margin`;
+  }
+  return null;
+}
 
 export function createEngine({ db, log, marketdata: md, publish, notify, fillDelayMs, sealer }: EngineDeps) {
   /** A unit price at the market's display precision ("86,734.78"); fills and orders keep every digit. */
@@ -296,17 +315,12 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
 
   function marketOf(symbol: string): Market {
     const market = md.market(symbol);
-    if (!market) throw new ApiError(404, 'not_found', `Unknown market ${symbol}`);
+    if (!market) throw new ApiError(404, 'unknown_market', `Unknown market ${symbol}`);
     return market;
   }
 
   async function tradableMarket(account: AccountRow, symbol: string): Promise<{ market: Market; tick: PriceTick; state: MarketState }> {
     const market = marketOf(symbol);
-    const pool = market.pools.find((p) => p.marketToken === market.marketToken);
-    const pureUsdc = pool?.pure === true && pool.longToken === USDC_MINT && pool.shortToken === USDC_MINT;
-    if (account.stage === 'practice' && !pureUsdc) {
-      throw new ApiError(422, 'market_unavailable', `${market.symbol} has no USDC-only pool on GMTrade, so it cannot be traded here`);
-    }
     if (account.stage === 'evaluation' && !market.tradable) {
       throw new ApiError(422, 'market_unavailable', `${market.symbol} is not available in evaluations: they trade only the markets funded accounts can`);
     }
@@ -320,7 +334,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     }
     const state = await md.marketState(market.marketToken);
     if (tick.session !== 'open' || state.isClosed) {
-      throw new ApiError(409, 'market_closed', `${market.symbol} is closed; GMTrade accepts no orders for it until it reopens`);
+      throw new ApiError(409, 'market_closed', `${market.symbol} is closed; the exchange accepts no orders for it until it reopens`);
     }
     return { tick, state };
   }
@@ -364,11 +378,8 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     if (!slots.has(`${market.symbol}:${req.side}`) && slots.size >= MAX_POSITIONS) {
       throw new ApiError(422, 'order_rejected', `At most ${MAX_POSITIONS} positions can be open or pending at once, as on a funded account`);
     }
-    const maxLeverageBps = BigInt(Math.round(market.maxLeverage * 10_000));
-    if (size * 10_000n > maxLeverageBps * collateral * MICRO_PER_USD) {
-      const leverage = (Number(size) / Number(collateral * MICRO_PER_USD)).toFixed(2);
-      throw new ApiError(422, 'order_rejected', `Leverage ${leverage}x is above the ${market.maxLeverage}x limit for ${market.symbol}`);
-    }
+    const breach = venueBreach(market, req.side, size, collateral);
+    if (breach) throw new ApiError(422, 'order_rejected', breach);
     const inPositions = book.positions.reduce((s, p) => s + micro(p.collateralUsd), 0n);
     const increases = book.orders.filter((o) => o.isIncrease);
     const reserved = increases.reduce((s, o) => s + micro(o.collateralUsd ?? '0'), 0n);
@@ -422,7 +433,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
           position, isLong, collateralToken: USDC_MINT, collateralAmount: collateral, sizeDeltaUsd: size,
         });
       } catch (err) {
-        throw new ApiError(422, 'rejected_by_venue', `GMTrade would reject this order: ${failure(err)}`);
+        throw new ApiError(422, 'rejected_by_venue', plainRefusal(err, market, req.side, size, collateral) ?? `The exchange would reject this order: ${failure(err)}`);
       }
       const acceptable = acceptablePrice(trigger ?? quoteFor(quote, isLong, true), isLong, true, req.slippageBps);
       const base = { accountId, symbol: market.symbol, marketToken: market.marketToken, side: req.side, slippageBps: req.slippageBps };
@@ -487,7 +498,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       const isLong = position.side === 'Long';
       // 100% is CLOSE_ALL: whatever the position is when it executes (the size shown follows the position).
       const size = closeAll ? usd(position.sizeUsd) : (usd(position.sizeUsd) * BigInt(Math.round(req.percent * 100))) / 10_000n;
-      if (!closeAll && size < MIN_DECREASE_USD) throw new ApiError(422, 'order_rejected', 'GMTrade closes at least $1 at a time');
+      if (!closeAll && size < MIN_DECREASE_USD) throw new ApiError(422, 'order_rejected', 'The exchange closes at least $1 at a time');
       const acceptable = acceptablePrice(quoteFor(tickUnits(tick, state.indexDecimals), isLong, false), isLong, false, req.slippageBps);
       const stamp = stamped();
       const [row] = await tx.insert(simOrders).values({
@@ -584,6 +595,12 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       [position] = await tx.select().from(simPositions).where(and(eq(simPositions.id, order.positionId), isNull(simPositions.closedAt)));
     }
     if (!order.isIncrease && !position) return cancel(tx, order, 'The position is already closed');
+    const row = order.isIncrease ? md.market(order.symbol) : undefined;
+    const breach = row && venueBreach(row, order.side, usd(order.sizeUsd), micro(order.collateralUsd!));
+    if (breach) {
+      await cancel(tx, order, breach);
+      return event(tx, account.id, 'cancel', `${order.kind} order cancelled`, breach, { symbol: order.symbol, status: 'failed' });
+    }
 
     const image = position && modelAccount(position);
     const market = modelInput(state, tickUnits(tick, dec), image);
@@ -599,8 +616,9 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
         result = model.simulateDecrease({ market, position: image!, sizeDeltaUsd: all ? decodePosition(image!).state.size_in_usd : requested });
       }
     } catch (err) {
-      await cancel(tx, order, `GMTrade would not execute this order: ${failure(err)}`);
-      return event(tx, account.id, 'cancel', `${order.kind} order cancelled`, failure(err), { symbol: order.symbol, status: 'failed' });
+      const plain = row && plainRefusal(err, row, order.side, usd(order.sizeUsd), micro(order.collateralUsd!));
+      await cancel(tx, order, plain ?? `The exchange would not execute this order: ${failure(err)}`);
+      return event(tx, account.id, 'cancel', `${order.kind} order cancelled`, plain ?? failure(err), { symbol: order.symbol, status: 'failed' });
     }
     if (order.acceptablePrice && !withinAcceptable(result.executionPrice, unitOf(order.acceptablePrice, dec), isLong, order.isIncrease)) {
       const detail = `Price moved past your slippage limit: it would fill at ${shownPrice(result.executionPrice, dec, order.symbol)}, worse than your acceptable price ${shownPrice(unitOf(order.acceptablePrice, dec), dec, order.symbol)}`;
@@ -746,7 +764,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       if (m.status?.liquidatable && fresh(m, now) && await liquidate(tx, account, fx, m as Required<Mark>)) dirty = true;
     }
     for (const o of book.orders.filter((x) => expired(x, now))) {
-      await cancel(tx, o, 'Expired: GMTrade drops market orders not executed within 30 minutes');
+      await cancel(tx, o, 'Expired: the exchange drops market orders not executed within 30 minutes');
       fx.unwatch.push(o);
       fx.changed = dirty = true;
     }

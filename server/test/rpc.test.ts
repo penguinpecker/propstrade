@@ -48,9 +48,9 @@ describe('rpcRefusal', () => {
   it('relays getProgramAccounts only for filtered GMTrade queries', () => {
     const filtered = { filters: [{ dataSize: 680 }, { memcmp: { offset: 56, bytes: 'x' } }] };
     expect(rpcRefusal({ method: 'getProgramAccounts', params: [GMTRADE, filtered] })).toBeNull();
-    expect(rpcRefusal({ method: 'getProgramAccounts', params: [GMTRADE, { filters: [{ dataSize: 680 }] }] })).toMatch(/filtered GMTrade/);
-    expect(rpcRefusal({ method: 'getProgramAccounts', params: [GMTRADE] })).toMatch(/filtered GMTrade/);
-    expect(rpcRefusal({ method: 'getProgramAccounts', params: ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', filtered] })).toMatch(/filtered GMTrade/);
+    expect(rpcRefusal({ method: 'getProgramAccounts', params: [GMTRADE, { filters: [{ dataSize: 680 }] }] })).toMatch(/filtered exchange/);
+    expect(rpcRefusal({ method: 'getProgramAccounts', params: [GMTRADE] })).toMatch(/filtered exchange/);
+    expect(rpcRefusal({ method: 'getProgramAccounts', params: ['TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', filtered] })).toMatch(/filtered exchange/);
   });
 });
 

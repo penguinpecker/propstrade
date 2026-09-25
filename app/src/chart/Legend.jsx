@@ -41,8 +41,8 @@ export function Legend({ market, interval, live, bar, prevClose, drawing, legend
   const rows = React.Children.count(children);
   return <div className={`tv-legend ${drawing ? 'drawing' : ''}`} ref={legendRef}>
     <div className="tv-legend-main">
-      <span className="tv-legend-title">{market.pair} · {interval} · GMTrade</span>
-      <i className={`tv-live ${live ? 'on' : 'off'}`} role="img" aria-label={live ? 'Live prices' : 'Prices not live'} title={live ? 'Live GMTrade prices' : "Not live: GMTrade's last prices"} />
+      <span className="tv-legend-title">{market.pair} · {interval} · Props.trade</span>
+      <i className={`tv-live ${live ? 'on' : 'off'}`} role="img" aria-label={live ? 'Live prices' : 'Prices not live'} title={live ? 'Live prices' : 'Not live: the last prices received'} />
       {bar && <span className={`tv-ohlc ${bar.close < bar.open ? 'down' : 'up'}`}>{[['O', bar.open], ['H', bar.high], ['L', bar.low], ['C', bar.close]].map(([k, v]) => <span key={k}>{k}<b>{price(v, decimals)}</b></span>)}<b className={change < 0 ? 'down' : 'up'}>{signed(change, decimals)} ({signed(base ? change / base * 100 : 0, 2)}%)</b></span>}
     </div>
     {!folded && children}

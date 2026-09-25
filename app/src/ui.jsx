@@ -18,7 +18,7 @@ export function WatchlistStar({ symbol, watched, onToggle }) {
 }
 export function Badge({ children, tone = 'neutral', dot = false, title }) { return <span className={`badge ${tone}`} title={title}>{dot && <i />}{children}</span>; }
 /** Marks a market price that is not live ("Stale", "Delayed", "Unavailable"), with the time of GMTrade's last update. */
-export function FreshnessBadge({ market }) { return <Badge tone="amber" title={market.updatedAt ? `Last update ${utcTime(market.updatedAt)}` : 'GMTrade has not published a price'}>{freshnessLabel(market)}</Badge>; }
+export function FreshnessBadge({ market }) { return <Badge tone="amber" title={market.updatedAt ? `Last update ${utcTime(market.updatedAt)}` : 'No price has been published yet'}>{freshnessLabel(market)}</Badge>; }
 const ICON_COLORS = { BTC: '#bd8238', ETH: '#7b79a4', SOL: '#756193', XAU: '#aa8b37', EUR: '#59749a', AAPL: '#72706e', NVDA: '#61825b', GBP: '#776384' };
 /** A stable hue per symbol, so a market keeps its monogram color everywhere. */
 const monogramColor = symbol => `hsl(${[...symbol].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7)} 28% 56%)`;

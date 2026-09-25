@@ -17,6 +17,7 @@ import { model, type PositionStatus } from '@props/gmsol-wasm';
 import type { Db } from '../../db/client.ts';
 import { accountEvents, closedTrades, fundedAccounts, gmOrders, gmPositionSnapshots, venueFills } from '../../db/schema.ts';
 import { tokenAccountAmount } from '../../lib/solana.ts';
+import { why } from '../marketdata/upstreams.ts';
 import type { MarketDataService } from '../types.ts';
 import { fundedHref, type Notice } from './projector.ts';
 import { gmUsd, micro, tokenAmount, unitPrice, type ChainReader, type MarketInfo } from './reader.ts';
@@ -178,7 +179,7 @@ function fillActivity(f: ReturnType<typeof fillRow>, e: TradeEvent) {
   return {
     type: (e.isLiquidation ? 'liquidation' : 'fill') as 'liquidation' | 'fill',
     title: `${f.side} ${f.symbol} ${verb}`,
-    detail: `${f.sizeUsd} USD filled on GMTrade at ${f.price}${f.realizedPnl === null ? '' : `; realized ${f.realizedPnl} USD after costs`}.`,
+    detail: `${f.sizeUsd} USD filled on the exchange at ${f.price}${f.realizedPnl === null ? '' : `; realized ${f.realizedPnl} USD after costs`}.`,
     amountUsd: f.realizedPnl, symbol: f.symbol, signature: f.signature, ts: f.ts,
   };
 }
@@ -277,14 +278,14 @@ export function createVenue(d: VenueDeps) {
 
   type Outcome = { status: 'executed' | 'canceled' | 'unknown'; statusDetail: string | null };
   const executed: Outcome = { status: 'executed', statusDetail: null };
-  const unexecuted = (reason: string): Outcome => ({ status: 'canceled', statusDetail: `GMTrade could not execute this order${reason}` });
+  const unexecuted = (reason: string): Outcome => ({ status: 'canceled', statusDetail: `The exchange could not execute this order${reason}` });
 
   /** Records how an order ended, once. When GMTrade itself cancelled it, the trader gets an activity row and a notice. */
   async function settle(funded: string, address: string, outcome: Outcome, endedAt: number, cancelledByGmtrade = false) {
     const [order] = await d.db.update(gmOrders).set({ ...outcome, closedAt: sql`coalesce(${gmOrders.closedAt}, now())`, updatedAt: new Date() })
       .where(and(eq(gmOrders.address, address), or(isNull(gmOrders.closedAt), inArray(gmOrders.status, UNSETTLED)))).returning();
     if (!order || !cancelledByGmtrade) return;
-    const title = `${order.side} ${order.symbol} order cancelled by GMTrade`;
+    const title = `${order.side} ${order.symbol} order cancelled by the exchange`;
     const detail = `${outcome.statusDetail}. Its collateral and deposit returned to the account.`;
     await d.db.insert(accountEvents).values({
       accountId: funded, type: 'cancel', title, detail, symbol: order.symbol, status: 'confirmed', simulated: false, ts: new Date(endedAt),
@@ -321,9 +322,10 @@ export function createVenue(d: VenueDeps) {
     const removals = new Map((await d.gm.removals(gone)).map((r) => [r.order, r]));
     for (const address of gone) {
       const r = removals.get(address);
-      if (!r) await settle(funded, address, { status: 'unknown', statusDetail: 'Finished on GMTrade; waiting for its result from GMTrade\'s indexer' }, Date.now());
+      if (!r) await settle(funded, address, { status: 'unknown', statusDetail: 'Finished on the exchange; waiting for its result from the exchange\'s indexer' }, Date.now());
       else if (r.state === 'Completed') await settle(funded, address, executed, r.ts);
-      else if (r.state === 'Cancelled') await settle(funded, address, unexecuted(` (${r.reason})`), r.ts, true);
+      // The indexer's free-text reason reaches the trader (order detail, activity, notification): scrubbed as health is.
+      else if (r.state === 'Cancelled') await settle(funded, address, unexecuted(` (${why(r.reason)})`), r.ts, true);
       else await settle(funded, address, { status: 'canceled', statusDetail: 'Cancelled' }, r.ts);
     }
   }

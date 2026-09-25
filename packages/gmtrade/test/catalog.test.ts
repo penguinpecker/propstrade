@@ -2,10 +2,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { model, type MarketStatus } from '@props/gmsol-wasm';
+import { model, type MarketStatus, type ModelInput } from '@props/gmsol-wasm';
 import {
-  PriceBook, USD_UNIT, buildCatalog, categoryOf, displayDecimals, pairOf, subcategoryOf, type CatalogInput, type FeedState, type KeeperMarket,
-  type KeeperToken, type Pair, type PropsLimits,
+  PriceBook, USDC_MINT, USD_UNIT, buildCatalog, categoryOf, displayDecimals, modelInput, pairOf, parseFixed, storeIdl, subcategoryOf, usdString, venueLimits,
+  type CatalogInput, type FeedState, type KeeperMarket, type KeeperToken, type Pair,
 } from '../src/index.ts';
 
 const snapshot = JSON.parse(readFileSync(new URL('fixtures/snapshot.json', import.meta.url), 'utf8'));
@@ -24,20 +24,24 @@ function feed(overrides: Partial<FeedState> = {}): FeedState {
   };
 }
 
-const limits: CatalogInput['limits'] = ({ pureUsdc }): PropsLimits =>
-  pureUsdc ? { tradable: true, maxLeverage: 25, closedMaxLeverage: 8 } : { tradable: false, unavailableReason: 'no USDC pool', maxLeverage: 25, closedMaxLeverage: null };
+const limits: CatalogInput['limits'] = () => ({ tradable: true, maxLeverage: 25, closedMaxLeverage: 8 });
 
-function catalog(f = feed(), now = SOL_TICK_MS + 1_000, pairs = new Map<string, Pair>()) {
+/** A new position of `sizeUsd` (USD, 1e20 = $1) at `leverage`, as the venue's model executes it (throws its refusal). */
+const opener = (input: ModelInput) => (isLong: boolean, sizeUsd: bigint, leverage = 1) => () => model.simulateIncrease({
+  market: input, isLong, collateralToken: USDC_MINT, collateralAmount: (sizeUsd * 1_000_000n) / (USD_UNIT * BigInt(leverage)) + 1n, sizeDeltaUsd: sizeUsd,
+});
+
+function catalog(f = feed(), now = SOL_TICK_MS + 1_000, pairs = new Map<string, Pair>(), propsLimits = limits) {
   const errors: unknown[] = [];
   const rows = buildCatalog({
     feed: f, pairs, opens24h: new Map([['So1Zu7vPQQxrguzUehKAyVLpjcc769zxgBuDAsxTUMH', 120]]),
-    limits, onError: (_m, e) => errors.push(e), now,
+    limits: propsLimits, onError: (_m, e) => errors.push(e), now,
   });
   assert.deepEqual(errors, []);
   return Object.fromEntries(rows.map((r) => [r.symbol, r]));
 }
 
-test('one row per index asset, preferring the pure USDC pool, with model stats', () => {
+test('one row per index asset with a pure USDC pool, which it trades on, with model stats', () => {
   const { SOL, NVDA } = catalog();
   assert.equal(SOL!.marketToken, '6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc');
   assert.equal(SOL!.pools.length, 2);
@@ -73,14 +77,89 @@ test('freshness: stale only for open markets, delayed while polling, unavailable
   assert.deepEqual([SOL!.freshness, SOL!.price, SOL!.session, SOL!.openInterestLong], ['unavailable', null, 'unknown', null]);
 });
 
-test('an asset without a pure USDC pool falls back to its pool with the most LP value', () => {
+test('an asset without an enabled pure USDC pool is not listed (its other pools cannot be traded here); a market outside its session is', () => {
   const f = feed();
   f.markets.delete('6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc');
+  assert.deepEqual(Object.keys(catalog(f)), ['NVDA'], 'SOL/USD[WSOL-USDC] alone lists nothing');
+  const disabled = feed();
+  const usdcPool = disabled.markets.get('6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc')!;
+  disabled.markets.set(usdcPool.marketToken, { ...usdcPool, meta: { ...usdcPool.meta!, isEnabled: false } });
+  assert.deepEqual(Object.keys(catalog(disabled)), ['NVDA'], 'nor does a USDC pool the venue disabled');
+  // NVDA's Market account has the Closed flag set (captured outside US hours): that is its session, not a delisting.
+  assert.deepEqual([catalog().NVDA!.session, catalog().NVDA!.tradable], ['closed', true]);
+});
+
+test('limits for a new position on the real SOL pool: the venue\'s own, per side, as its model enforces them, under the Props cap', () => {
+  const f = feed();
+  const uncapped = catalog(f, undefined, undefined, () => ({ tradable: true, maxLeverage: 10_000, closedMaxLeverage: null }));
+  const { SOL, NVDA } = uncapped;
+  const pool = f.markets.get('6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc')!;
+  const input = modelInput(f, pool)!;
+  const s = model.marketStatus(input);
+  // min collateral factor 0.004 (250x): open interest × its multiplier (≈ $1.14M × 2.2e-10) is far below it here.
+  assert.deepEqual([SOL!.maxLeverageLong, SOL!.maxLeverageShort, NVDA!.maxLeverageLong, NVDA!.maxLeverageShort], [250, 250, 50, 50]);
+  // Sizes: the reserve headroom, below the $25M max open interest less the side's open interest. A short's is gmsol-sdk's
+  // liquidity; a long's is that less the largest positive price impact it could get (here the whole impact pool, $275).
+  assert.equal(SOL!.maxSizeShort, usdString(s.liquidityForShort));
+  const longGap = s.liquidityForLong - parseFixed(SOL!.maxSizeLong!, 20);
+  assert.ok(longGap > 0n && longGap < 1_000n * USD_UNIT, `a long's room is below the sdk's liquidity by the impact pool (${usdString(longGap)})`);
+  assert.equal(SOL!.minCollateralUsd, '1');
+  const open = opener(input);
+  for (const [isLong, max] of [[true, SOL!.maxSizeLong!], [false, SOL!.maxSizeShort!]] as const) {
+    const size = parseFixed(max, 20);
+    assert.doesNotThrow(open(isLong, size), `${isLong ? 'long' : 'short'} of the max size`);
+    assert.throws(open(isLong, (size * 1005n) / 1000n), /insufficient reserve/, `${isLong ? 'long' : 'short'} 0.5 % above it`);
+  }
+  assert.doesNotThrow(open(true, 1_000n * USD_UNIT, 225));
+  assert.throws(open(true, 1_000n * USD_UNIT, 250), /insufficient collateral/, 'the factor binds before fees: 250x itself is refused');
+
+  const capped = catalog(f);
+  assert.deepEqual([capped.SOL!.maxLeverageLong, capped.SOL!.maxLeverageShort, capped.SOL!.maxLeverage], [25, 25, 25], 'the Props cap is lower');
+  const noState = feed();
+  noState.accounts.delete(pool.pubkey);
+  const bare = catalog(noState).SOL!;
+  assert.deepEqual([bare.maxLeverageLong, bare.maxLeverageShort, bare.maxSizeLong, bare.maxSizeShort, bare.minCollateralUsd], [25, 25, null, null, null], 'no pool state: the Props cap, sizes unknown');
+});
+
+test('near its max open interest a side takes that max less its open interest, even while longs are in profit', () => {
+  const f = feed();
+  const pool = f.markets.get('6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc')!;
+  const s = model.marketStatus(modelInput(f, pool)!);
+  // The venue checks max open interest against the side's open interest in USD. Longs here hold $1.138M, reserved at
+  // $1.207M (their tokens at today's price): taking the reserve off the max open interest would leave no room at all.
+  const image = Buffer.from(f.accounts.get(pool.pubkey)!.data, 'base64');
+  for (const [side, oi] of [['long', s.openInterestForLong], ['short', s.openInterestForShort]] as const) {
+    const at = storeIdl.offsetOf('Market', `config.max_open_interest_for_${side}`);
+    const max = oi + 10_000n * USD_UNIT;
+    image.writeBigUInt64LE(max & (2n ** 64n - 1n), at);
+    image.writeBigUInt64LE(max >> 64n, at + 8);
+  }
+  f.accounts.set(pool.pubkey, { ...f.accounts.get(pool.pubkey)!, data: image.toString('base64') });
   const { SOL } = catalog(f);
-  assert.equal(SOL!.marketToken, 'BwN2FWixP5JyKjJNyD1YcRKN1XhgvFtnzrPrkfyb4DkW');
-  assert.equal(SOL!.tradable, false);
-  assert.equal(SOL!.unavailableReason, 'no USDC pool');
-  assert.ok(Number(SOL!.poolLiquidity) > 0);
+  assert.deepEqual([SOL!.maxSizeLong, SOL!.maxSizeShort], ['10000', '10000']);
+  const open = opener(modelInput(f, pool)!);
+  for (const isLong of [true, false]) {
+    assert.doesNotThrow(open(isLong, 10_000n * USD_UNIT), `a $10,000 ${isLong ? 'long' : 'short'}`);
+    assert.throws(open(isLong, 10_100n * USD_UNIT), /max open interest exceeded/, `a $10,100 ${isLong ? 'long' : 'short'}`);
+  }
+});
+
+test("a long's room is net of the positive price impact it can get: the venue reserves the long's tokens, which the impact adds to (live WLFI)", () => {
+  const w = JSON.parse(readFileSync(new URL('fixtures/wlfi-long-impact.json', import.meta.url), 'utf8'));
+  const image = Buffer.from(w.market, 'base64');
+  for (const clock of ['price_impact_distribution', 'borrowing', 'funding']) { // a day ahead: no accrual, exact and repeatable
+    image.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000) + 86_400), storeIdl.offsetOf('Market', `state.clocks.${clock}`));
+  }
+  const price = (p: { min: string; max: string }) => ({ min: BigInt(p.min), max: BigInt(p.max) });
+  const input = { market: image.toString('base64'), virtualInventories: w.virtualInventories, prices: { index: price(w.prices.index), long: price(w.prices.long), short: price(w.prices.short) } };
+  const s = model.marketStatus(input);
+  const { maxSizeLong, maxSizeShort } = venueLimits(input.market, s, input.prices.index);
+  const room = parseFixed(maxSizeLong!, 20);
+  const open = opener(input);
+  assert.ok(open(true, room)().priceImpactValue > 0n, 'a long improves the balance here: its impact is positive');
+  assert.throws(open(true, s.liquidityForLong), /insufficient reserve/, `gmsol-sdk's liquidity ($${usdString(s.liquidityForLong)}) is more than the venue takes`);
+  assert.throws(open(true, (room * 101n) / 100n), /insufficient reserve/);
+  assert.deepEqual([maxSizeLong, maxSizeShort], ['2025.453175', '0'], 'the room less 0.5 % (the max positive impact factor); no short room');
 });
 
 test('24h volume sums every pool of the asset in market-info', () => {

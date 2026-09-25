@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  KeeperFeed, NAMES, buildCatalog, decodePosition, fetchCandles, fetchOrderRemovals, fetchPairs, fetchTradeEvents, fetchTxSignatures,
+  KeeperFeed, NAMES, USDC_MINT, buildCatalog, decodePosition, fetchCandles, fetchOrderRemovals, fetchPairs, fetchTradeEvents, fetchTxSignatures,
   fetchUser, positionAddress,
 } from '../src/index.ts';
 
@@ -20,7 +20,7 @@ async function until(check: () => boolean, ms: number) {
   }
 }
 
-test('live catalog: every GMTrade asset becomes a valid Market row (68 assets / 93 pools on 2026-09-23)', { skip, timeout: 90_000 }, async () => {
+test('live catalog: every GMTrade asset with a pure USDC pool becomes a valid Market row (55 of 68 assets, 79 of 93 pools on 2026-09-25)', { skip, timeout: 90_000 }, async () => {
   const feed = new KeeperFeed();
   await feed.start();
   try {
@@ -40,17 +40,23 @@ test('live catalog: every GMTrade asset becomes a valid Market row (68 assets / 
     const byCategory: Record<string, number> = {};
     for (const r of rows) byCategory[r.category] = (byCategory[r.category] ?? 0) + 1;
     console.log(`${rows.length} assets from ${pools} pools:`, byCategory);
+    const listed = new Set(rows.map((r) => r.symbol));
+    const unlisted = [...new Set([...feed.markets.values()].flatMap((m) => (m.meta?.isEnabled ? [feed.tokens.get(m.meta.indexToken.pubkey)?.meta?.name ?? '?'] : [])))]
+      .filter((s) => !listed.has(s)).sort();
+    console.log(`not listed (no enabled pure USDC pool): ${unlisted.join(', ') || 'none'}`);
     assert.deepEqual(errors, []);
-    assert.ok(rows.length >= 55 && rows.length <= 120, `${rows.length} assets`);
-    assert.ok(pools >= rows.length && pools >= 80, `${pools} pools`);
+    assert.ok(rows.length >= 45 && rows.length <= 120, `${rows.length} assets`);
+    assert.ok(pools >= rows.length, `${pools} pools`);
     assert.equal(new Set(rows.map((r) => r.symbol)).size, rows.length);
 
     for (const r of rows) {
       assert.match(r.pair, /^\S+ \/ \S+$/, r.symbol);
       assert.ok(r.name.length > 0 && Number.isInteger(r.priceDecimals), r.symbol);
-      assert.ok(r.pools.some((p) => p.marketToken === r.marketToken), r.symbol);
+      const pool = r.pools.find((p) => p.marketToken === r.marketToken);
+      assert.ok(pool?.pure && pool.longToken === USDC_MINT && pool.shortToken === USDC_MINT, `${r.symbol} trades on its pure USDC pool`);
       assert.ok(r.maxLeverage >= 1, `${r.symbol} venue leverage`);
-      for (const v of [r.price, r.volume24h, r.openInterestLong, r.openInterestShort, r.capacityLong, r.capacityShort, r.poolLiquidity]) {
+      assert.ok(r.maxLeverageLong >= 1 && r.maxLeverageLong <= r.maxLeverage && r.maxLeverageShort >= 1 && r.maxLeverageShort <= r.maxLeverage, `${r.symbol} leverage per side`);
+      for (const v of [r.price, r.volume24h, r.openInterestLong, r.openInterestShort, r.capacityLong, r.capacityShort, r.poolLiquidity, r.maxSizeLong, r.maxSizeShort, r.minCollateralUsd]) {
         if (v !== null) assert.match(v, DECIMAL, r.symbol);
       }
     }
@@ -70,7 +76,6 @@ test('live catalog: every GMTrade asset becomes a valid Market row (68 assets / 
     const uncurated = rows.filter((r) => r.category !== 'Crypto' && r.subcategory === 'Other').map((r) => r.symbol);
     assert.deepEqual(uncurated, [], `add ${uncurated.join(', ')} to GROUPS in src/metadata.ts`);
     // categoryOf and subcategoryOf read a listing without a GMTrade category as Crypto › Other, whatever the asset is.
-    const listed = new Set(rows.map((r) => r.symbol));
     const uncategorised = [...feed.tokens.values()].filter((t) => t.meta && listed.has(t.meta.name) && !t.meta.category).map((t) => t.meta!.name);
     assert.deepEqual(uncategorised, [], `GMTrade lists ${uncategorised.join(', ')} without a category, so it shows as Crypto › Other`);
     const unnamed = rows.filter((r) => !(r.symbol in NAMES)).map((r) => r.symbol);

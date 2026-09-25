@@ -45,7 +45,7 @@ export interface Market {
   // category GMTrade adds later keeps its GMTrade name), curated by symbol for the rest ("Metals", "Energy", "Majors",
   // "Emerging", "Index ETFs", "Companies"); "Other" for a symbol the curated table does not know yet.
   subcategory: string;
-  marketToken: Pubkey;         // GMTrade market token of the preferred pool (pure USDC-USDC when available)
+  marketToken: Pubkey;         // GMTrade market token of the preferred pool: its pure USDC-USDC pool (an asset without one is not listed)
   pools: { marketToken: Pubkey; name: string; pure: boolean; longToken: Pubkey; shortToken: Pubkey }[];
   tradable: boolean;           // on the Props allowlist (MarketConfig.enabled) AND pure USDC-USDC
   unavailableReason?: string;  // plain-English reason when !tradable
@@ -65,6 +65,14 @@ export interface Market {
   poolLiquidity: Decimal | null;          // real LP value of the preferred pool, USD
   maxLeverage: number;                    // Props limit (min of venue and MarketConfig)
   closedMaxLeverage: number | null;       // leverage allowed through a session close
+  // What the exchange accepts for a NEW position on each side right now (the preferred pool's state; rows are re-sent as
+  // it moves). Leverage: the lower of the Props limit and the exchange's (1 / its min collateral factor, which grows
+  // with the side's open interest), whole.
+  maxLeverageLong: number;
+  maxLeverageShort: number;
+  maxSizeLong: Decimal | null;            // USD: the largest new long it accepts (reserve and max open interest headroom, the lower); null without pool state
+  maxSizeShort: Decimal | null;
+  minCollateralUsd: Decimal | null;       // the exchange's minimum collateral per position; null when the market sets none
   session: SessionState;
   sessionNote?: string;                   // e.g. "US market hours, Mon–Fri 13:30–20:00 UTC"
   freshness: DataFreshness;
@@ -73,12 +81,12 @@ export interface Market {
 
 export interface PriceTick { symbol: string; min: Decimal; max: Decimal; mid: Decimal; ts: Millis; session: SessionState }
 
-// 5m 15m 1h 4h 1D come from GMTrade's candle service; 30m 2h 6h 12h 1W (Monday 00:00 UTC) 1M (calendar month, UTC) are
-// rolled up from them on the server; 1m and 3m come from Props.trade's own price record (source 'record'), whose
-// history starts with it (2026-09-23): an empty older window means history start, as with GMTrade's.
+// 5m 15m 1h 4h 1D come from GMTrade's candle service (source 'venue'); 30m 2h 6h 12h 1W (Monday 00:00 UTC) 1M (calendar
+// month, UTC) are rolled up from them on the server; 1m and 3m come from Props.trade's own price record (source
+// 'record'), whose history starts with it (2026-09-23): an empty older window means history start, as with GMTrade's.
 export type CandleInterval = '1m' | '3m' | '5m' | '15m' | '30m' | '1h' | '2h' | '4h' | '6h' | '12h' | '1D' | '1W' | '1M';
 export interface Candle { time: number /* unix seconds */; open: number; high: number; low: number; close: number; volume?: number }
-export interface CandlesResponse { symbol: string; interval: CandleInterval; candles: Candle[]; source: 'gmtrade' | 'record'; freshness: DataFreshness }
+export interface CandlesResponse { symbol: string; interval: CandleInterval; candles: Candle[]; source: 'venue' | 'record'; freshness: DataFreshness }
 
 export interface MarketTrade { id: string; symbol: string; side: 'Long' | 'Short'; isIncrease: boolean; price: Decimal; sizeUsd: Decimal; ts: Millis; signature?: string }
 
@@ -99,6 +107,8 @@ export interface PriceImpactQuote {
   hourlyCostUsd: Decimal | null;        // (borrow + funding when paid) × size, per hour: received funding is never credited
   liquidationPrice: Decimal | null;     // of the resulting position at collateralUsd; null when the model cannot value it
   platformFeeUsd: Decimal;              // Props.trade's fee per order: '0' today
+  maxSizeUsd: Decimal | null;           // the requested side's Market.maxSizeLong / maxSizeShort, as of the quote
+  maxLeverage: number;                  // the requested side's Market.maxLeverageLong / maxLeverageShort
 }
 
 // ---------- programs / config ----------
@@ -110,7 +120,7 @@ export interface Tier {
 }
 export interface AppConfig {
   cluster: 'mainnet-beta' | 'localnet';
-  programId: Pubkey; usdcMint: Pubkey; gmtradeStore: Pubkey;
+  programId: Pubkey; usdcMint: Pubkey; venueStore: Pubkey;
   tiers: Tier[];
   traderShareBps: number; minPayoutUsdc: Decimal;
   paused: { newEvaluations: boolean; trading: boolean; payouts: boolean };
@@ -143,7 +153,7 @@ export interface Health {
    *  program upgrade it saw (after which every active funded account is restricted until an operator acknowledges it). */
   keeper?: {
     leader: boolean; lastTickAt: Millis | null;
-    gmtradeUpgrade: { slot: number; detectedAt: Millis; restrictedAt: Millis | null; acknowledgedAt: Millis | null } | null;
+    venueUpgrade: { slot: number; detectedAt: Millis; restrictedAt: Millis | null; acknowledgedAt: Millis | null } | null;
   };
 }
 export interface NonceRequest { wallet: Pubkey }
@@ -206,7 +216,7 @@ export interface Position {
   takeProfit: { price: Decimal; orderId: string; status: OrderStatus } | null;
   stopLoss: { price: Decimal; orderId: string; status: OrderStatus } | null;
   openedAt: Millis;
-  venue: 'simulated' | 'gmtrade'; gmPosition?: Pubkey;
+  venue: 'simulated' | 'exchange'; gmPosition?: Pubkey;
 }
 export interface Order {
   id: string; symbol: string; side: 'Long' | 'Short'; kind: OrderKind; isIncrease: boolean;
@@ -218,7 +228,7 @@ export interface Fill {
   id: string; symbol: string; side: 'Long' | 'Short'; isIncrease: boolean;
   sizeUsd: Decimal; price: Decimal; feeUsd: Decimal; priceImpactUsd: Decimal; fundingUsd: Decimal; borrowUsd: Decimal;
   realizedPnl: Decimal | null;  // on decreases; simulated fills also give an increase's costs (≤ 0), so realized P&L = Σ fills
-  ts: Millis; venue: 'simulated' | 'gmtrade'; signature?: string;
+  ts: Millis; venue: 'simulated' | 'exchange'; signature?: string;
 }
 export interface ClosedTrade {
   id: string; symbol: string; side: 'Long' | 'Short'; openedAt: Millis; closedAt: Millis;
@@ -227,7 +237,7 @@ export interface ClosedTrade {
    *  fee). Price impact is inside the prices and the P&L, shown for the record. netPnl is after all of them. */
   feesUsd: Decimal; orderFeesUsd: Decimal; fundingUsd: Decimal; borrowUsd: Decimal; priceImpactUsd: Decimal;
   netPnl: Decimal;
-  venue: 'simulated' | 'gmtrade'; signatures: string[];
+  venue: 'simulated' | 'exchange'; signatures: string[];
 }
 export type ActivityType = 'order' | 'fill' | 'cancel' | 'protection' | 'liquidation' | 'charge' | 'account' | 'payout' | 'risk';
 export interface ActivityItem {

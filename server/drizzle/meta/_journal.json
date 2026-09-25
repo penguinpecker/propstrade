@@ -57,6 +57,13 @@
       "when": 1790303231911,
       "tag": "0007_hot_query_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1790321315369,
+      "tag": "0008_white_label_order_notes",
+      "breakpoints": true
     }
   ]
 }

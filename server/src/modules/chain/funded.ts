@@ -162,7 +162,7 @@ export function createFundedProvider(d: { db: Db; venue: Venue; program: Program
         pendingBorrowUsd: pending(status?.pendingBorrowingFeeValue), pendingFundingUsd: pending(status?.pendingFundingFeeValue),
         closeFeeUsd: pending(status?.closeOrderFeeValue), closing,
         takeProfit: protection('TakeProfit'), stopLoss: protection('StopLoss'),
-        openedAt: (opening ?? snapshot)?.ts.getTime() ?? v.at, venue: 'gmtrade', gmPosition: p.address,
+        openedAt: (opening ?? snapshot)?.ts.getTime() ?? v.at, venue: 'exchange', gmPosition: p.address,
       });
     }
     return out;
@@ -176,7 +176,7 @@ export function createFundedProvider(d: { db: Db; venue: Venue; program: Program
       id: t.id, symbol: t.symbol, side: t.side, openedAt: t.openedAt.getTime(), closedAt: t.closedAt.getTime(), sizeUsd: dec(t.sizeUsd),
       entryPrice: decPrice(t.entryPrice), exitPrice: decPrice(t.exitPrice), feesUsd: dec(t.feesUsd), orderFeesUsd: dec(t.orderFeesUsd),
       fundingUsd: dec(t.fundingUsd), borrowUsd: dec(t.borrowUsd), priceImpactUsd: dec(t.priceImpactUsd), netPnl: dec(t.netPnl),
-      venue: t.venue, signatures: t.signatures,
+      venue: t.venue === 'gmtrade' ? 'exchange' : t.venue, signatures: t.signatures,
     }));
   }
 

@@ -8,7 +8,7 @@ import {
   type FundedRef,
 } from '@props/sdk';
 import { ComputeBudgetProgram, PublicKey, SendTransactionError, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
-import type { Connection, TransactionError, TransactionInstruction } from '@solana/web3.js';
+import type { AccountInfo, Connection, TransactionError, TransactionInstruction } from '@solana/web3.js';
 import type { Tier } from '@props/shared';
 
 /** An unsigned transaction with everything the interface shows before the wallet asks for approval. */
@@ -109,9 +109,11 @@ async function fundedRef(connection: Connection, funded: string): Promise<Funded
   return { address, account };
 }
 
+/** A GMTrade position's size; an address GMTrade does not own holds none (never opened, closed, or only sent lamports since). */
+const heldSize = (info: AccountInfo<Buffer> | null | undefined) => info?.owner.equals(GMTRADE_PROGRAM_ID) ? decodeGmPosition(info.data).sizeInUsd : 0n;
+
 async function positionSize(connection: Connection, position: PublicKey): Promise<bigint> {
-  const info = await connection.getAccountInfo(position, 'confirmed');
-  return info ? decodeGmPosition(info.data).sizeInUsd : 0n;
+  return heldSize(await connection.getAccountInfo(position, 'confirmed'));
 }
 
 // ---------- evaluation purchase + funded activation ----------
@@ -239,7 +241,7 @@ export async function prepareClose(connection: Connection, trader: PublicKey, in
   for (const p of input.positions) {
     const { marketToken, decimals } = await onchainMarket(connection, p.market);
     const size = p.percent >= 100 ? CLOSE_ALL : usdToGm(usd6(p.sizeUsd * p.percent / 100));
-    if (size !== CLOSE_ALL && size < usdToGm('1')) throw new TxError('GMTrade closes at least $1 of a position. Choose a larger share.');
+    if (size !== CLOSE_ALL && size < usdToGm('1')) throw new TxError('The exchange closes at least $1 of a position. Choose a larger share.');
     const close = await c.closePosition({
       authority: trader, funded, marketToken, isLong: p.isLong, sizeDeltaUsd: size, ordersBefore: instructions.length,
       acceptablePrice: acceptablePrice(unitPrice(p.markPrice, decimals), p.isLong, false, input.slippageBps),
@@ -289,7 +291,8 @@ export async function prepareCancel(connection: Connection, trader: PublicKey, f
 
 // ---------- signing, sending, confirming ----------
 
-const PROGRAM_ERRORS = new Map(PROPS_VAULT_IDL.errors.map(e => [e.code, e.msg]));
+// The IDL's messages name GMTrade; the trader reads it as "the exchange".
+const PROGRAM_ERRORS = new Map(PROPS_VAULT_IDL.errors.map(e => [e.code, e.msg.replace(/\ba GMTrade\b/g, 'an exchange').replace(/^GMTrade\b/, 'The exchange').replace(/GMTrade/g, 'exchange')]));
 const FAILED = /^Program (\w+) failed: custom program error: 0x([0-9a-f]+)/;
 const ANCHOR_ERROR = /AnchorError.*Error Number: (\d+)\. Error Message: (.*?)\.?$/;
 
@@ -310,7 +313,7 @@ export function describeFailure(err: TransactionError | string | null, logs: str
   if (program === GMTRADE_PROGRAM_ID.toBase58()) {
     // GMTrade's own reason, from the Anchor error it logged just before failing.
     const reason = lines.slice(0, at).reverse().map(line => ANCHOR_ERROR.exec(line)).find(m => m && Number(m[1]) === code)?.[2];
-    return `GMTrade rejected the order${reason ? `: ${reason}` : ''} (error ${code}).`;
+    return `The exchange rejected the order${reason ? `: ${reason}` : ''} (error ${code}).`;
   }
   return 'The network rejected the transaction. Nothing was sent.';
 }
@@ -377,7 +380,7 @@ export async function watchExecution(connection: Connection, p: OrderFollow, { t
     // A failed read says nothing about the order: read again on the next poll.
     const accounts = await connection.getMultipleAccountsInfo(keys, 'confirmed').catch(() => null);
     if (!accounts || accounts[0]) continue;
-    const size = accounts[1] ? decodeGmPosition(accounts[1].data).sizeInUsd : 0n;
+    const size = heldSize(accounts[1]);
     return (p.increase ? size > p.sizeBefore : size < p.sizeBefore) ? 'executed' : 'cancelled';
   }
   return 'pending';

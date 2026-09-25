@@ -54,10 +54,29 @@ export function bundledLicenses() {
   };
 }
 
+/** The vault program's IDL as the app bundles it: without its docs and description, which name the venue (Anchor's coder reads neither). */
+export function leanVaultIdl() {
+  const strip = node => {
+    if (Array.isArray(node)) node.forEach(strip);
+    else if (node && typeof node === 'object') { delete node.docs; Object.values(node).forEach(strip); }
+  };
+  return {
+    name: 'lean-vault-idl',
+    enforce: 'pre',
+    transform(code, id) {
+      if (!/[\\/]props_vault\.json$/.test(id.split('?')[0])) return null;
+      const idl = JSON.parse(code);
+      strip(idl);
+      delete idl.metadata.description;
+      return { code: JSON.stringify(idl), map: null };
+    },
+  };
+}
+
 export default defineConfig(({ command, mode }) => {
   if (command === 'build') checkBuildEnv(loadEnv(mode, appDir, 'VITE_'));
   return {
-    plugins: [bundledLicenses()],
+    plugins: [leanVaultIdl(), bundledLicenses()],
     // The Solana wallet stack loads as its own chunk next to the app code; @props/sdk (Anchor, spl-token) is loaded
     // only when a transaction is built (src/lib/transactions.ts).
     build: { rolldownOptions: { output: { codeSplitting: { groups: [{ name: 'wallet', test: /[\\/]node_modules[\\/](@solana|@wallet-standard|@noble|bs58|base-x|buffer|superstruct|rpc-websockets|jayson|bn\.js|borsh|eventemitter3)[\\/]/, tags: ['$initial'] }] } } } },

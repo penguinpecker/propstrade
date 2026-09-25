@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import BN from 'bn.js';
-import { ComputeBudgetProgram, Connection, Keypair, PublicKey, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
-import { CLOSE_ALL, PROPS_VAULT_PROGRAM_ID, PropsVaultClient, gmOrderPda, gmPositionPda, orderNonce, ownerPda, toUnitPrice, usdToGm } from '@props/sdk';
+import { ComputeBudgetProgram, Connection, Keypair, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
+import { CLOSE_ALL, PROPS_VAULT_IDL, PROPS_VAULT_PROGRAM_ID, PropsVaultClient, gmOrderPda, gmPositionPda, orderNonce, ownerPda, toUnitPrice, usdToGm } from '@props/sdk';
 // @ts-expect-error test-only JavaScript module
 import { TIERS, marketRef, startStub } from '../../tests/stub.mjs';
 import { TxError, confirm, describeFailure, prepareCancel, prepareClose, prepareEvaluation, prepareOpen, prepareProtection, signAndSend, unitPrice, watchExecution } from './chain';
@@ -195,6 +195,13 @@ describe('confirmation', () => {
     expect(await watchExecution(connection, follow, { pollMs: 1 })).toBe('executed');
     expect(reads).toBe(2);
   });
+
+  it('reads a position address GMTrade does not own (lamports sent to a closed position) as no position', async () => {
+    const sent = { owner: SystemProgram.programId, data: Buffer.alloc(0), lamports: 1_000_000, executable: false };
+    const connection = fake({ getMultipleAccountsInfo: async () => [null, sent] });
+    const follow = { order: Keypair.generate().publicKey.toBase58(), position: Keypair.generate().publicKey.toBase58(), sizeBefore: 5n, increase: false };
+    expect(await watchExecution(connection, follow, { pollMs: 1 })).toBe('executed');
+  });
 });
 
 describe('unit prices and failure reasons', () => {
@@ -219,16 +226,25 @@ describe('unit prices and failure reasons', () => {
     expect([await collateral(1001 / 15), await collateral(1000.5 / 5), await collateral(100)]).toEqual([66_733_334n, 200_100_000n, 100_000_000n]);
   });
 
+  it('bundles the vault IDL without its docs and description, which name the venue (vite.config.js leanVaultIdl)', () => {
+    expect(JSON.stringify(PROPS_VAULT_IDL)).not.toMatch(/"docs":/);
+    expect(PROPS_VAULT_IDL.metadata).not.toHaveProperty('description');
+    expect(PROPS_VAULT_IDL.errors.length).toBeGreaterThan(40); // what Anchor reads is all there
+  });
+
   it('describes program, venue and balance failures in plain words', () => {
     const vault = PROPS_VAULT_PROGRAM_ID.toBase58();
     expect(describeFailure(null, [`Program ${vault} failed: custom program error: 0x1783`])).toBe('Collateral exceeds the account\'s available USDC.');
-    expect(describeFailure(null, ['Program Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo failed: custom program error: 0x1770'])).toBe('GMTrade rejected the order (error 6000).');
+    expect(describeFailure(null, ['Program Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo failed: custom program error: 0x1770'])).toBe('The exchange rejected the order (error 6000).');
     // Through the vault's CPI: GMTrade's line comes first, and its Anchor error carries the reason.
     expect(describeFailure({ InstructionError: [1, { Custom: 6127 }] }, [
       `Program ${vault} invoke [1]`, 'Program Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo invoke [2]',
       'Program log: AnchorError thrown in programs/store/src/states/market/mod.rs:341. Error Code: MarketClosed. Error Number: 6127. Error Message: market is closed.',
       'Program Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo failed: custom program error: 0x17ef', `Program ${vault} failed: custom program error: 0x17ef`,
-    ])).toBe('GMTrade rejected the order: market is closed (error 6127).');
+    ])).toBe('The exchange rejected the order: market is closed (error 6127).');
+    // The vault's own messages that name GMTrade (from its IDL) read as the exchange too.
+    expect([0x179a, 0x179b].map(code => describeFailure(null, [`Program ${vault} failed: custom program error: 0x${code.toString(16)}`])))
+      .toEqual(["The exchange changed the owner's USDC or SOL beyond what the call allows.", "Not an exchange claimable account delegated to this account's owner."]);
     expect(describeFailure({ InstructionError: [0, { Custom: 1 }] }, ['Program log: Error: insufficient funds', 'Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA failed: custom program error: 0x1'])).toMatch(/enough USDC/);
     expect(describeFailure({ InstructionError: [0, 'InvalidAccountData'] }, [])).toBe('The network rejected the transaction. Nothing was sent.');
     expect(describeFailure('Transfer: insufficient lamports 10, need 20', [])).toMatch(/enough SOL/);

@@ -199,13 +199,13 @@ export default function ChartPanel({ settings, market, candles, tick, theme, liv
         <div className="tv-stage">
           {candles.isPending ? <div className="chart-skeleton" role="status" aria-label="Loading candles" />
             : candles.isError ? <Unavailable title="Candles are unavailable" error={candles.error} retry={candles.refetch} />
-            : !data.candles.length ? <Empty icon={LineChart} title="No candles yet">GMTrade has no price history for this market and interval.</Empty>
+            : !data.candles.length ? <Empty icon={LineChart} title="No candles yet">There is no price history for this market and interval yet.</Empty>
             : <PriceChart market={market} candles={data.candles} tick={tick} interval={interval} chartType={chartType} theme={theme} live={live} guides={guides} loadOlder={loadOlder}
               studies={studies} studyActions={studyActions} drawings={drawings} onDrawings={settings.setDrawings} prefs={prefs} tool={tool} onTool={chooseTool} selected={selected} onSelect={setSelected}
               scaleMode={scaleMode} autoScale={autoScale} onAutoScale={setAutoScale} request={request} onRequestDone={key => setRequest(r => r?.key === key ? null : r)} />}
         </div>
         <BottomBar onRange={(next, seconds) => { settings.setInterval(next); setRequest({ interval: next, from: Date.now() / 1000 - seconds, key: Date.now() }); }} onGoTo={time => setRequest({ interval, time, key: Date.now() })}
-          source={`GMTrade prices${saved ? " · saved copy while GMTrade's charts recover" : ''}`} saved={saved} scaleMode={scaleMode} onScaleMode={setScaleMode} autoScale={autoScale} onAutoScale={setAutoScale} />
+          source={`Props.trade prices${saved ? ' · saved copy while the charts recover' : ''}`} saved={saved} scaleMode={scaleMode} onScaleMode={setScaleMode} autoScale={autoScale} onAutoScale={setAutoScale} />
       </div>
     </div>
     {tip && <div className={`tv-tip ${tip.side}`} role="tooltip" style={tip.style}>{tip.text}</div>}
@@ -451,7 +451,7 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
     const first = formatTime(bars.current[0].time, 86_400);
     if (reached === 'failed') latest.current.onNotice('Older candles could not be loaded. Try again in a moment.');
     else if (reached === 'limit' && req.time !== undefined) latest.current.onNotice(`The chart loads up to ${REACH_BARS.toLocaleString('en-US')} ${interval} candles, back to ${first}. Pick a longer interval to go further back.`);
-    else if (reached === 'start' && req.time !== undefined) latest.current.onNotice(`GMTrade's ${interval} candles for ${market.pair} begin on ${first}.`);
+    else if (reached === 'start' && req.time !== undefined) latest.current.onNotice(`The ${interval} candles for ${market.pair} begin on ${first}.`);
     latest.current.onRequestDone(req.key);
   }
 
@@ -545,7 +545,7 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
   const textColor = color => readable(color, surface);
   const legend = inst => <StudyLegend key={inst.id} study={inst} values={valuesOf(inst)} decimals={market.priceDecimals} textColor={textColor} {...studyActions} />;
   return <>
-    <div className={`price-chart ${tool === 'cursor' ? '' : 'drawing'}`} ref={container} tabIndex={0} role="group" aria-label={`${market.name} price chart from GMTrade. Drag in any direction to pan, pinch or scroll to zoom, double-click the price axis to fit prices.`} />
+    <div className={`price-chart ${tool === 'cursor' ? '' : 'drawing'}`} ref={container} tabIndex={0} role="group" aria-label={`${market.name} price chart. Drag in any direction to pan, pinch or scroll to zoom, double-click the price axis to fit prices.`} />
     <Legend market={market} interval={interval} live={live} bar={list[index]} prevClose={list[index - 1]?.close} drawing={tool !== 'cursor'} legendRef={legendBox}>{studies.filter(s => !STUDIES[s.type].pane).map(legend)}</Legend>
     {studies.filter(s => STUDIES[s.type].pane).map(inst => { const top = paneTop(inst); return top === undefined ? null : <div key={inst.id} className="tv-pane-legend" style={{ top: top + 4 }}>{legend(inst)}</div>; })}
     {drawing && <div className="tv-selection" role="group" aria-label="Selected drawing" data-tip-side="bottom" style={{ '--legend-h': `${legendHeight}px` }}>

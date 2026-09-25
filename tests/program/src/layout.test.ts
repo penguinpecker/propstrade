@@ -26,7 +26,7 @@ describe('GMTrade layouts', () => {
     }
     assert.ok(decodeGmPosition(env.svm.getAccount(MAINNET_POSITIONS.long)!.data).sizeInUsd > 0n);
     assert.equal(decodeGmPosition(env.svm.getAccount(MAINNET_POSITIONS.flat)!.data).sizeInUsd, 0n);
-    assert.throws(() => decodeGmPosition(env.svm.getAccount(MARKETS.SOL.gm)!.data), /not a GMTrade Position/);
+    assert.throws(() => decodeGmPosition(env.svm.getAccount(MARKETS.SOL.gm)!.data), /not an exchange Position/);
   });
 
   it('reads market meta and flags like the gmsol-store IDL', () => {

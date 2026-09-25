@@ -88,8 +88,8 @@ export function useWalletTransaction() {
       const outcomes = await Promise.all(follows.map(follow => watchExecution(connection, follow)));
       const execution: Execution = outcomes.includes('cancelled') ? 'cancelled' : outcomes.includes('pending') ? 'pending' : 'executed';
       show(execution === 'cancelled'
-        ? { phase: 'failed', message: `GMTrade did not execute ${follows.length > 1 ? 'every order' : 'the order'}, for example because the price moved past your slippage tolerance. Any collateral returned to the account.`, signature }
-        : { phase: 'done', message: execution === 'executed' ? options.done ?? null : 'Still awaiting execution by GMTrade. It stays under Open orders until a keeper executes it.', signature });
+        ? { phase: 'failed', message: `The exchange did not execute ${follows.length > 1 ? 'every order' : 'the order'}, for example because the price moved past your slippage tolerance. Any collateral returned to the account.`, signature }
+        : { phase: 'done', message: execution === 'executed' ? options.done ?? null : 'Still awaiting execution by the exchange. It stays under Open orders until it executes.', signature });
       return { prepared, signature, execution };
     } catch (error) {
       const known = chain && error instanceof chain.TxError ? error : null;
