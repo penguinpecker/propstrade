@@ -1,4 +1,4 @@
-import React, { useEffect, useReducer, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { ChevronsRight, LineChart, Trash2, Type } from 'lucide-react';
 import { AreaSeries, BarSeries, CandlestickSeries, CrosshairMode, HistogramSeries, LineSeries, LineStyle, PriceScaleMode, createChart } from 'lightweight-charts';
 import { Button, Dialog, Empty, Unavailable } from './ui.jsx';
@@ -23,10 +23,12 @@ const REACH_BARS = 30_000;
 /** A press that moves this far vertically pans the price axis (auto-scale off until "auto" or a price-axis double-click). */
 const VERTICAL_PAN_PX = 6;
 const FONT = 'Manrope, sans-serif';
-const FONT_SIZE = 10;
+/** Touch screens: a vertical swipe on the chart scrolls the page (a drag across still pans time), and the axis text is a size up. */
+const COARSE = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
+const FONT_SIZE = COARSE ? 11 : 10;
 /** Height of one price-axis label: the library pads its text by 2.5 px per 12 px of font above and below. */
 const AXIS_LABEL = FONT_SIZE * 17 / 12;
-const SCROLL = { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true };
+const SCROLL = { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: !COARSE };
 const SERIES = { candles: CandlestickSeries, bars: BarSeries, line: LineSeries, area: AreaSeries };
 const PALETTES = {
   dark: { surface: '#19181f', axis: '#afa6bc', grid: '#2b2732', border: '#35313e', separatorHover: 'rgba(178,138,255,.18)', purple: '#b28aff', green: '#0ecb81', red: '#f6465d', greenSoft: 'rgba(14,203,129,.55)', redSoft: 'rgba(246,70,93,.55)', entry: '#9168ba', entryBg: '#332743', entryText: '#c8a3f3', amber: '#e0b96a' },
@@ -180,6 +182,7 @@ export default function ChartPanel({ settings, market, candles, tick, theme, liv
   const [autoScale, setAutoScale] = useState(true);
   const [request, setRequest] = useState(null); // a range or date to show, once its candles are on the chart
   const [drawTools, setDrawTools] = useState(false); // phones: the drawing toolbar is folded behind one button
+  const closeDrawTools = useCallback(() => setDrawTools(false), []);
   const root = useRef(null);
   const tip = useTips(root);
   const data = candles.data;
@@ -194,7 +197,7 @@ export default function ChartPanel({ settings, market, candles, tick, theme, liv
   return <div className="tv-panel" ref={root}>
     <ChartToolbar interval={interval} onInterval={settings.setInterval} pinned={settings.pinned} onPinned={settings.setPinned} chartType={chartType} onChartType={settings.setChartType} onIndicators={() => setDialog('indicators')} showGuides={settings.showGuides} onShowGuides={settings.setShowGuides} drawTools={drawTools} drawing={tool !== 'cursor'} onDrawTools={() => setDrawTools(!drawTools)} onExpand={onExpand} />
     <div className="tv-body">
-      <DrawingToolbar tool={tool} onTool={chooseTool} prefs={prefs} onPrefs={next => { settings.setPrefs(next); if (next.locked || next.hidden) setSelected(null); }} count={drawings.length} onClear={() => setDialog('clear')} open={drawTools} />
+      <DrawingToolbar tool={tool} onTool={chooseTool} prefs={prefs} onPrefs={next => { settings.setPrefs(next); if (next.locked || next.hidden) setSelected(null); }} count={drawings.length} onClear={() => setDialog('clear')} open={drawTools} onClose={closeDrawTools} />
       <div className="tv-plot">
         <div className="tv-stage">
           {candles.isPending ? <div className="chart-skeleton" role="status" aria-label="Loading candles" />
@@ -238,6 +241,7 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
   const [behind, setBehind] = useState(false); // the latest candle is out of view
   const [legendHeight, setLegendHeight] = useState(0);
   const [notice, setNotice] = useState(null); // why a range or date could not be shown in full
+  const [narrow, setNarrow] = useState(false); // under 500 px wide: the entry line's axis label would cover the price ticks
   const startText = edit => { editing.current = edit; setText(edit); };
   const latest = useRef(null);
   latest.current = { live, loadOlder, request, onDrawings, onSelect, onTool, onAutoScale, onRequestDone, startText, onNotice: setNotice };
@@ -299,7 +303,7 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
     const down = e => {
       if (e.button !== 0) return;
       el.focus({ preventScroll: true }); // Delete and Escape then reach this chart's drawings
-      if (layer.down(e, local(e)) || !scale().options().autoScale) return;
+      if (layer.down(e, local(e)) || !scale().options().autoScale || (e.pointerType === 'touch' && !SCROLL.vertTouchDrag)) return;
       press = { y: e.clientY, moved: false };
       scale().applyOptions({ autoScale: false });
     };
@@ -375,6 +379,7 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
     const observer = new ResizeObserver(([entry]) => {
       const nextWidth = Math.round(entry.contentRect.width);
       if (nextWidth === width || nextWidth <= 0) return;
+      setNarrow(nextWidth < 500);
       const first = width === 0;
       width = nextWidth;
       cancelAnimationFrame(resizeFrame);
@@ -498,10 +503,10 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
       const color = { liquidation: c.amber, tp: c.green, sl: c.red }[g.kind];
       return current.series.createPriceLine(color
         ? { price: g.price, color, lineWidth: 1, lineStyle: g.draft ? LineStyle.Dashed : LineStyle.Solid, axisLabelVisible: true, title: g.title, axisLabelColor: color, axisLabelTextColor: ink(color) }
-        : { price: g.price, color: c.entry, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: true, title: g.title, axisLabelColor: c.entryBg, axisLabelTextColor: c.entryText });
+        : { price: g.price, color: c.entry, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: !narrow, title: g.title, axisLabelColor: c.entryBg, axisLabelTextColor: c.entryText });
     });
     container.current.dataset.guides = guides.map(g => g.title).join('|'); // what the axis shows (drawn on canvas), for the browser checks
-  }, [guides, market.symbol, interval, chartType, theme]);
+  }, [guides, narrow, market.symbol, interval, chartType, theme]);
 
   useEffect(() => {
     const current = chartRef.current;
@@ -545,7 +550,7 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
   const textColor = color => readable(color, surface);
   const legend = inst => <StudyLegend key={inst.id} study={inst} values={valuesOf(inst)} decimals={market.priceDecimals} textColor={textColor} {...studyActions} />;
   return <>
-    <div className={`price-chart ${tool === 'cursor' ? '' : 'drawing'}`} ref={container} tabIndex={0} role="group" aria-label={`${market.name} price chart. Drag in any direction to pan, pinch or scroll to zoom, double-click the price axis to fit prices.`} />
+    <div className={`price-chart ${tool === 'cursor' && !selected ? '' : 'drawing'}`} ref={container} tabIndex={0} role="group" aria-label={`${market.name} price chart. Drag in any direction to pan, pinch or scroll to zoom, double-click the price axis to fit prices.`} />
     <Legend market={market} interval={interval} live={live} bar={list[index]} prevClose={list[index - 1]?.close} drawing={tool !== 'cursor'} legendRef={legendBox}>{studies.filter(s => !STUDIES[s.type].pane).map(legend)}</Legend>
     {studies.filter(s => STUDIES[s.type].pane).map(inst => { const top = paneTop(inst); return top === undefined ? null : <div key={inst.id} className="tv-pane-legend" style={{ top: top + 4 }}>{legend(inst)}</div>; })}
     {drawing && <div className="tv-selection" role="group" aria-label="Selected drawing" data-tip-side="bottom" style={{ '--legend-h': `${legendHeight}px` }}>

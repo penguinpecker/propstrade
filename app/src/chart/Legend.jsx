@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ChevronDown, ChevronUp, Eye, EyeOff, Settings, X } from 'lucide-react';
 import { number, price } from '../data.js';
 import { STUDIES, studyTitle } from './registry.js';
@@ -35,6 +35,13 @@ export function StudyLegend({ study, values, decimals, textColor, onToggle, onSe
  */
 export function Legend({ market, interval, live, bar, prevClose, drawing, legendRef, children }) {
   const [folded, setFolded] = useState(() => typeof window !== 'undefined' && window.matchMedia?.('(max-width: 600px)').matches === true);
+  useEffect(() => { // a rotation across 600 px folds or unfolds them again
+    const query = window.matchMedia?.('(max-width: 600px)');
+    if (!query) return undefined;
+    const change = e => setFolded(e.matches);
+    query.addEventListener('change', change);
+    return () => query.removeEventListener('change', change);
+  }, []);
   const decimals = market.priceDecimals;
   const base = prevClose ?? bar?.open;
   const change = bar ? bar.close - base : 0;

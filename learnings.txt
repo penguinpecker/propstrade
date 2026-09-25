@@ -1096,3 +1096,17 @@ Pinocchio evaluated (2026-09-23; measured in a scratch copy, 59/59 LiteSVM tests
            lifetime. Tests: server/test/sim/blackswan.*.test.ts, keeper/test/blackswan.keeper.test.ts, chain/test/send.test.ts.
 - The repo's target/deploy/props_vault.so (Anchor reference) is a 09-23 build that predates 6d05353; the Pinocchio build
   that deploys is current. Rebuild the Anchor binary before trusting a test:modules run on it.
+
+2026-09-25 Mobile pass (owner: "make the whole webapp mobile compatible"). A 4-scope audit on a clone (trade terminal,
+           account pages, public/onboarding, cross-cutting CSS/iOS) at 360/390/430, 844x390 landscape and 768 found 38
+           root causes; 5 fixers with exclusive files, 2 verify rounds, hand fixes. Now: Close all reachable on every
+           width; vertical swipes on the chart scroll the page (touch-action pan-y unless a drawing tool is on);
+           order sheet locks the page, sticky heading + opaque sticky submit, safe-area insets (viewport-fit=cover);
+           dialogs lock the page and keep their close button; every input >= 16 px on touch (iOS zoom); data tables
+           become labelled cards under 600 px; text floor 11 px and 40-44 px targets on touch; trade feed, market
+           stats + session note, Get funded reachable on phones; line-graph axis labels in HTML (no squashed SVG text).
+- Harness: scratchpad mobile/harness.mjs (every route x viewport: overflow, past-edge, clipped, covered, text<11,
+  inputs<16, sideways tables, small targets + named checks). Playwright fullPage screenshots in an isMobile context
+  DROP the pointer:coarse/hover:none emulation: judge touch rules from viewport shots only.
+- Left for the owner: phone landscape still starts the chart ~280 px down (folding the account strip/watchlist in
+  landscape would hide content); the TradingView logo is a 35x19 target at 768 (attribution, untouched).

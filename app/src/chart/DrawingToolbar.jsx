@@ -37,10 +37,20 @@ function useOverflow(ref) {
 /**
  * TradingView's left toolbar: drawing tools, the ruler and zoom, the drawing toggles and "remove all". When the chart is
  * too short for every tool, arrows at the ends scroll the rest into view (keyboard focus scrolls them in by itself).
+ * On phones it opens over the chart (`open`); a press outside it (other than its toggle) or Escape calls `onClose`.
  */
-export function DrawingToolbar({ tool, onTool, prefs, onPrefs, count, onClear, open }) {
+export function DrawingToolbar({ tool, onTool, prefs, onPrefs, count, onClear, open, onClose }) {
   const [line, setLine] = useState('trend');
   const tools = useRef(null);
+  const rail = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const outside = e => { if (!rail.current?.contains(e.target) && !e.target.closest?.('.tv-draw-toggle')) onClose(); };
+    const escape = e => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('pointerdown', outside, true);
+    window.addEventListener('keydown', escape);
+    return () => { document.removeEventListener('pointerdown', outside, true); window.removeEventListener('keydown', escape); };
+  }, [open, onClose]);
   const more = useOverflow(tools);
   const full = count >= MAX_DRAWINGS; // measure and zoom place nothing, so they stay available
   const drawingTool = label => full ? `${label} (limit of ${MAX_DRAWINGS} drawings reached)` : label;
@@ -48,7 +58,7 @@ export function DrawingToolbar({ tool, onTool, prefs, onPrefs, count, onClear, o
   const pick = next => onTool(tool === next ? 'cursor' : next);
   const toggle = key => onPrefs({ ...prefs, [key]: !prefs[key] });
   const scroll = direction => tools.current.scrollBy({ top: direction * Math.max(40, tools.current.clientHeight - 60) });
-  return <div className={`tv-drawbar ${open ? 'open' : ''}`} role="group" aria-label="Drawing tools" data-tip-side="right">
+  return <div ref={rail} className={`tv-drawbar ${open ? 'open' : ''}`} role="group" aria-label="Drawing tools" data-tip-side="right">
     <div className="tv-drawbar-tools" ref={tools}>
       <Tool label="Cursor" icon={Crosshair} active={tool === 'cursor'} onClick={() => onTool('cursor')} />
       <div className="tv-tool-group">

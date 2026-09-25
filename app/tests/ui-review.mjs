@@ -41,7 +41,7 @@ async function check(name, fn) {
 }
 
 try {
-  for (const [viewport, place] of [[{ width: 1920, height: 1080 }, 'right-aligned at 1920px'], [{ width: 390, height: 844 }, 'hidden at 390px']])
+  for (const [viewport, place] of [[{ width: 1920, height: 1080 }, 'right-aligned at 1920px'], [{ width: 390, height: 844 }, 'visible at 390px']])
     await check(`market heading: the session badge is ${place}, as in the reference (Trading.jsx wraps it in a span, so .market-heading>.badge no longer applies)`, async () => {
       const context = await signedIn(viewport);
       const page = await context.newPage();
@@ -49,7 +49,7 @@ try {
       const badge = page.locator('.market-heading .badge');
       await badge.waitFor({ state: 'attached' });
       await page.locator('.market-price').waitFor();
-      if (viewport.width < 600) assert.equal(await badge.isVisible(), false, 'the session badge shows in the phone market heading');
+      if (viewport.width < 600) assert.equal(await badge.isVisible(), true, 'the session badge is hidden in the phone market heading');
       else {
         const [b, h] = await Promise.all([badge.boundingBox(), page.locator('.market-heading').boundingBox()]);
         assert.ok(h.x + h.width - (b.x + b.width) < 40, `badge ends ${Math.round(h.x + h.width - b.x - b.width)}px before the heading edge`);

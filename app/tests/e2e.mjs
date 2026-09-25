@@ -1099,7 +1099,7 @@ try {
             }
             const [rowBox, heights, fonts] = [await row.boundingBox(), await labels.evaluateAll(list => list.map(b => b.getBoundingClientRect().height)), await labels.evaluateAll(list => [...new Set(list.map(b => getComputedStyle(b).fontSize))])];
             assert.ok(Math.abs(rowBox.height - Math.max(...heights)) < 0.5, `${width}px ${name}: the label row is ${rowBox.height}px for ${Math.max(...heights)}px labels`);
-            assert.deepEqual(fonts, [width <= 800 ? '10px' : '8px'], `${width}px ${name}: label fonts ${fonts}`);
+            assert.deepEqual(fonts, [width <= 800 ? '12px' : '8px'], `${width}px ${name}: label fonts ${fonts}`);
           }
         } finally {
           if (width < 800) await page.getByRole('button', { name: 'Close order form' }).click({ timeout: 2_000 }).catch(() => undefined);

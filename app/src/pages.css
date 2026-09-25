@@ -19,3 +19,7 @@
 .records-intro p{font-size:12px;color:var(--muted);margin-top:8px}
 .picker-rates{display:block;font-size:9px;color:var(--muted);margin-top:3px;white-space:nowrap}
 .rates-cell{font-variant-numeric:tabular-nums;white-space:nowrap}
+@media(max-width:800px),(max-height:500px) and (pointer:coarse){.full-address.short button{font-size:12px}.trader-address>span{font-size:12px}.picker-rates{font-size:11px}}
+
+/* Phones: the funded-size caption sits under its number; picker names stay on one line and the rates wrap instead. */
+@media(max-width:600px){.allocation-value>span{display:block;margin:4px 0 0}.market-picker-list .picker-row strong{white-space:nowrap}.picker-rates{white-space:normal}}

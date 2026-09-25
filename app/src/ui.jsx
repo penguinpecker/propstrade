@@ -2,6 +2,13 @@ import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'reac
 import { ArrowUpRight, ArrowRight, ArrowLeft, Bitcoin, CircleDollarSign, Copy, Cpu, Euro, PoundSterling, Smartphone, Check, X, ChevronDown, Info, ExternalLink, Star, TriangleAlert, Wallet } from 'lucide-react';
 import { bpsPercent, date, explorerAddress, freshnessLabel, shortAddress, usd, utcTime } from './data.js';
 
+/** Read once per render (no resize listener): phone-width layout, and a touch screen where title= tooltips cannot open. */
+const media = query => typeof matchMedia === 'function' && matchMedia(query).matches;
+export const narrow = () => media('(max-width: 600px)');
+export const touch = () => media('(hover: none)');
+/** A table row that opens its record when tapped anywhere but its own buttons and links (the row's button stays for keyboards). */
+export const openOnRowClick = open => e => { if (!e.target.closest('button, a')) open(); };
+
 export function Brand({ compact = false }) {
   return <a href="#/" className="brand" aria-label="Props.trade home"><img src="/brand/symbol.svg" alt="" />{!compact && <span>Props<span className="brand-dot">.</span>trade</span>}</a>;
 }
@@ -18,7 +25,7 @@ export function WatchlistStar({ symbol, watched, onToggle }) {
 }
 export function Badge({ children, tone = 'neutral', dot = false, title }) { return <span className={`badge ${tone}`} title={title}>{dot && <i />}{children}</span>; }
 /** Marks a market price that is not live ("Stale", "Delayed", "Unavailable"), with the time of GMTrade's last update. */
-export function FreshnessBadge({ market }) { return <Badge tone="amber" title={market.updatedAt ? `Last update ${utcTime(market.updatedAt)}` : 'No price has been published yet'}>{freshnessLabel(market)}</Badge>; }
+export function FreshnessBadge({ market }) { return <Badge tone="amber" title={market.updatedAt ? `Last update ${utcTime(market.updatedAt)}` : 'No price has been published yet'}>{freshnessLabel(market)}{touch() && market.updatedAt ? ` · ${utcTime(market.updatedAt).slice(0, 5)} UTC` : ''}</Badge>; }
 const ICON_COLORS = { BTC: '#bd8238', ETH: '#7b79a4', SOL: '#756193', XAU: '#aa8b37', EUR: '#59749a', AAPL: '#72706e', NVDA: '#61825b', GBP: '#776384' };
 /** A stable hue per symbol, so a market keeps its monogram color everywhere. */
 const monogramColor = symbol => `hsl(${[...symbol].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7)} 28% 56%)`;
@@ -30,7 +37,7 @@ export function MarketIcon({ market, small = false }) {
     SOL: <><path d="M6 4h15l-3 4H3ZM3 10h15l3 4H6ZM6 16h15l-3 4H3Z" fill="currentColor" /></>,
     XAU: <><path d="m7 6-4 12h18L17 6Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" /><path d="M7 6h10l-3 5H5m9 0 7 7M14 11v7" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" /></>,
   };
-  const mark = Icon ? <Icon size={size} strokeWidth={1.8} /> : paths[market.symbol] ? <svg width={size} height={size} viewBox="0 0 24 24">{paths[market.symbol]}</svg> : <span style={{ fontSize: small ? 9 : 11, letterSpacing: '-.02em' }}>{market.symbol.slice(0, 2)}</span>;
+  const mark = Icon ? <Icon size={size} strokeWidth={1.8} /> : paths[market.symbol] ? <svg width={size} height={size} viewBox="0 0 24 24">{paths[market.symbol]}</svg> : <span style={{ letterSpacing: '-.02em' }}>{market.symbol.slice(0, 2)}</span>;
   return <span className={`market-icon ${small ? 'small' : ''}`} style={{ '--coin-color': ICON_COLORS[market.symbol] ?? monogramColor(market.symbol) }} aria-hidden="true">{mark}</span>;
 }
 export function UsdcIcon() { return <span className="usdc-icon" aria-hidden="true"><CircleDollarSign size={18} strokeWidth={1.6} /></span>; }
@@ -68,7 +75,8 @@ export function Dialog({ title, children, onClose, wide = false, className = '' 
 const hourMinute = new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
 export function LineGraph({ points, height = 220, muted = false, showLabels = true, label }) {
   if (points.length < 2) return null;
-  const width = 900, pad = 20, top = 28, baseline = height - 38;
+  // The labels sit in HTML under the SVG (text inside a stretched SVG is squashed), so the SVG drops the strip they used.
+  const width = 900, pad = 20, top = 28, baseline = height - 38, box = showLabels ? height - 26 : height;
   const values = points.map(p => p.value);
   const low = Math.min(0, ...values), high = Math.max(0, ...values);
   const span = high - low || 1;
@@ -77,9 +85,10 @@ export function LineGraph({ points, height = 220, muted = false, showLabels = tr
   const line = points.map((p, i) => `${x(i)},${y(p.value)}`).join(' ');
   // Times of day for a series under two days long (dates would all read the same), and no label twice.
   const labelOf = points.at(-1).ts - points[0].ts < 2 * 86_400_000 ? ts => hourMinute.format(ts) : ts => date(ts).slice(0, 6);
-  const labels = [...new Map([0, 1, 2, 3, 4, 5].map(i => Math.round(i * (points.length - 1) / 5)).reverse().map(index => [labelOf(points[index].ts), index])).entries()]
+  const count = narrow() ? 3 : 6;
+  const labels = [...new Map(Array.from({ length: count }, (_, i) => Math.round(i * (points.length - 1) / (count - 1))).reverse().map(index => [labelOf(points[index].ts), index])).entries()]
     .map(([text, index]) => ({ text, index })).sort((a, b) => a.index - b.index);
-  return <svg className={`line-graph ${muted ? 'muted' : ''}`} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={label} preserveAspectRatio="none">{[0, 1, 2, 3].map(i => <line key={i} x1={pad} x2={width - pad} y1={top + i * (baseline - top) / 3} y2={top + i * (baseline - top) / 3} stroke="var(--line-soft)" strokeDasharray="3 5" />)}<polygon points={`${pad},${y(Math.max(low, 0))} ${line} ${width - pad},${y(Math.max(low, 0))}`} fill={muted ? 'var(--graph-muted-fill, #efefeb)' : 'var(--graph-fill, #f0eaf8)'} opacity=".65" /><polyline points={line} fill="none" stroke={muted ? 'var(--subtle)' : 'var(--purple)'} strokeWidth="2.3" vectorEffect="non-scaling-stroke" />{showLabels && labels.map(({ text, index }) => <text key={index} x={x(index)} y={height - 6} textAnchor={index === 0 ? 'start' : index === points.length - 1 ? 'end' : 'middle'}>{text}</text>)}</svg>;
+  return <><svg className={`line-graph ${muted ? 'muted' : ''}`} viewBox={`0 0 ${width} ${box}`} role="img" aria-label={label} preserveAspectRatio="none">{[0, 1, 2, 3].map(i => <line key={i} x1={pad} x2={width - pad} y1={top + i * (baseline - top) / 3} y2={top + i * (baseline - top) / 3} stroke="var(--line-soft)" strokeDasharray="3 5" />)}<polygon points={`${pad},${y(Math.max(low, 0))} ${line} ${width - pad},${y(Math.max(low, 0))}`} fill={muted ? 'var(--graph-muted-fill, #efefeb)' : 'var(--graph-fill, #f0eaf8)'} opacity=".65" /><polyline points={line} fill="none" stroke={muted ? 'var(--subtle)' : 'var(--purple)'} strokeWidth="2.3" vectorEffect="non-scaling-stroke" /></svg>{showLabels && <div className="graph-axis" aria-hidden="true">{labels.map(({ text, index }) => <span key={index} style={{ left: `${x(index) / width * 100}%`, ...(index === 0 ? { transform: 'none' } : index === points.length - 1 ? { transform: 'translateX(-100%)' } : {}) }}>{text}</span>)}</div>}</>;
 }
 export function Steps({ active = 1, labels = ['Choose account', 'Connect wallet', 'Start evaluation'] }) { return <div className="steps">{labels.map((label, i) => <div key={label} className={`${i + 1 === active ? 'current' : ''} ${i + 1 < active ? 'done' : ''}`}><span>{i + 1 < active ? <Check size={13} /> : i + 1}</span>{label}{i < labels.length - 1 && <div className="step-rule" />}</div>)}</div>; }
 export function InlineLink({ href, children, external = false }) { return <a href={href} className="inline-link" {...external ? { target: '_blank', rel: 'noreferrer' } : {}}>{children}{external ? <ExternalLink size={13} /> : <ArrowUpRight size={14} />}</a>; }
@@ -87,11 +96,13 @@ export function InlineLink({ href, children, external = false }) { return <a hre
  * A Solana address with a copy button whose label says when the copy worked, and its explorer page. In full, wrapped,
  * wherever the address is the point; `short` in a dense table, where the full address is the hover and the copy.
  */
+/** On phones a long address breaks once, in the middle, so a wrapped one reads as two even halves. */
+export const evenBreak = address => narrow() ? <>{address.slice(0, Math.ceil(address.length / 2))}<wbr />{address.slice(Math.ceil(address.length / 2))}</> : address;
 export function FullAddress({ address, short = false }) {
   const [outcome, setOutcome] = useState(null); // 'Copied' | 'Copy failed', shown as the button's label for a moment
   useEffect(() => { if (!outcome) return; const id = setTimeout(() => setOutcome(null), 1800); return () => clearTimeout(id); }, [outcome]);
   const copy = () => navigator.clipboard.writeText(address).then(() => setOutcome('Copied'), () => setOutcome('Copy failed'));
-  return <div className={`full-address ${short ? 'short' : ''}`}><code title={short ? address : undefined}>{short ? shortAddress(address) : address}</code><span><button type="button" onClick={copy}><Copy size={12} /> {outcome ?? 'Copy'}</button>{!short && <InlineLink href={explorerAddress(address)} external>Explorer</InlineLink>}</span></div>;
+  return <div className={`full-address ${short ? 'short' : ''}`}><code title={short ? address : undefined}>{short ? shortAddress(address) : evenBreak(address)}</code><span><button type="button" onClick={copy}><Copy size={12} /> {outcome ?? 'Copy'}</button>{!short && <InlineLink href={explorerAddress(address)} external>Explorer</InlineLink>}</span></div>;
 }
 /** Rules in the AccountRules shape (an account's pinned terms, or `tierRules(tier)` before purchase). */
 export function RuleList({ rules }) { const size = Number(rules.sizeUsd), share = pct => bpsPercent(Math.round(pct * 10_000)); return <div className="rule-list"><DataRow label="Profit target" value={rules.profitTargetUsd == null ? 'None' : `${share(Number(rules.profitTargetUsd) / size)} · ${usd(rules.profitTargetUsd, 0)}`} /><DataRow label="Maximum drawdown" value={`${share(Number(rules.lossAllowanceUsd) / size)} · ${usd(rules.lossAllowanceUsd, 0)}`} /><DataRow label="Drawdown type" value="Static · includes open P&L" /><DataRow label="Daily loss limit" value="None" /><DataRow label="Time limit" value="None" /><DataRow label="Your profit share" value={bpsPercent(rules.traderShareBps)} /></div>; }
@@ -105,7 +116,11 @@ export function SessionNotice({ session, children }) {
   const problem = session.network.state === 'wrong' ? session.network.reason : session.notice ?? session.network.reason;
   return <Notice tone={problem ? 'amber' : 'neutral'} role="status">{problem ?? children}</Notice>;
 }
+/** Wallet apps' in-app browsers, the only way into a Solana wallet on a phone without the Google sign-in. */
+const phone = () => typeof navigator !== 'undefined' && (navigator.userAgentData?.mobile || /iPhone|iPad|Android/.test(navigator.userAgent));
+const WALLET_APPS = [['Phantom', url => `https://phantom.app/ul/browse/${encodeURIComponent(url)}?ref=${encodeURIComponent(location.origin)}`], ['Solflare', url => `https://solflare.com/ul/v1/browse/${encodeURIComponent(url)}?ref=${encodeURIComponent(location.origin)}`]];
 export function WalletOptions({ session, onChoose }) {
+  if (!session.wallets.length && phone()) return <><Notice>Open Props.trade inside your wallet app to sign in.</Notice>{WALLET_APPS.map(([name, link]) => <a key={name} className="wallet-option" href={link(location.href)}><span className="wallet-option-icon"><Wallet size={23} /></span><span><strong>Open in {name}</strong><small>Opens this page in the {name} app</small></span><ArrowRight size={17} /></a>)}</>;
   if (!session.wallets.length) return <Notice tone="amber">No Solana wallet was found in this browser. Install <InlineLink href="https://phantom.com/download" external>Phantom</InlineLink>, <InlineLink href="https://solflare.com/download" external>Solflare</InlineLink> or <InlineLink href="https://backpack.app/download" external>Backpack</InlineLink>, then reload this page.</Notice>;
   const waiting = session.status === 'connecting' || session.status === 'signing';
   return session.wallets.map(w => { const busy = waiting && session.walletName === w.name; return <button key={w.name} className="wallet-option" onClick={() => onChoose(w.name)} disabled={waiting}><span className="wallet-option-icon">{w.icon ? <img src={w.icon} alt="" width="23" height="23" /> : <Wallet size={23} />}</span><span><strong>{w.name}</strong><small>{busy ? (w.privy ? (session.status === 'signing' ? 'Signing you in…' : 'Opening Google…') : session.status === 'signing' ? 'Approve the sign-in message in your wallet' : 'Approve the connection in your wallet') : w.privy ? 'A Solana wallet for your Google account. No extension needed' : 'Detected in this browser'}</small></span>{busy ? <span className="spinner" /> : <ArrowRight size={17} />}</button>; });
