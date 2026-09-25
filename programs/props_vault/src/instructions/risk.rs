@@ -323,8 +323,8 @@ pub struct CloseFunded<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/// Closes a flat funded account: its USDC returns to the capital vault, its SOL and ATA rent to the
-/// SOL treasury, and its principal is released. Remaining accounts: owner positions to re-check.
+/// Closes a flat funded account with its order fees settled: its USDC returns to the capital vault, its SOL and ATA rent
+/// to the SOL treasury, and its principal is released. Remaining accounts: owner positions to re-check.
 pub(crate) fn close_funded<'info>(ctx: Context<'_, '_, 'info, 'info, CloseFunded<'info>>) -> Result<()> {
     let a = &ctx.accounts;
     require!(
@@ -332,6 +332,7 @@ pub(crate) fn close_funded<'info>(ctx: Context<'_, '_, 'info, 'info, CloseFunded
         VaultError::InvalidAccountStatus
     );
     require_flat(&a.funded, ctx.remaining_accounts, &a.config, &a.owner.key())?;
+    require!(a.funded.order_fees_due == 0, VaultError::FeesDue);
 
     let funded_key = a.funded.key();
     let owner_seeds: &[&[u8]] = &[OWNER_SEED, funded_key.as_ref(), &[a.funded.owner_bump]];
@@ -374,5 +375,77 @@ pub(crate) fn close_funded<'info>(ctx: Context<'_, '_, 'info, 'info, CloseFunded
     c.allocated_principal = c.allocated_principal.checked_sub(principal).ok_or(VaultError::MathOverflow)?;
     c.funded_active = c.funded_active.checked_sub(1).ok_or(VaultError::MathOverflow)?;
     emit_cpi!(AccountClosed { funded: funded_key, principal, usdc_returned, lamports_returned, ts: now()? });
+    Ok(())
+}
+
+#[event_cpi]
+#[derive(Accounts)]
+pub struct SettleOrderFees<'info> {
+    pub risk_authority: Signer<'info>,
+    /// Not writable: every order instruction reads it, and settlements must not contend with trading.
+    #[account(
+        seeds = [CONFIG_SEED],
+        bump = config.bump,
+        constraint = config.is_risk_authority(&risk_authority.key()) @ VaultError::Unauthorized,
+    )]
+    pub config: Box<Account<'info, Config>>,
+    #[account(mut, seeds = [FUNDED_SEED, funded.evaluation.as_ref()], bump = funded.bump)]
+    pub funded: Box<Account<'info, FundedAccount>>,
+    /// Signs the transfer out of its USDC account; loses nothing itself.
+    #[account(seeds = [OWNER_SEED, funded.key().as_ref()], bump = funded.owner_bump)]
+    pub owner: SystemAccount<'info>,
+    #[account(mut, associated_token::mint = usdc_mint, associated_token::authority = owner)]
+    pub owner_usdc: Box<Account<'info, TokenAccount>>,
+    #[account(mut, seeds = [FEE_VAULT_SEED], bump = config.fee_vault_bump)]
+    pub fee_vault: Box<Account<'info, TokenAccount>>,
+    #[account(address = config.usdc_mint)]
+    pub usdc_mint: Box<Account<'info, Mint>>,
+    pub token_program: Program<'info, Token>,
+}
+
+/// Settles order fees due: `charge` moves from the account's USDC to the fee vault, `waive` is forgiven. The program
+/// bounds the total by the fees due and the charge by the account's USDC; which orders executed (charged, at most on
+/// the size they filled) is the keeper's call, checkable against the exchange's order records. `expected_due` and
+/// `expected_settlements` are the `order_fees_due` and `order_fee_settlements` the settlement was computed from: a stale
+/// settlement fails, and so does a replayed one, since every settlement advances the count. Allowed in every open status
+/// and never paused: fees due come from orders already placed.
+pub(crate) fn settle_order_fees(
+    ctx: Context<SettleOrderFees>,
+    charge: u64,
+    waive: u64,
+    expected_due: u64,
+    expected_settlements: u64,
+) -> Result<()> {
+    let a = &ctx.accounts;
+    require!(a.funded.is_open(), VaultError::InvalidAccountStatus);
+    let total = charge.checked_add(waive).ok_or(VaultError::MathOverflow)?;
+    require!(total > 0, VaultError::InvalidAmount);
+    require!(
+        a.funded.order_fees_due == expected_due
+            && a.funded.order_fee_settlements == expected_settlements
+            && total <= expected_due
+            && charge <= a.owner_usdc.amount,
+        VaultError::InvalidFeeSettlement
+    );
+
+    let funded_key = a.funded.key();
+    let owner_seeds: &[&[u8]] = &[OWNER_SEED, funded_key.as_ref(), &[a.funded.owner_bump]];
+    transfer_from_owner(
+        &a.token_program.to_account_info(),
+        &a.owner_usdc.to_account_info(),
+        &a.fee_vault.to_account_info(),
+        &a.owner.to_account_info(),
+        &a.usdc_mint,
+        owner_seeds,
+        charge,
+    )?;
+
+    let by = a.risk_authority.key();
+    let f = &mut ctx.accounts.funded;
+    f.order_fees_due = f.order_fees_due.checked_sub(total).ok_or(VaultError::MathOverflow)?;
+    f.order_fees_paid = f.order_fees_paid.checked_add(charge).ok_or(VaultError::MathOverflow)?;
+    f.order_fee_settlements = f.order_fee_settlements.checked_add(1).ok_or(VaultError::MathOverflow)?;
+    let (order_fees_due, order_fees_paid) = (f.order_fees_due, f.order_fees_paid);
+    emit_cpi!(OrderFeesSettled { funded: funded_key, charged: charge, waived: waive, order_fees_due, order_fees_paid, by, ts: now()? });
     Ok(())
 }

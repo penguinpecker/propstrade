@@ -16,7 +16,8 @@ use crate::{
     gmtrade,
     state::{
         initialized_and_owned, Config, ConfigParams, MarketConfig, MarketParams, Pauses, Tier, TierParams, CONFIG_SEED,
-        CONFIG_SPACE, FEE_VAULT_SEED, MARKET_SEED, MAX_RISK_AUTHORITIES, SOL_TREASURY_SEED, TIER_SEED, VAULT_SEED,
+        CONFIG_SPACE, FEE_VAULT_SEED, MARKET_SEED, MAX_ORDER_FEE_BPS, MAX_ORDER_FEE_USDC, MAX_RISK_AUTHORITIES,
+        SOL_TREASURY_SEED, TIER_SEED, VAULT_SEED,
     },
 };
 
@@ -180,6 +181,20 @@ pub fn set_pauses(accounts: &[AccountView], data: &[u8]) -> Result {
     c.paused = paused;
     let admin = *c.admin();
     config_changed(event_authority, &c.paused, config_change::PAUSES, &admin)
+}
+
+/// Sets Props.trade's order fee: `fee_usdc` USDC base units plus `fee_bps` of the size of every order a trader places or
+/// updates afterwards, within the program's caps. 0 / 0 turns it off. Fees already assessed do not change.
+pub fn set_order_fee(accounts: &[AccountView], data: &[u8]) -> Result {
+    let mut args = Args(data);
+    let fee_usdc = args.u64()?;
+    let fee_bps = args.u16()?;
+    let (mut c, event_authority) = admin_only(accounts)?;
+    require(fee_usdc <= MAX_ORDER_FEE_USDC && fee_bps <= MAX_ORDER_FEE_BPS, E::InvalidParams)?;
+    c.order_fee_usdc.set(fee_usdc);
+    c.order_fee_bps.set(fee_bps);
+    let admin = *c.admin();
+    config_changed(event_authority, &c.paused, config_change::ORDER_FEE, &admin)
 }
 
 /// Validation shared by `upsert_tier` / `upsert_market` after their `init_if_needed` account: admin (mut signer),

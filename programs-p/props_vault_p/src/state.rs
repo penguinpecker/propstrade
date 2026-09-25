@@ -29,6 +29,10 @@ pub const BPS: u64 = 10_000;
 pub const DAY_SECONDS: i64 = 86_400;
 /// Micro-USD (u64, 6 dp) × this = GMTrade USD (u128, 1 USD = 10^20).
 pub const MICRO_USD_TO_GM: u128 = 100_000_000_000_000;
+/// Highest order fee `set_order_fee` accepts: USDC base units per order ($2) and bps of the order's size (0.1 %).
+/// Raising either needs a program upgrade.
+pub const MAX_ORDER_FEE_USDC: u64 = 2_000_000;
+pub const MAX_ORDER_FEE_BPS: u16 = 10;
 
 pub fn to_gm_usd(micro_usd: u64) -> Result<u128> {
     (micro_usd as u128).checked_mul(MICRO_USD_TO_GM).ok_or(E::MathOverflow.into())
@@ -396,6 +400,16 @@ pub struct FundedAccount {
     pub last_sync_at: I64,
     pub bump: u8,
     pub owner_bump: u8,
+    /// The fee assessed on `orders[j]` (USDC base units); 0 while `orders[j]` is free or was placed by a risk authority.
+    pub order_fees: [U64; MAX_ORDERS],
+    /// Assessed fees of orders that left the book other than through `cancel_order` (executed, or cancelled by the
+    /// exchange), not settled yet.
+    pub order_fees_due: U64,
+    /// Order fees charged to the fee vault so far.
+    pub order_fees_paid: U64,
+    /// Settlements so far. `settle_order_fees` names the count it was computed from and advances it, so a settlement
+    /// lands once even when `order_fees_due` returns to the value it was computed from.
+    pub order_fee_settlements: U64,
 }
 impl Data for FundedAccount {
     const DISC: [u8; 8] = [243, 213, 249, 109, 66, 122, 63, 208];
@@ -434,12 +448,36 @@ impl FundedAccount {
         nonce
     }
 
-    /// Tracks the order just created with `next_order_nonce` and advances the counter.
-    pub fn track_order(&mut self, order: TrackedOrder) -> Result {
+    /// Tracks the order just created with `next_order_nonce`, with its assessed fee, and advances the counter.
+    pub fn track_order(&mut self, order: TrackedOrder, fee: u64) -> Result {
         require(self.find_order(&order.order).is_none(), E::InvalidOrderAccount)?;
         let free = self.orders.iter().position(TrackedOrder::is_free).ok_or(Error::from(E::TooManyOrders))?;
         self.orders[free] = order;
+        self.order_fees[free].set(fee);
         self.order_seq.set(self.order_seq.get().checked_add(1).ok_or(Error::from(E::MathOverflow))?);
+        Ok(())
+    }
+
+    /// The fees an order that adds exposure must leave in the account's USDC: fees due plus the fees of tracked increase
+    /// orders. Decrease orders hold nothing while tracked (a take profit and a stop loss are each assessed at their
+    /// maximum, and at most one executes); an executed one's fee is held from the sync that makes it due.
+    pub fn reserved_fees(&self) -> Result<u64> {
+        let mut total = self.order_fees_due.get();
+        for (o, fee) in self.orders.iter().zip(&self.order_fees) {
+            if !o.is_free() && order_type::is_increase(o.order_type) {
+                total = total.checked_add(fee.get()).ok_or(Error::from(E::MathOverflow))?;
+            }
+        }
+        Ok(total)
+    }
+
+    /// `orders[j]` left the book other than through `cancel_order` (executed, or cancelled by the exchange): its fee
+    /// becomes due, for a risk authority to charge or waive.
+    pub fn make_fee_due(&mut self, j: usize) -> Result {
+        let due =
+            self.order_fees_due.get().checked_add(self.order_fees[j].get()).ok_or(Error::from(E::MathOverflow))?;
+        self.order_fees_due.set(due);
+        self.order_fees[j].set(0);
         Ok(())
     }
 
@@ -492,15 +530,15 @@ const _: () = {
     assert!(size_of::<Evaluation>() == 156);
     assert!(size_of::<Slot>() == 113);
     assert!(size_of::<TrackedOrder>() == 59);
-    assert!(size_of::<FundedAccount>() == 1539);
+    assert!(size_of::<FundedAccount>() == 1627);
     assert!(size_of::<PayoutRequest>() == 120);
-    assert!(size_of::<ConfigTail>() == 269);
+    assert!(size_of::<ConfigTail>() == 279);
 };
 
 // ---------- Config ----------
 
 pub const CONFIG_DISC: [u8; 8] = [155, 12, 170, 224, 30, 250, 204, 130];
-/// 8 + INIT_SPACE: admin 32, Option<Pubkey> 33, Vec<Pubkey> 4 + 4 × 32, tail 269.
+/// 8 + INIT_SPACE: admin 32, Option<Pubkey> 33, Vec<Pubkey> 4 + 4 × 32, tail 279.
 pub const CONFIG_SPACE: usize = 8 + 32 + 33 + 4 + 32 * MAX_RISK_AUTHORITIES + size_of::<ConfigTail>();
 const PENDING_TAG: usize = 40;
 
@@ -533,9 +571,23 @@ pub struct ConfigTail {
     pub vault_bump: u8,
     pub fee_vault_bump: u8,
     pub sol_treasury_bump: u8,
+    /// Props.trade's fee per trader-placed order, set by `set_order_fee`: `order_fee_usdc` (USDC base units) plus
+    /// `order_fee_bps` of the order's USD size. 0 = off.
+    pub order_fee_usdc: U64,
+    pub order_fee_bps: U16,
 }
 
 impl ConfigTail {
+    /// The fee of an order of `size` (GMTrade USD) counting at most `cap` of it: `order_fee_usdc` + `order_fee_bps` of
+    /// the size in micro-USD, each step rounded down; 0 for a size of 0 (a collateral-only increase).
+    pub fn order_fee(&self, size: u128, cap: u128) -> Result<u64> {
+        if size == 0 {
+            return Ok(0);
+        }
+        let micro = u64::try_from(size.min(cap) / MICRO_USD_TO_GM).map_err(|_| Error::from(E::MathOverflow))?;
+        self.order_fee_usdc.get().checked_add(apply_bps(micro, self.order_fee_bps.get())?).ok_or(E::MathOverflow.into())
+    }
+
     pub fn set_params(&mut self, p: &ConfigParams) {
         self.trader_share_bps.set(p.trader_share_bps);
         self.min_payout.set(p.min_payout);

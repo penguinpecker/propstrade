@@ -15,13 +15,14 @@ import {
 import { Env, MARKETS, USD, swapKey, usdc } from './env.ts';
 
 describe('invariants', () => {
-  it('only order creation, cancels into the owner, payouts and closure touch the owner USDC account', () => {
+  it('only order creation, cancels into the owner, fee settlement, payouts and closure touch the owner USDC account', () => {
     const touching = PROPS_VAULT_IDL.instructions
       .filter((ix) => ix.accounts.some((a) => a.name === 'owner_usdc' && 'writable' in a && a.writable))
       .map((ix) => ix.name)
       .sort();
     // activate_funded funds it; cancel_order / close_completed_order return escrow into it (receiver = owner PDA);
-    // open_position escrows collateral with GMTrade; approve_payout / close_funded are the only outflows.
+    // open_position escrows collateral with GMTrade; settle_order_fees (to the fee vault), approve_payout and
+    // close_funded are the only outflows. update_order reads it only.
     assert.deepEqual(touching, [
       'activate_funded',
       'approve_payout',
@@ -29,6 +30,7 @@ describe('invariants', () => {
       'close_completed_order',
       'close_funded',
       'open_position',
+      'settle_order_fees',
     ]);
   });
 

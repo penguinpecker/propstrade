@@ -17,8 +17,10 @@ import {
   gmStoreWallet,
   gmToUsd,
   innerInstructionsOf,
+  orderFee,
   orderNonce,
   parseUnits,
+  reservedFees,
   toMicro,
   toUnitPrice,
   usdToGm,
@@ -119,6 +121,24 @@ describe('addresses and transactions', () => {
     const built = new URL('../../../target/idl/props_vault.json', import.meta.url);
     if (!existsSync(built)) return; // no local build: nothing to compare
     assert.deepEqual(PROPS_VAULT_IDL, JSON.parse(readFileSync(built, 'utf8')), 'run: cp target/idl/props_vault.json packages/sdk/src/idl/');
+  });
+});
+
+describe('order fee', () => {
+  it('rounds like the program: flat + floor(floor(size / 10^14) x bps / 10^4), 0 for a size of 0, the cap bounds the size', () => {
+    const rate = { feeUsdc: 500_000n, feeBps: 7 };
+    // $1,234.567891234: 1,234,567,891 micro-USD -> 7 bps = 864,197.5237 -> 864,197.
+    assert.equal(orderFee(rate, 1_234_567_891_234n * 10n ** 11n), 500_000n + 864_197n);
+    assert.equal(orderFee(rate, 10n ** 14n - 1n), 500_000n, 'below one micro-USD: the flat part only');
+    assert.equal(orderFee(rate, 0n), 0n, 'a collateral-only increase is free');
+    assert.equal(orderFee(rate, CLOSE_ALL, 10_000n * 10n ** 20n), 500_000n + 7_000_000n, 'a close-all decrease counts the account\'s exposure cap');
+    assert.equal(orderFee(rate, 100n * 10n ** 20n, 10_000n * 10n ** 20n), 500_000n + 70_000n, 'a smaller decrease counts its size');
+    assert.equal(orderFee({ feeUsdc: 0n, feeBps: 0 }, 5_000n * 10n ** 20n), 0n);
+  });
+
+  it('holds fees due plus pending increase fees, never decrease fees', () => {
+    assert.equal(reservedFees(3n, [{ fee: 10n, isIncrease: true }, { fee: 20n, isIncrease: false }, { fee: 5n, isIncrease: true }]), 18n);
+    assert.equal(reservedFees(0n, []), 0n);
   });
 });
 

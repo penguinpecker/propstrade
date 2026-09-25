@@ -11,7 +11,8 @@
 //   - no lamport gain for any wallet an attacker controls (traders, strangers), no USDC gain for their token accounts
 //     except the payout's trader ATA in a successful approve_payout, by exactly trader_amount;
 //   - owner PDAs stay system-owned and data-less;
-//   - capital vault, fee vault, SOL treasury and owner USDC only lose value in the instructions allowed to move it.
+//   - capital vault, fee vault, SOL treasury and owner USDC only lose value in the instructions allowed to move it;
+//     settle_order_fees moves exactly what the owner USDC loses into the fee vault.
 //
 //   node programs-p/props_vault_p/fuzz/seqfuzz.ts [seeds] [steps]   (FIRST_SEED=n; SANITY=1 self-test; children: FUZZ_DUMP + PROPS_VAULT_SO set by the parent)
 import { createHash } from 'node:crypto';
@@ -31,6 +32,8 @@ const STEPS = Number(process.argv[3] ?? 250);
 const FIRST = Number(process.env.FIRST_SEED ?? 1);
 
 type Rec = { seed: number; step: number; label: string; ok: boolean; err: string | null; code: string | null; inner: string; post: string; inv: string[] };
+/** FundedAccount data length (8 + INIT_SPACE). */
+const FUNDED_LEN = 1635;
 
 if (!process.env.FUZZ_DUMP) {
   const runs: Record<string, Rec[]> = {};
@@ -258,7 +261,7 @@ async function child(dump: string): Promise<void> {
       const traderOf = (k?: PublicKey) => {
         const a = k && env.svm.getAccount(k);
         if (!a || !a.owner.equals(S.PROPS_VAULT_PROGRAM_ID)) return null;
-        if (a.data.length === 1547) return env.account('fundedAccount', k!).trader.toBase58();
+        if (a.data.length === FUNDED_LEN) return env.account('fundedAccount', k!).trader.toBase58();
         if (a.data.length === 164) return env.account('evaluation', k!).trader.toBase58();
         return null;
       };
@@ -273,7 +276,7 @@ async function child(dump: string): Promise<void> {
       const topUp0 = kind0 === 'top_up_owner' ? (() => {
         const k = ix0.keys[1]?.pubkey;
         const a = k && env.svm.getAccount(k);
-        const status = a && a.owner.equals(S.PROPS_VAULT_PROGRAM_ID) && a.data.length === 1547 ? S.enumName<string>(env.account('fundedAccount', k!).status) : 'not-a-funded-account';
+        const status = a && a.owner.equals(S.PROPS_VAULT_PROGRAM_ID) && a.data.length === FUNDED_LEN ? S.enumName<string>(env.account('fundedAccount', k!).status) : 'not-a-funded-account';
         return `${status}${cfg0.paused.trading ? '/trading-paused' : ''}`;
       })() : null;
       const tx = new Transaction().add(ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }), ...ixs);
@@ -312,11 +315,12 @@ async function child(dump: string): Promise<void> {
           restrict: () => signer0 !== null && risk0.includes(signer0),
           mark_breached: () => signer0 !== null && risk0.includes(signer0),
           close_funded: () => signer0 !== null && risk0.includes(signer0),
+          settle_order_fees: () => signer0 !== null && risk0.includes(signer0),
           set_identity: () => signer0 === kyc0,
           set_pauses: () => signer0 === admin0, set_params: () => signer0 === admin0, set_authorities: () => signer0 === admin0,
           upsert_market: () => signer0 === admin0, upsert_tier: () => signer0 === admin0, deposit_capital: () => signer0 === admin0,
           withdraw_capital: () => signer0 === admin0, sweep_fees: () => signer0 === admin0, withdraw_sol_treasury: () => signer0 === admin0,
-          propose_admin: () => signer0 === admin0,
+          propose_admin: () => signer0 === admin0, set_order_fee: () => signer0 === admin0,
         };
         const g = gate[kind0];
         if (g && !g()) inv.push(`AUTHZ: ${kind0} succeeded signed by ${signer0?.slice(0, 8)} (owner-trader ${owner0?.slice(0, 8)}, risk ${risk0.map((x) => x.slice(0, 6))}, admin ${admin0.slice(0, 6)}, kyc ${kyc0.slice(0, 6)})`);
@@ -335,13 +339,18 @@ async function child(dump: string): Promise<void> {
             if (!allowed) inv.push(`attacker token ${k.slice(0, 8)} gained ${du} USDC`);
           }
         }
+        let ownerLoss = 0n;
         for (const t of withFunded()) {
           const o = env.svm.getAccount(t.owner!);
           if (o && (!o.owner.equals(SystemProgram.programId) || o.data.length > 0)) inv.push(`owner ${t.owner!.toBase58().slice(0, 8)} not a data-less system account`);
           const ou = t.ownerUsdc!.toBase58();
           const du = (after.get(ou)?.usdc ?? 0n) - (before.get(ou)?.usdc ?? 0n);
-          if (du < 0n && !['open_position', 'approve_payout', 'close_funded'].includes(kind)) inv.push(`owner usdc ${ou.slice(0, 8)} lost ${-du} in ${kind}`);
+          if (du < 0n && !['open_position', 'approve_payout', 'close_funded', 'settle_order_fees'].includes(kind)) inv.push(`owner usdc ${ou.slice(0, 8)} lost ${-du} in ${kind}`);
+          if (du < 0n) ownerLoss -= du;
         }
+        // A fee settlement pays the fee vault exactly what the account's USDC lost.
+        const feeGain = (after.get(S.feeVaultPda().toBase58())?.usdc ?? 0n) - (before.get(S.feeVaultPda().toBase58())?.usdc ?? 0n);
+        if (kind === 'settle_order_fees' && feeGain !== ownerLoss) inv.push(`settle_order_fees: owner usdc lost ${ownerLoss}, fee vault gained ${feeGain}`);
         const dec = (addr: PublicKey, field: 'usdc' | 'lamports', allowed: string[], what: string) => {
           const k = addr.toBase58();
           const d = ((after.get(k)?.[field] ?? 0n) as bigint) - ((before.get(k)?.[field] ?? 0n) as bigint);
@@ -365,7 +374,7 @@ async function child(dump: string): Promise<void> {
           n === admin.toBase58() ? 'admin' : n === env.risk.publicKey.toBase58() ? 'risk' : n === env.kyc.publicKey.toBase58() ? 'kyc'
           : strangers.some((x) => x.publicKey.toBase58() === n) ? 'stranger' : traders.findIndex((x) => x.kp.publicKey.toBase58() === n) >= 0 ? `trader${traders.findIndex((x) => x.kp.publicKey.toBase58() === n)}` : n.slice(0, 6);
         const fundedKey = ixs[0]!.keys[2]?.pubkey;
-        const fundedTrader = fundedKey && env.svm.getAccount(fundedKey)?.owner.equals(S.PROPS_VAULT_PROGRAM_ID) && env.svm.getAccount(fundedKey)!.data.length === 1547
+        const fundedTrader = fundedKey && env.svm.getAccount(fundedKey)?.owner.equals(S.PROPS_VAULT_PROGRAM_ID) && env.svm.getAccount(fundedKey)!.data.length === FUNDED_LEN
           ? env.account('fundedAccount', fundedKey).trader.toBase58() : '';
         label += ` [signers ${[...need].filter((n) => n !== payer.publicKey.toBase58()).map((n) => `${role(n)}${risks.includes(n) ? '/inRiskList' : ''}${n === fundedTrader ? '/fundedTrader' : ''}`).join(',')}]`;
       }
@@ -436,6 +445,18 @@ async function child(dump: string): Promise<void> {
 
     // ---------- actions ----------
     const marketOf = () => pick(marketNames);
+    /** The fee a trader agrees to: none (no limit) mostly, else a random bound the order's fee may exceed. */
+    const maxFee = () => (chance(0.25) ? BigInt(int(0, 12_000_000)) : undefined);
+    /** The keeper's settlement of `t`'s fees due: charge what the balance covers, waive the rest. */
+    const settleAll = async (t: Trader) => {
+      const ref = fundedOf(t);
+      const due = ref ? BigInt(ref.account.orderFeesDue.toString()) : 0n;
+      if (!ref || due === 0n) return null;
+      const balance = env.usdcBalance(t.ownerUsdc!);
+      const charge = balance < due ? balance : due;
+      const expectedSettlements = BigInt(ref.account.orderFeeSettlements.toString());
+      return go('settle_order_fees', await v.settleOrderFees({ riskAuthority: env.risk.publicKey, funded: t.funded!, charge, waive: due - charge, expectedDue: due, expectedSettlements }));
+    };
     const actions: [number, () => Promise<unknown>][] = [
       [10, async () => { // open
         const t = pick(live());
@@ -448,7 +469,7 @@ async function child(dump: string): Promise<void> {
         const o = await v.openPosition({
           trader: t.kp.publicKey, funded: ref, marketToken: MARKETS[marketOf()].token, isLong, orderType: limit ? 'limit' : 'market',
           collateral, sizeDeltaUsd: (collateral * lev * USD) / 1_000_000n, triggerPrice: limit ? BigInt(int(1, 5000)) * 10n ** 11n : undefined,
-          acceptablePrice: isLong ? HIGH : LOW,
+          acceptablePrice: isLong ? HIGH : LOW, maxFee: maxFee(),
         });
         see(o.order, S.gmOrderEscrow(o.order));
         go('open_position', o.instruction);
@@ -462,7 +483,7 @@ async function child(dump: string): Promise<void> {
         const marketToken = slot ? slot.marketToken : MARKETS[marketOf()].token;
         const o = await v.closePosition({
           authority: chance(0.3) ? env.risk.publicKey : t.kp.publicKey, funded: ref, marketToken, isLong: slot ? slot.isLong : chance(0.5),
-          sizeDeltaUsd: chance(0.4) ? S.CLOSE_ALL : BigInt(int(1, 400)) * USD, acceptablePrice: slot?.isLong ?? true ? LOW : HIGH,
+          sizeDeltaUsd: chance(0.4) ? S.CLOSE_ALL : BigInt(int(1, 400)) * USD, acceptablePrice: slot?.isLong ?? true ? LOW : HIGH, maxFee: maxFee(),
         });
         see(o.order, S.gmOrderEscrow(o.order));
         go('close_position', o.instruction);
@@ -476,7 +497,7 @@ async function child(dump: string): Promise<void> {
         const slot = pick(slots);
         const o = await v.setProtection({
           trader: t.kp.publicKey, funded: ref, marketToken: slot.marketToken, isLong: slot.isLong, orderType: chance(0.5) ? 'takeProfit' : 'stopLoss',
-          triggerPrice: BigInt(int(1, 5000)) * 10n ** 11n, sizeDeltaUsd: chance(0.5) ? S.CLOSE_ALL : BigInt(int(1, 300)) * USD,
+          triggerPrice: BigInt(int(1, 5000)) * 10n ** 11n, sizeDeltaUsd: chance(0.5) ? S.CLOSE_ALL : BigInt(int(1, 300)) * USD, maxFee: maxFee(),
         });
         see(o.order, S.gmOrderEscrow(o.order));
         go('set_protection', o.instruction);
@@ -491,7 +512,7 @@ async function child(dump: string): Promise<void> {
           trader: t.kp.publicKey, funded: ref, order: o.order,
           triggerPrice: chance(0.6) ? BigInt(int(1, 5000)) * 10n ** 11n : undefined,
           acceptablePrice: chance(0.3) ? HIGH : undefined,
-          sizeDeltaUsd: chance(0.5) ? BigInt(int(1, 300)) * USD : undefined,
+          sizeDeltaUsd: chance(0.5) ? BigInt(int(1, 300)) * USD : undefined, maxFee: maxFee(),
         });
         go('update_order', ix);
       }],
@@ -572,8 +593,9 @@ async function child(dump: string): Promise<void> {
         const t = pick(live());
         go('mark_breached', await v.markBreached({ riskAuthority: env.risk.publicKey, funded: t.funded! }));
       }],
-      [1, async () => { // close funded
+      [1, async () => { // close funded (the keeper settles first, mostly)
         const t = pick(live());
+        if (chance(0.7)) await settleAll(t);
         const ref = fundedOf(t);
         if (!ref) return;
         go('close_funded', await v.closeFunded({ riskAuthority: env.risk.publicKey, funded: ref, positions: ownerPositions(t) }));
@@ -613,6 +635,27 @@ async function child(dump: string): Promise<void> {
         else if (r < 0.8) go('withdraw_capital', await v.withdrawCapital({ admin, amount: usdc(String(int(1, 50))) }));
         else if (r < 0.9) go('sweep_fees', await v.sweepFees({ admin }));
         else go('withdraw_sol_treasury', await v.withdrawSolTreasury({ admin, lamports: BigInt(int(1, 100)) * 1_000_000n }));
+      }],
+      [2, async () => { // admin: the order fee rate, in and out of bounds
+        go('set_order_fee', await v.setOrderFee({ admin, feeUsdc: pick([0n, 1n, 500_000n, 1_999_999n, 2_000_000n, 2_000_001n]), feeBps: pick([0, 1, 7, 10, 11]) }));
+      }],
+      [5, async () => { // keeper: settle fees due, mostly within bounds and current, sometimes not
+        const t = pick(anyFunded());
+        const ref = fundedOf(t);
+        if (!ref) return;
+        if (chance(0.5)) {
+          await settleAll(t);
+          return;
+        }
+        const due = BigInt(ref.account.orderFeesDue.toString());
+        const balance = env.usdcBalance(t.ownerUsdc!);
+        const room = due < balance ? due : balance;
+        const charge = chance(0.9) ? (room * BigInt(int(0, 100))) / 100n : room + BigInt(int(1, 3));
+        const waive = chance(0.9) ? ((due - (charge < due ? charge : due)) * BigInt(int(0, 100))) / 100n : due + 1n;
+        const expectedDue = chance(0.85) ? due : due + BigInt(int(-1, 1));
+        const count = BigInt(ref.account.orderFeeSettlements.toString());
+        const expectedSettlements = chance(0.9) ? count : count + BigInt(int(-1, 1)); // a replayed or future count
+        go('settle_order_fees', await v.settleOrderFees({ riskAuthority: chance(0.9) ? env.risk.publicKey : pick(signerKeys()).publicKey, funded: t.funded!, charge, waive, expectedDue: expectedDue < 0n ? 0n : expectedDue, expectedSettlements: expectedSettlements < 0n ? 0n : expectedSettlements }));
       }],
       [3, async () => { // stranger donations: SOL and USDC to any watched account
         const s = pick(strangers);
@@ -707,6 +750,7 @@ async function child(dump: string): Promise<void> {
         const ref = fundedOf(t);
         if (!ref) return;
         go('sync', await v.sync({ funded: ref }));
+        await settleAll(t);
         const seq = fundedOf(t)!.account.payoutSeq;
         see(S.payoutPda(t.funded!, seq));
         const r = go('request_payout', await v.requestPayout({ trader: t.kp.publicKey, funded: t.funded!, payoutSeq: seq }));
@@ -740,7 +784,7 @@ async function child(dump: string): Promise<void> {
       const slots = ref.account.slots.filter((s: { marketToken: PublicKey }) => !s.marketToken.equals(PublicKey.default));
       const orders = trackedOrders(t);
       const seq = ref.account.payoutSeq;
-      const r = int(0, 20);
+      const r = int(0, 22);
       const tag = `imp`;
       if (r === 0) {
         const o = await v.openPosition({ trader: X, funded: ref, marketToken: MARKETS[marketOf()].token, isLong: true, orderType: 'market', collateral: 5_000_000n, sizeDeltaUsd: 20n * USD, acceptablePrice: HIGH });
@@ -799,6 +843,11 @@ async function child(dump: string): Promise<void> {
       else if (r === 18) send(`set_authorities ${tag}`, [await v.setAuthorities({ admin: X, riskAuthorities: [X], kycAuthority: X })]);
       else if (r === 19) send(`sweep_fees ${tag}`, [await v.sweepFees({ admin: X })]);
       else if (r === 20) send(`propose_admin ${tag}`, [await v.proposeAdmin({ admin: X, newAdmin: X })]);
+      else if (r === 21) send(`set_order_fee ${tag}`, [await v.setOrderFee({ admin: X, feeUsdc: 2_000_000n, feeBps: 10 })]);
+      else if (r === 22) {
+        const due = BigInt(ref.account.orderFeesDue.toString());
+        send(`settle_order_fees ${tag}`, [await v.settleOrderFees({ riskAuthority: X, funded: t.funded!, charge: due < env.usdcBalance(t.ownerUsdc!) ? due : 0n, waive: 0n, expectedDue: due, expectedSettlements: BigInt(ref.account.orderFeeSettlements.toString()) })]);
+      }
     }]);
     if (process.env.SANITY) {
       // Detector self-test: a real USDC transfer to an attacker token account, and a gated kind signed by the wrong key.
@@ -809,6 +858,8 @@ async function child(dump: string): Promise<void> {
       // ... and the round-3 top-up rule: a success labelled top_up_owner whose account 1 is not an Active funded account.
       send('top_up_owner sanity-mislabel', [await v.setPauses({ admin, paused: { newEvaluations: false, trading: false, payouts: false } })]);
     }
+    // Most seeds trade with an order fee from the start (at most $2 + 10 bps).
+    if (chance(0.75)) send('set_order_fee initial', [await v.setOrderFee({ admin, feeUsdc: BigInt(int(0, 2_000_000)), feeBps: int(0, 10) })]);
     const total = actions.reduce((s, [w]) => s + w, 0);
     for (let i = 0; i < STEPS; i++) {
       let r = rnd() * total;

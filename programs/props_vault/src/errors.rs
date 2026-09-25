@@ -90,4 +90,10 @@ pub enum VaultError {
     UnexpectedGmtradeEffect,
     #[msg("Not a GMTrade claimable account delegated to this account's owner")]
     NotClaimable,
+    #[msg("Order fees are still being settled")]
+    FeesDue,
+    #[msg("Fee settlement does not match the account's fees due, settlement count or USDC")]
+    InvalidFeeSettlement,
+    #[msg("The order fee changed since it was reviewed")]
+    OrderFeeChanged,
 }

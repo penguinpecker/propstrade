@@ -292,12 +292,14 @@ pub struct RequestPayout<'info> {
 }
 
 /// Requests the trader's share of realized profit (owner USDC above principal). Requires a flat account
-/// as of the last sync; blocks new positions until resolved.
+/// as of the last sync with its order fees settled, so the profit is net of every fee; blocks new positions until
+/// resolved.
 pub(crate) fn request_payout(ctx: Context<RequestPayout>) -> Result<()> {
     let a = &ctx.accounts;
     require!(!a.config.paused.payouts, VaultError::Paused);
     require!(a.funded.status == FundedStatus::Active, VaultError::InvalidAccountStatus);
     require!(a.funded.is_flat(), VaultError::NotFlat);
+    require!(a.funded.order_fees_due == 0, VaultError::FeesDue);
     let balance = a.owner_usdc.amount;
     let profit = balance.saturating_sub(a.funded.principal);
     require!(profit > 0, VaultError::NoProfit);

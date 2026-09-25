@@ -89,6 +89,8 @@ pub mod disc {
     pub const CLOSE_COMPLETED_ORDER: u64 = 0x9f2700ed03bb15b3;
     pub const CLOSE_EMPTY_POSITION: u64 = 0x3bfaebed268a69af;
     pub const COLLECT_CLAIMABLE: u64 = 0x803e6bea4c65abe0;
+    pub const SET_ORDER_FEE: u64 = 0xe469c70cd343901a;
+    pub const SETTLE_ORDER_FEES: u64 = 0x685eb63b2f0b4f39;
     /// anchor_lang::idl::IDL_IX_TAG: Anchor's onchain-IDL instructions (not provided, as with Anchor's `no-idl`).
     pub const IDL_IX_TAG: u64 = 0x0a69e9a778bcf440;
     /// anchor_lang::event::EVENT_IX_TAG: the event self-CPI.
@@ -134,6 +136,8 @@ fn dispatch(accounts: &[AccountView], data: &[u8]) -> Result {
         disc::CLOSE_COMPLETED_ORDER => crank::close_completed_order(accounts, args),
         disc::CLOSE_EMPTY_POSITION => crank::close_empty_position(accounts, args),
         disc::COLLECT_CLAIMABLE => crank::collect_claimable(accounts, args),
+        disc::SET_ORDER_FEE => admin::set_order_fee(accounts, args),
+        disc::SETTLE_ORDER_FEES => risk::settle_order_fees(accounts, args),
         disc::EVENT_IX_TAG => events::receive(accounts),
         disc::IDL_IX_TAG => Err(E::IdlInstructionStub.into()),
         _ => Err(E::InstructionFallbackNotFound.into()),
@@ -199,6 +203,8 @@ mod tests {
             ("close_completed_order", CLOSE_COMPLETED_ORDER),
             ("close_empty_position", CLOSE_EMPTY_POSITION),
             ("collect_claimable", COLLECT_CLAIMABLE),
+            ("set_order_fee", SET_ORDER_FEE),
+            ("settle_order_fees", SETTLE_ORDER_FEES),
         ];
         for (name, v) in ixs {
             assert_eq!(u64::from_le_bytes(sha8(&format!("global:{name}"))), v, "{name}");
@@ -235,6 +241,7 @@ mod tests {
             ("FundedActivated", ev::FUNDED_ACTIVATED),
             ("IdentitySet", ev::IDENTITY_SET),
             ("OrderCancelled", ev::ORDER_CANCELLED),
+            ("OrderFeesSettled", ev::ORDER_FEES_SETTLED),
             ("OrderRequested", ev::ORDER_REQUESTED),
             ("OrderUpdated", ev::ORDER_UPDATED),
             ("OwnerToppedUp", ev::OWNER_TOPPED_UP),
@@ -276,6 +283,6 @@ mod tests {
         ] {
             assert_eq!(Address::find_program_address(&[seed.as_bytes()], &crate::ID), pda, "{seed}");
         }
-        assert_eq!(CONFIG_SPACE, 474);
+        assert_eq!(CONFIG_SPACE, 484);
     }
 }

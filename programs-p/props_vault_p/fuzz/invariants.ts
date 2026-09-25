@@ -15,6 +15,15 @@
 //     == floor(profit * share), vault gain == vault_amount, profit == balance_at_request - principal
 //  I7 attacker (stranger) and risk wallets never gain USDC or lamports from a program transaction
 //  I8 trader ATAs gain USDC only through approve_payout; sum of those gains == config.payouts_paid
+//  I9 the fee vault holds exactly the evaluation fees plus the order fees charged (OrderFeesSettled) since the last
+//     sweep, and sum of order_fees_paid over accounts == sum of charged; a settlement moves exactly `charged` out of the
+//     account's USDC
+//  I10 order_fees[j] == 0 whenever orders[j] is free or was placed by a risk authority on a breached account (a risk
+//      authority's close of any other account is assessed like the trader's: the session guard)
+//  I11 per account, order_fees_due + sum of order_fees changes only by +fee (OrderRequested, ProtectionSet), new - old
+//      (OrderUpdated), -old (OrderCancelled, and CompletedOrderClosed of an order the exchange cancelled) and
+//      -(charged + waived) (OrderFeesSettled): sync and close_completed_order of an executed order move fees from
+//      pending to due and keep it
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -44,7 +53,7 @@ async function run(): Promise<Rec[]> {
     return Keypair.fromSeed(s);
   };
   Date.now = () => 1_790_000_000_000;
-  const { Env, MARKETS, USD, usdc }: typeof import('../../../tests/program/src/env.ts') = await import(join(ROOT, 'tests/program/src/env.ts'));
+  const { Env, MARKETS, TIERS, USD, usdc }: typeof import('../../../tests/program/src/env.ts') = await import(join(ROOT, 'tests/program/src/env.ts'));
   const out: Rec[] = [];
   let r = SEED >>> 0 || 1;
   const rnd = () => { r ^= r << 13; r >>>= 0; r ^= r >>> 17; r ^= r << 5; r >>>= 0; return r / 4294967296; };
@@ -73,6 +82,8 @@ async function run(): Promise<Rec[]> {
   const payouts: PublicKey[] = [];
   let expVault = env.usdcBalance(vaultAddr);
   let traderGains = 0n;
+  let expFeeVault = env.usdcBalance(feeVaultPda());
+  let charged = 0n;
 
   const violation = (msg: string) => { out.push({ label: `VIOLATION ${msg}`, violation: msg }); console.error(`[${process.env.BUILD}] VIOLATION ${msg}`); };
   const usdcOf = (k: PublicKey): bigint | null => {
@@ -82,8 +93,16 @@ async function run(): Promise<Rec[]> {
     return t.mint.equals(USDC_MINT) ? t.amount : null;
   };
   const acct = (f: F) => env.account('fundedAccount', f.funded) as any;
+  /** Per account: order_fees_due + sum of order_fees, and each tracked order's fee. */
+  const feeLedger = () => new Map(fs.filter((f) => env.exists(f.funded)).map((f) => {
+    const a = acct(f);
+    const byOrder = new Map<string, bigint>((a.orders as any[]).map((o, j) => [o.order.toBase58(), BigInt(a.orderFees[j].toString())]));
+    return [f.funded.toBase58(), { total: (a.orderFees as any[]).reduce((s: bigint, x: any) => s + BigInt(x.toString()), BigInt(a.orderFeesDue.toString())), byOrder }] as const;
+  }));
   const ref = (f: F) => env.funded(f.funded);
   const isFree = (k: PublicKey) => k.equals(PublicKey.default);
+  /** Orders a risk authority placed on a breached account: free for as long as they are tracked (I10). */
+  const breachCloses = new Set<string>();
 
   /** Sends, records the outcome, and checks I1/I2/I7/I8 across the transaction. */
   const send = (label: string, ixs: TransactionInstruction[], signers: Keypair[]): boolean => {
@@ -98,6 +117,8 @@ async function run(): Promise<Rec[]> {
     const watchBefore = watch.map((k) => usdcOf(k) ?? 0n);
     const solWatch = [stranger.publicKey, risk.publicKey];
     const solBefore = solWatch.map((k) => env.lamports(k));
+    const ledgerBefore = feeLedger();
+    const statusBefore = new Map(fs.filter((f) => env.exists(f.funded)).map((f) => [f.funded.toBase58(), enumName(acct(f).status)]));
     const res = env.svm.sendTransaction(tx);
     env.svm.expireBlockhash();
     const failed = res instanceof FailedTransactionMetadata;
@@ -134,6 +155,36 @@ async function run(): Promise<Rec[]> {
         const paid = k.equals(tx.feePayer!) ? fee : 0n;
         if (d + paid > 0n) violation(`I7 ${label}: ${i === 0 ? 'stranger' : 'risk'} gained ${d + paid} lamports`);
       });
+      const events = v.parseEvents(meta.innerInstructions().flat().map((i) => ({ programId: keys[i.instruction().programIdIndex()]!, data: i.instruction().data() })));
+      const big = (x: unknown) => BigInt(String(x));
+      const expected = new Map<string, bigint>();
+      const add = (funded: unknown, d: bigint) => expected.set(String(funded), (expected.get(String(funded)) ?? 0n) + d);
+      const before = (funded: unknown, order: unknown) => ledgerBefore.get(String(funded))?.byOrder.get(String(order)) ?? 0n;
+      for (const e of events) {
+        const d = e.data;
+        if (e.name === 'orderRequested' || e.name === 'protectionSet') {
+          add(d.funded, big(d.fee));
+          const f = fs.find((x) => x.funded.equals(d.funded as PublicKey));
+          if (e.name === 'orderRequested' && f && !(d.by as PublicKey).equals(f.trader.publicKey) && statusBefore.get(String(d.funded)) === 'breached') {
+            breachCloses.add(String(d.order));
+            if (big(d.fee) !== 0n) violation(`I10 ${label}: a breach close was assessed ${d.fee}`);
+          }
+        } else if (e.name === 'orderUpdated') add(d.funded, big(d.fee) - before(d.funded, d.order));
+        else if (e.name === 'orderCancelled') add(d.funded, -before(d.funded, d.order));
+        else if (e.name === 'completedOrderClosed' && d.cancelled) add(d.funded, -before(d.funded, d.order));
+        else if (e.name === 'orderFeesSettled') {
+          add(d.funded, -(big(d.charged) + big(d.waived)));
+          charged += big(d.charged);
+          expFeeVault += big(d.charged);
+          const f = fs.find((x) => x.funded.equals(d.funded as PublicKey));
+          const i = f ? keys.findIndex((k) => k.equals(f.ownerUsdc)) : -1;
+          if (i < 0 || (usdcBefore[i] ?? 0n) - (usdcOf(f!.ownerUsdc) ?? 0n) !== big(d.charged)) violation(`I9 ${label}: the account's USDC did not lose exactly the ${d.charged} charged`);
+        }
+      }
+      for (const [k, after] of feeLedger()) {
+        const d = after.total - (ledgerBefore.get(k)?.total ?? 0n);
+        if (d !== (expected.get(k) ?? 0n)) violation(`I11 ${label}: ${k.slice(0, 8)} fees due + held moved by ${d}, events say ${expected.get(k) ?? 0n}`);
+      }
     }
     return !failed;
   };
@@ -176,6 +227,16 @@ async function run(): Promise<Rec[]> {
     if (BigInt(c.allocatedPrincipal.toString()) !== principal) violation(`I4 after ${label}: allocated ${c.allocatedPrincipal} != sum ${principal}`);
     if (c.fundedActive !== active) violation(`I4 after ${label}: funded_active ${c.fundedActive} != ${active}`);
     if (BigInt(c.payoutsPaid.toString()) !== traderGains) violation(`I8 after ${label}: payouts_paid ${c.payoutsPaid} != trader ATA gains ${traderGains}`);
+    const feeVault = env.usdcBalance(feeVaultPda());
+    if (feeVault !== expFeeVault) violation(`I9 after ${label}: fee vault ${feeVault} != evaluation fees + charged ${expFeeVault}`);
+    const paid = fs.reduce((s, f) => s + BigInt(acct(f).orderFeesPaid.toString()), 0n);
+    if (paid !== charged) violation(`I9 after ${label}: sum of order_fees_paid ${paid} != charged ${charged}`);
+    for (const f of fs) {
+      const a = acct(f);
+      (a.orders as any[]).forEach((o, j) => {
+        if ((isFree(o.order) || breachCloses.has(o.order.toBase58())) && BigInt(a.orderFees[j].toString()) !== 0n) violation(`I10 after ${label}: order_fees[${j}] = ${a.orderFees[j]} for a ${isFree(o.order) ? 'free' : 'breach-close'} entry`);
+      });
+    }
   };
 
   const snapshot = (label: string) => {
@@ -197,6 +258,17 @@ async function run(): Promise<Rec[]> {
   const openFs = () => fs.filter((f) => enumName(acct(f).status) !== 'closed');
   const trackedOrders = (f: F) => (acct(f).orders as any[]).filter((o) => !isFree(o.order));
   const usedSlots = (f: F) => (acct(f).slots as any[]).map((s, i) => ({ ...s, i })).filter((s) => !isFree(s.marketToken));
+  /** The fee a trader agrees to: none (no limit) mostly, else a random bound the order's fee may exceed. */
+  const maxFee = () => (chance(0.25) ? BigInt(int(0, 12_000_000)) : undefined);
+  /** The keeper's settlement: charge what the account's USDC covers (at most the fees due), waive the rest. */
+  const settleAll = async (f: F, label: string) => {
+    const due = BigInt(acct(f).orderFeesDue.toString());
+    if (due === 0n || !env.exists(f.ownerUsdc)) return;
+    const balance = usdcOf(f.ownerUsdc) ?? 0n;
+    const charge = balance < due ? balance : due;
+    const expectedSettlements = BigInt(acct(f).orderFeeSettlements.toString());
+    send(label, [await v.settleOrderFees({ riskAuthority: risk.publicKey, funded: f.funded, charge, waive: due - charge, expectedDue: due, expectedSettlements })], [risk]);
+  };
   const positionsOf = (f: F) => [...shadow.keys()].map((k) => new PublicKey(k)).filter((p) => env.exists(p) && marketNames.some((n) => [true, false].some((l) => gmPositionPda(f.owner, (MARKETS as any)[n].token, l).equals(p))));
 
   const actions: [number, string, () => Promise<void>][] = [
@@ -205,6 +277,7 @@ async function run(): Promise<Rec[]> {
       const trader = env.wallet(20);
       let evaluation: PublicKey;
       try { evaluation = await env.passedEvaluation(trader); } catch { out.push({ label: 'passedEvaluation failed' }); return; }
+      expFeeVault += usdc(TIERS.t10k.fee);
       const ix = await v.activateFunded({ trader: trader.publicKey, evaluation });
       const { fundedPda, ownerPda, ownerUsdcAddress } = await import('@props/sdk');
       const funded = fundedPda(evaluation);
@@ -224,7 +297,7 @@ async function run(): Promise<Rec[]> {
       const o = await v.openPosition({
         trader: signer.publicKey, funded: ref(f), marketToken: (MARKETS as any)[m].token, isLong, orderType: limit ? 'limit' : 'market',
         collateral: coll, sizeDeltaUsd: coll * lev * 10n ** 14n, triggerPrice: limit ? BigInt(int(1, 5000)) * 10n ** 11n : undefined,
-        acceptablePrice: isLong ? 10n ** 30n : 1n,
+        acceptablePrice: isLong ? 10n ** 30n : 1n, maxFee: maxFee(),
       });
       orders.add(o.order.toBase58());
       const pos = gmPositionPda(f.owner, (MARKETS as any)[m].token, isLong);
@@ -237,7 +310,7 @@ async function run(): Promise<Rec[]> {
       const s = pick(usedSlots(f)); if (!s) return;
       const auth = chance(0.3) ? risk : chance(0.1) ? stranger : f.trader;
       const size = chance(0.5) ? CLOSE_ALL : BigInt(int(1, 3000)) * USD;
-      const o = await v.closePosition({ authority: auth.publicKey, funded: ref(f), marketToken: s.marketToken, isLong: s.isLong, sizeDeltaUsd: size, acceptablePrice: s.isLong ? 1n : 10n ** 30n });
+      const o = await v.closePosition({ authority: auth.publicKey, funded: ref(f), marketToken: s.marketToken, isLong: s.isLong, sizeDeltaUsd: size, acceptablePrice: s.isLong ? 1n : 10n ** 30n, maxFee: maxFee() });
       orders.add(o.order.toBase58());
       const [label, ix] = maybeMutate('close', o.instruction);
       send(label, [ix], [auth]);
@@ -245,7 +318,7 @@ async function run(): Promise<Rec[]> {
     [3, 'protect', async () => {
       const f = pick(openFs()); if (!f) return;
       const s = pick(usedSlots(f)); if (!s) return;
-      const o = await v.setProtection({ trader: f.trader.publicKey, funded: ref(f), marketToken: s.marketToken, isLong: s.isLong, orderType: chance(0.5) ? 'stopLoss' : 'takeProfit', triggerPrice: BigInt(int(1, 5000)) * 10n ** 11n, sizeDeltaUsd: BigInt(int(1, 3000)) * USD });
+      const o = await v.setProtection({ trader: f.trader.publicKey, funded: ref(f), marketToken: s.marketToken, isLong: s.isLong, orderType: chance(0.5) ? 'stopLoss' : 'takeProfit', triggerPrice: BigInt(int(1, 5000)) * 10n ** 11n, sizeDeltaUsd: chance(0.3) ? CLOSE_ALL : BigInt(int(1, 3000)) * USD, maxFee: maxFee() });
       orders.add(o.order.toBase58());
       const [label, ix] = maybeMutate('protect', o.instruction);
       send(label, [ix], [f.trader]);
@@ -253,7 +326,7 @@ async function run(): Promise<Rec[]> {
     [2, 'update', async () => {
       const f = pick(openFs()); if (!f) return;
       const o = pick(trackedOrders(f)); if (!o) return;
-      const ix = await v.updateOrder({ trader: f.trader.publicKey, funded: ref(f), order: o.order, triggerPrice: BigInt(int(1, 5000)) * 10n ** 11n, sizeDeltaUsd: chance(0.5) ? BigInt(int(1, 3000)) * USD : undefined });
+      const ix = await v.updateOrder({ trader: f.trader.publicKey, funded: ref(f), order: o.order, triggerPrice: BigInt(int(1, 5000)) * 10n ** 11n, sizeDeltaUsd: chance(0.5) ? BigInt(int(1, 3000)) * USD : undefined, maxFee: maxFee() });
       const [label, m] = maybeMutate('update', ix);
       send(label, [m], [f.trader]);
     }],
@@ -266,7 +339,8 @@ async function run(): Promise<Rec[]> {
       send(label, [m], [auth]);
     }],
     [8, 'keeper-exec', async () => {
-      // A keeper executes (or completes-but-leaves-open) a pending order; USDC in/out of the owner is external.
+      // A keeper executes (or completes-but-leaves-open, or cancels-and-leaves-open) a pending order; USDC in/out of the
+      // owner is external.
       const f = pick(openFs()); if (!f) return;
       const o = pick(trackedOrders(f)); if (!o) return;
       const acc = env.svm.getAccount(o.order); if (!acc || acc.data.length < 10 || acc.data[9] !== 0) return;
@@ -275,6 +349,11 @@ async function run(): Promise<Rec[]> {
       const sh = shadow.get(pos) ?? { size: 0n, coll: 0n };
       const type = enumName(o.orderType);
       const esc = gmOrderEscrow(o.order);
+      if (chance(0.15)) { // cancelled by the exchange and left open: nothing executed, the escrow keeps the collateral
+        const a = env.svm.getAccount(o.order)!; const dd = Buffer.from(a.data); dd[9] = 2; env.svm.setAccount(o.order, { ...a, data: dd });
+        out.push({ label: `keeper cancel ${type}` });
+        return;
+      }
       if (type === 'market' || type === 'limit') {
         sh.size += BigInt(o.sizeUsd.toString()); sh.coll += BigInt(o.collateral.toString());
       } else {
@@ -370,6 +449,7 @@ async function run(): Promise<Rec[]> {
       }
       send('flatten sync', [await v.sync({ funded: ref(f) })], [stranger]);
       if (chance(0.6) && env.exists(f.ownerUsdc)) env.setUsdcBalance(f.ownerUsdc, env.usdcBalance(f.ownerUsdc) + BigInt(int(0, 500)) * 1_000_000n);
+      if (chance(0.8)) await settleAll(f, 'settle (flat)');
       if (chance(0.7)) {
         const seq = acct(f).payoutSeq;
         const bal = usdcOf(f.ownerUsdc);
@@ -389,6 +469,7 @@ async function run(): Promise<Rec[]> {
     }],
     [4, 'closeFunded', async () => {
       const f = pick(openFs()); if (!f) return;
+      if (chance(0.7)) await settleAll(f, 'settle (closure)');
       const ix = await v.closeFunded({ riskAuthority: risk.publicKey, funded: ref(f), positions: positionsOf(f) });
       const [label, m] = maybeMutate('closeFunded', ix);
       const bal = usdcOf(f.ownerUsdc) ?? 0n;
@@ -410,8 +491,27 @@ async function run(): Promise<Rec[]> {
       } else if (k === 1) {
         const amt = BigInt(int(1, 150_000)) * 1_000_000n;
         if (send('withdraw', [await v.withdrawCapital({ admin: admin.publicKey, amount: amt })], [admin])) expVault -= amt;
-      } else if (k === 2) { const fee = env.usdcBalance(feeVaultPda()); if (send('sweep', [await v.sweepFees({ admin: admin.publicKey })], [admin])) expVault += fee; }
+      } else if (k === 2) { const fee = env.usdcBalance(feeVaultPda()); if (send('sweep', [await v.sweepFees({ admin: admin.publicKey })], [admin])) { expVault += fee; expFeeVault = 0n; } }
       else send('withdrawSol', [await v.withdrawSolTreasury({ admin: admin.publicKey, lamports: BigInt(int(1, 30)) * 100_000_000n })], [admin]);
+    }],
+    [2, 'setfee', async () => {
+      const feeUsdc = BigInt(int(0, 2_000_001)); const feeBps = int(0, 11);
+      send(`setfee ${feeUsdc} ${feeBps}`, [await v.setOrderFee({ admin: admin.publicKey, feeUsdc, feeBps })], [admin]);
+    }],
+    [5, 'settle', async () => {
+      // The keeper settles within the bounds and against the current fees due; sometimes stale, over or unsigned.
+      const f = pick(openFs()); if (!f) return;
+      const due = BigInt(acct(f).orderFeesDue.toString());
+      const balance = usdcOf(f.ownerUsdc) ?? 0n;
+      const room = due < balance ? due : balance;
+      const charge = chance(0.9) ? (room * BigInt(int(0, 100))) / 100n : room + 1n;
+      const waive = chance(0.9) ? ((due - (charge < due ? charge : due)) * BigInt(int(0, 100))) / 100n : due + 1n;
+      const expectedDue = chance(0.9) ? due : due + 1n;
+      const count = BigInt(acct(f).orderFeeSettlements.toString());
+      const expectedSettlements = chance(0.9) || count === 0n ? count : count - 1n; // sometimes a replayed count
+      const signer = chance(0.1) ? stranger : risk;
+      const [label, m] = maybeMutate(`settle ${charge}+${waive}/${due}`, await v.settleOrderFees({ riskAuthority: signer.publicKey, funded: f.funded, charge, waive, expectedDue, expectedSettlements }));
+      send(label, [m], [signer]);
     }],
     [2, 'warp', async () => {
       const c = env.svm.getClock();
@@ -419,6 +519,8 @@ async function run(): Promise<Rec[]> {
       out.push({ label: 'warp' });
     }],
   ];
+  // Most seeds trade with an order fee from the start (at most $2 + 10 bps).
+  if (chance(0.75)) send('setfee initial', [await v.setOrderFee({ admin: admin.publicKey, feeUsdc: BigInt(int(0, 2_000_000)), feeBps: int(0, 10) })], [admin]);
   const total = actions.reduce((a, [w]) => a + w, 0);
   const counts: Record<string, number> = {};
   for (let step = 0; step < STEPS; step++) {

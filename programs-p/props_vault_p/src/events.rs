@@ -28,6 +28,7 @@ pub mod disc {
     pub const FUNDED_ACTIVATED: [u8; 8] = [119, 43, 37, 84, 142, 191, 142, 101];
     pub const IDENTITY_SET: [u8; 8] = [207, 143, 155, 168, 233, 175, 52, 179];
     pub const ORDER_CANCELLED: [u8; 8] = [108, 56, 128, 68, 168, 113, 168, 239];
+    pub const ORDER_FEES_SETTLED: [u8; 8] = [57, 230, 88, 28, 118, 63, 61, 145];
     pub const ORDER_REQUESTED: [u8; 8] = [233, 57, 116, 185, 63, 88, 154, 140];
     pub const ORDER_UPDATED: [u8; 8] = [172, 140, 210, 241, 108, 117, 122, 145];
     pub const OWNER_TOPPED_UP: [u8; 8] = [178, 73, 99, 250, 204, 210, 52, 139];
@@ -50,6 +51,7 @@ pub mod config_change {
     pub const PAUSES: u8 = 5;
     pub const TIER: u8 = 6;
     pub const MARKET: u8 = 7;
+    pub const ORDER_FEE: u8 = 8;
 }
 
 /// A buffer holding the event tag and `disc`; write the event's fields in IDL order, then `emit`. `N` = 16 + body size.

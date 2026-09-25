@@ -10,22 +10,28 @@ same `emit_cpi!` events, same error numbers and error log lines. The IDL in `pac
 
 | Anchor file (`programs/props_vault/src/instructions/`) | Pinocchio file (`src/ix/`) | Instructions | State |
 |---|---|---|---|
-| `admin.rs` | `admin.rs` | initialize, propose_admin, accept_admin, set_authorities, set_params, set_pauses, upsert_tier, upsert_market, deposit_capital, withdraw_capital, sweep_fees, withdraw_sol_treasury | ported |
+| `admin.rs` | `admin.rs` | initialize, propose_admin, accept_admin, set_authorities, set_params, set_pauses, set_order_fee, upsert_tier, upsert_market, deposit_capital, withdraw_capital, sweep_fees, withdraw_sol_treasury | ported |
 | `trader.rs` | `trader.rs` | buy_evaluation, activate_funded, request_payout, cancel_payout | ported |
 | `trading.rs` | `trading.rs` | open_position, close_position, set_protection, update_order, cancel_order | ported |
-| `risk.rs` | `risk.rs` | set_identity, record_evaluation_result, approve_payout, reject_payout, restrict, mark_breached, close_funded | ported |
+| `risk.rs` | `risk.rs` | set_identity, record_evaluation_result, approve_payout, reject_payout, restrict, mark_breached, close_funded, settle_order_fees | ported |
 | `crank.rs` | `crank.rs` | sync, top_up_owner, close_completed_order, close_empty_position, collect_claimable | ported |
 
-All 33 instructions are ported (the last two were added to both builds by the round-1 audit fixes): `src/lib.rs`
-dispatches every discriminator, the event self-CPI and Anchor's IDL tag, and the suite passes 79/79 on this build as on
+All 35 instructions are ported (close_empty_position and collect_claimable were added to both builds by the round-1 audit
+fixes, set_order_fee and settle_order_fees by the order fee on 2026-09-26, `docs/design/order-fee.md`): `src/lib.rs`
+dispatches every discriminator, the event self-CPI and Anchor's IDL tag, and the suite passes 95/95 on this build as on
 the Anchor build.
 
-Binary: 172,536 bytes (172,512 before the round-3 audit fixes, 172,496 before round 2, 162,800 before round 1, 145,120
-before the payout and risk actions, 88,856 before trading and the cranks, 64,128 with admin only; the Anchor build is
-1,021,016 bytes, 1,020,520 before round 3, 1,020,160 before round 2, 981,640 before the audit fixes).
+Binary: 181,672 bytes (180,800 before the order-fee audit fixes, 172,536 before the order fee, 172,512 before the
+round-3 audit fixes, 172,496 before round 2, 162,800 before round 1, 145,120 before the payout and risk actions, 88,856
+before trading and the cranks, 64,128 with admin only; the Anchor build is 1,055,704 bytes, 1,053,744 before the
+order-fee audit fixes, 1,021,016 before the order fee, 1,020,520 before round 3, 1,020,160 before round 2, 981,640
+before the audit fixes).
 Trading brought in the GMTrade CPI builders (`CreateOrder::invoke` 4.2 KB, `CloseOrder::invoke` 2.1 KB, `update_order`
-1 KB); the largest handlers are sync 7.3 KB, open_position 6 KB, activate_funded 5.6 KB, update_order 4.9 KB and
-approve_payout 4.1 KB.
+1 KB); the largest handlers are sync 7.5 KB, open_position 6.7 KB, update_order 6.1 KB, activate_funded 5.5 KB and
+approve_payout 4.1 KB. The order fee added 8.3 KB: settle_order_fees 2.7 KB, update_order 1.2 KB (the owner's USDC
+account, its ATA check and the re-assessment), open_position 0.7 KB, the fee in `Decrease::place`, the events' three
+trailing fields and set_order_fee. Its audit fixes added 872 bytes (the settlement count, `is_cancelled_order` and the
+release in close_completed_order, the exposure-cap base and the breach condition in `Decrease::place`).
 
 ## Build, test, compare
 
@@ -35,7 +41,7 @@ cargo build-sbf --manifest-path programs-p/props_vault_p/Cargo.toml --sbf-out-di
 cargo test --manifest-path programs-p/props_vault_p/Cargo.toml     # every hard-coded discriminator and PDA vs its sha256 / find_program_address; GMTrade CPI helpers refuse any other program
 cd tests/program && PROPS_VAULT_SO=$PWD/../../target/deploy/props_vault_p.so npm test          # the suite on this build
 cd tests/program && npm test                                                                    # the suite on the Anchor build (79/79)
-node programs-p/props_vault_p/compare/admin.ts                    # byte-level diff against the Anchor build (needs both .so files; PROPS_VAULT_SO picks the Pinocchio side); also trader.ts, risk.ts, trading.ts, crank.ts, audit.ts
+node programs-p/props_vault_p/compare/admin.ts                    # byte-level diff against the Anchor build (needs both .so files; PROPS_VAULT_SO picks the Pinocchio side); also trader.ts, risk.ts, trading.ts, crank.ts, audit.ts, fees.ts
 node programs-p/props_vault_p/fuzz/run.ts                         # the differential fuzz campaign on both builds (fixed seeds, about an hour, PROPS_VAULT_SO picks the Pinocchio side, exit 1 on any difference or violation)
 cd tests/program && PROPS_VAULT_SO=... npm run test:validator    # solana-test-validator 3.1, mainnet's features as far as 3.1 knows them (needs ports 18001/18899/19900)
 rustfmt --edition 2021 --config max_width=120,use_small_heuristics=Max programs-p/props_vault_p/src/lib.rs
@@ -82,23 +88,30 @@ difference, invariant violation or crashed job. `FUZZ_QUICK=1` runs the first jo
 the wiring.
 
 - `fuzz/seqfuzz.ts` (`FIRST_SEED=<n> node programs-p/props_vault_p/fuzz/seqfuzz.ts <seeds> <steps>`): a stateful
-  sequence over all 33 instructions, committing SDK-built valid steps, hostile mutations (an account substituted from
+  sequence over all 35 instructions (three seeds in four start with a random order fee; orders carry a random `max_fee`
+  one time in four; the keeper settles fees due within and outside the bounds, against the current, a replayed or a
+  future settlement count), committing SDK-built valid steps, hostile mutations (an account substituted from
   every address the run has seen plus foreign lookalikes, a signer swapped for another key it holds, a writable flag
   flipped, one account duplicated into another slot, remaining accounts appended or dropped, a data byte changed),
   stranger donations, whole instructions built for someone else's accounts and signed by any held key, and GMTrade
   keeper emulation (fills, GMTrade-side cancels and completions, liquidations, profit, claimable accounts). Per step it
   compares the outcome, the inner instructions and a digest of every touched account across the builds, and checks an
   authorization oracle (which signer may make each instruction succeed; round 3's `top_up_owner` rule: an Active
-  account only, never while trading is paused) and value-flow invariants (no lamport or USDC gain for a trader or
-  stranger except a payout's exact `trader_amount`; owner PDAs data-less and system-owned; the capital vault, fee
-  vault, SOL treasury and owner USDC lose value only in the instructions allowed to move it). `SANITY=1` proves the
+  account only, never while trading is paused; `set_order_fee` the admin, `settle_order_fees` a risk authority) and
+  value-flow invariants (no lamport or USDC gain for a trader or stranger except a payout's exact `trader_amount`; owner
+  PDAs data-less and system-owned; the capital vault, fee vault, SOL treasury and owner USDC lose value only in the
+  instructions allowed to move it; `settle_order_fees` pays the fee vault exactly what the owner USDC lost). `SANITY=1` proves the
   detectors fire: 3 violations on each build (a real USDC transfer to a stranger, a gated success mislabelled
   `close_funded`, a success mislabelled `top_up_owner`), exit 1.
 - `fuzz/invariants.ts` (`FUZZ_SEED=<n> FUZZ_STEPS=400 node programs-p/props_vault_p/fuzz/invariants.ts`): the
-  same-seed money run with invariants I1-I8 (per-transaction USDC and lamport conservation, the capital-vault ledger,
+  same-seed money run with invariants I1-I11 (per-transaction USDC and lamport conservation, the capital-vault ledger,
   `allocated_principal` / `funded_active`, data-less owner PDAs, payouts only from realized profit and split as the
   terms say, stranger and risk wallets never gain, trader ATAs gain only through `approve_payout` and by exactly
-  `payouts_paid`), a keeper emulation with liquidations and windfalls, and a byte-for-byte diff of every transaction
+  `payouts_paid`; the fee vault holds exactly the evaluation fees plus the order fees charged since the last sweep and
+  Σ `order_fees_paid` is what the settlements charged, `order_fees[j]` is 0 for free entries and for a risk authority's
+  closes of breached accounts, and per account `order_fees_due + Σ order_fees` moves only by what the order, cancel,
+  completed-order (`cancelled`) and settlement events say), a keeper emulation with fills, orders the exchange completed
+  or cancelled and left open, liquidations and windfalls, and a byte-for-byte diff of every transaction
   record and tracked account between the builds. `FUZZ_SELFTEST=1` proves the detectors fire (a wrong I3 expectation
   at step 50 on both builds, one extra lamport on the Pinocchio side as a build difference), `FUZZ_CODES=1` prints the
   error codes per action.
@@ -106,7 +119,10 @@ the wiring.
 The seed list is fixed in `run.ts`: seqfuzz seeds 1..1000 at 250 steps (five seeds per process: a child keeps about
 200 MB per seed it ran) and invariants seeds 1..600 at 400 steps: 340,780 transactions (179,485 succeeded) in 59 minutes
 on an M-series laptop with nothing else heavy running (a child takes up to 1 GB), 0 differences and 0 violations on
-2026-09-24 (run twice on the final binaries). To reproduce a failing seed, run that fuzzer
+2026-09-24 (run twice on the final binaries). With the order fee (2026-09-26) the full campaign has not been rerun: the
+`FUZZ_QUICK=1` jobs and seqfuzz seeds 6-45 / invariants seeds 2-21 had 0 differences and 0 violations, and after its
+audit fixes `FUZZ_QUICK=1` and seqfuzz seeds 6-105 / invariants seeds 2-61 (33,267 transactions, 5.8 minutes) did too.
+To reproduce a failing seed, run that fuzzer
 alone with the seed the summary names (`FIRST_SEED=<seed> … seqfuzz.ts 1 250`, or `FUZZ_SEED=<seed> FUZZ_STEPS=400 …
 invariants.ts`): seqfuzz prints the first divergent step of the seed with its label and mutation, invariants the first
 five differing records. A hit is a harness bug or a program problem: triage it before touching production code (the one
@@ -117,7 +133,7 @@ hit so far was the harness dropping the allowed payout amount under a mutation).
 | File | What it holds |
 |---|---|
 | `src/lib.rs` | program id, entrypoint (pinocchio's input parser; the error code goes out as is), `process_instruction` (program id check, dispatch, one error log line), instruction discriminators, host test of every constant |
-| `src/error.rs` | `E` (every Anchor framework code we raise + `VaultError` 6000..6043), `Error` / `Result` (register-sized), `require`, the Anchor-format error log |
+| `src/error.rs` | `E` (every Anchor framework code we raise + `VaultError` 6000..6046), `Error` / `Result` (register-sized), `require`, the Anchor-format error log |
 | `src/state.rs` | seeds, limits, math helpers (`to_gm_usd`, `apply_bps`), LE field types, every account layout with its discriminator and `Data::valid` (the bool and enum bytes borsh accepts), `load::<T>`, the `Config` view, instruction arg structs (`ConfigParams`, `TierParams`, `MarketParams`, `Pauses`), enum constants, the Anchor state helpers (`FundedAccount::find_slot`, `track_order`, `Terms::loss_allowance`, `MarketConfig::apply_oi_change`, `ConfigTail::allocate_daily_principal`, ...) |
 | `src/accounts.rs` | program ids, singleton PDAs (`CONFIG_PDA`, `VAULT_PDA`, `FEE_VAULT_PDA`, `SOL_TREASURY_PDA`, `EVENT_AUTHORITY_PDA`), Anchor account types and constraints (`take`, `signer`, `system_account`, `program_account`, `mutable`, `keys_eq`, `singleton`, `seeds`, `find_seeds`, `check_event_authority`, `token_account`, `mint_account`, `token_constraint`, `associated_token_constraint`), PDA syscalls, `ata_address`, `now()`, `Rent`, the borsh reader `Args` |
 | `src/cpi.rs` | one `invoke` for every CPI, system/token/ATA instructions with the Anchor build's layouts, `top_up_from_treasury`, Anchor `init` / `init_if_needed` (`init_pda`, `init_token_pda`, `init_ata_if_needed`, `create_account_anchor`), the borsh writer `Buf` |
@@ -317,12 +333,12 @@ SPL Token / ATA / System instruction builders by reading.
      round), and it builds nothing else into that `target/deploy/` afterwards (`--sbf-out-dir target/deploy` above
      writes to the repo root's).
    - `PROPS_VAULT_SO=<that file>` (absolute) for every suite, the validator smoke, the server module suites,
-     `scripts/local-stack.ts`, the six `compare/*.ts` scenarios and the fuzzers, which otherwise default to the Anchor
+     `scripts/local-stack.ts`, the seven `compare/*.ts` scenarios and the fuzzers, which otherwise default to the Anchor
      build or to `target/deploy/props_vault_p.so`; every process prints `props_vault binary: <path> (<bytes> bytes,
      executable hash <hash>)` (round 4) and each line must name that file with `<EXECUTABLE_HASH>`. The compare
      scenarios at 0 differences are the proof that the binary implements the SDK's IDL; they and the fuzzers still
      need `anchor build`'s reference binary at `target/deploy/props_vault.so`.
-   - `--max-len`: 10 % headroom is only ≈ 17 KB here (≈ 0.965 SOL of program-data rent in all at 172,536 B, against
+   - `--max-len`: 10 % headroom is only ≈ 18 KB here (≈ 1.016 SOL of program-data rent in all at 181,672 B, against
      ≈ 5.7 SOL for the Anchor binary), program data never shrinks, and after the handover the vault cannot extend
      through Squads (runbook §14.3; `scripts/admin/extend-program.ts` while ExtendProgramChecked is inactive), so the
      runbook presents the choice: the default, or sizing for a fallback to the Anchor build (≈ +850 KB of binary,
@@ -355,7 +371,8 @@ q, r = amount / 10⁴, amount % 10⁴, the checked u64 form q·bps + r·bps / 10
 it. `Buf<N>::bytes`, `event::<N>` and `emit::<N>` are instantiated once per distinct `N`, ~700 bytes each: one `N` per
 file, or a writer core that is not generic over `N`, would save most of that. trading.rs and crank.rs share one
 (`trading::EV` = 904, Synced's largest body; 744 bytes less than one per file). The payout and risk-action events reuse
-`N`s other handlers already instantiate (102, 129, 168), so they added no copy; 10 distinct `N`s remain (5 in admin.rs),
+`N`s other handlers already instantiate (102, 129, 168), so they added no copy, and so does settle_order_fees (120,
+set_identity's); 10 distinct `N`s remain (5 in admin.rs),
 so one `N` for the whole crate would save roughly 6 KB.
 
 ## Checklist per instruction

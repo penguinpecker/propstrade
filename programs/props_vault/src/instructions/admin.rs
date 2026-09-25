@@ -142,6 +142,17 @@ pub(crate) fn set_pauses(ctx: Context<AdminOnly>, paused: Pauses) -> Result<()> 
     Ok(())
 }
 
+/// Sets Props.trade's order fee: `fee_usdc` USDC base units plus `fee_bps` of the size of every order a trader places
+/// or updates afterwards, within the program's caps. 0 / 0 turns it off. Fees already assessed do not change.
+pub(crate) fn set_order_fee(ctx: Context<AdminOnly>, fee_usdc: u64, fee_bps: u16) -> Result<()> {
+    require!(fee_usdc <= MAX_ORDER_FEE_USDC && fee_bps <= MAX_ORDER_FEE_BPS, VaultError::InvalidParams);
+    let c = &mut ctx.accounts.config;
+    c.order_fee_usdc = fee_usdc;
+    c.order_fee_bps = fee_bps;
+    emit_cpi!(config_changed(c, ConfigChange::OrderFee, c.admin)?);
+    Ok(())
+}
+
 #[event_cpi]
 #[derive(Accounts)]
 #[instruction(id: u16)]

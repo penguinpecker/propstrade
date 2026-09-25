@@ -62,6 +62,8 @@ export function enumName<T extends string>(value: object): T {
 
 const BPF_LOADER_UPGRADEABLE = new PublicKey('BPFLoaderUpgradeab1e11111111111111111111111');
 const bn = (v: bigint | number): BN => new BN(v.toString());
+/** `maxFee` when a caller gives none: no limit on the order's Props fee. */
+const NO_FEE_LIMIT = (1n << 64n) - 1n;
 const orderType = (name: OrderTypeName) => ({ [name]: {} }) as never;
 const bytes32 = (b: Uint8Array): number[] => {
   if (b.length !== 32) throw new Error('expected 32 bytes');
@@ -244,6 +246,14 @@ export class PropsVaultClient {
     return this.program.methods.setPauses(p.paused).accountsStrict({ ...eventCpi(), admin: p.admin, config: configPda() }).instruction();
   }
 
+  /**
+   * Props.trade's order fee: `feeUsdc` USDC base units plus `feeBps` of the size of every order a trader places or
+   * updates afterwards (at most $2 and 10 bps; 0 / 0 turns it off).
+   */
+  setOrderFee(p: { admin: PublicKey; feeUsdc: bigint; feeBps: number }): Promise<TransactionInstruction> {
+    return this.program.methods.setOrderFee(bn(p.feeUsdc), p.feeBps).accountsStrict({ ...eventCpi(), admin: p.admin, config: configPda() }).instruction();
+  }
+
   upsertTier(p: { admin: PublicKey; id: number; params: TierParams }): Promise<TransactionInstruction> {
     return this.program.methods
       .upsertTier(p.id, p.params)
@@ -363,6 +373,9 @@ export class PropsVaultClient {
    * prices GMTrade unit prices (see `toUnitPrice` / `acceptablePrice`). The order address follows the
    * account's order counter, so `funded` must be freshly fetched; `ordersBefore` counts the orders the
    * same transaction creates ahead of this one (e.g. 1 for a stop-loss placed right after an open).
+   * `maxFee`: the most the trader agrees to pay as the order's Props fee (USDC base units): what `orderFee` gives for it
+   * at the rate the ticket showed (for a close, take profit or stop loss, with the account's exposure cap as `capUsd`);
+   * the program refuses the order (`OrderFeeChanged`) if the rate now gives more. Omitted: no limit.
    */
   async openPosition(p: {
     trader: PublicKey;
@@ -375,6 +388,7 @@ export class PropsVaultClient {
     triggerPrice?: bigint;
     acceptablePrice: bigint;
     ordersBefore?: number;
+    maxFee?: bigint;
   }): Promise<OrderInstruction> {
     const accounts = gmOrderAccounts(p.funded, p.marketToken, p.isLong, p.ordersBefore);
     const instruction = await this.program.methods
@@ -385,6 +399,7 @@ export class PropsVaultClient {
         sizeDeltaUsd: bn(p.sizeDeltaUsd),
         triggerPrice: bn(p.triggerPrice ?? 0n),
         acceptablePrice: bn(p.acceptablePrice),
+        maxFee: bn(p.maxFee ?? NO_FEE_LIMIT),
       })
       .accountsStrict({ ...eventCpi(), trader: p.trader, config: configPda(), funded: p.funded.address, ownerUsdc: ownerUsdcAddress(p.funded.address), ...accounts })
       .instruction();
@@ -393,7 +408,7 @@ export class PropsVaultClient {
 
   /**
    * Market decrease by the trader or a risk authority; `CLOSE_ALL` closes the whole position. The size
-   * must be at least $1. `funded` / `ordersBefore` as in `openPosition`.
+   * must be at least $1. `funded` / `ordersBefore` / `maxFee` as in `openPosition` (a risk authority's order is free).
    */
   async closePosition(p: {
     authority: PublicKey;
@@ -403,16 +418,17 @@ export class PropsVaultClient {
     sizeDeltaUsd: bigint;
     acceptablePrice: bigint;
     ordersBefore?: number;
+    maxFee?: bigint;
   }): Promise<OrderInstruction> {
     const accounts = gmOrderAccounts(p.funded, p.marketToken, p.isLong, p.ordersBefore);
     const instruction = await this.program.methods
-      .closePosition({ isLong: p.isLong, sizeDeltaUsd: bn(p.sizeDeltaUsd), acceptablePrice: bn(p.acceptablePrice) })
+      .closePosition({ isLong: p.isLong, sizeDeltaUsd: bn(p.sizeDeltaUsd), acceptablePrice: bn(p.acceptablePrice), maxFee: bn(p.maxFee ?? NO_FEE_LIMIT) })
       .accountsStrict({ ...eventCpi(), authority: p.authority, config: configPda(), funded: p.funded.address, ...accounts })
       .instruction();
     return { instruction, order: accounts.gmOrder };
   }
 
-  /** Take-profit or stop-loss of at least $1. `funded` / `ordersBefore` as in `openPosition`. */
+  /** Take-profit or stop-loss of at least $1. `funded` / `ordersBefore` / `maxFee` as in `openPosition`. */
   async setProtection(p: {
     trader: PublicKey;
     funded: FundedRef;
@@ -422,6 +438,7 @@ export class PropsVaultClient {
     triggerPrice: bigint;
     sizeDeltaUsd: bigint;
     ordersBefore?: number;
+    maxFee?: bigint;
   }): Promise<OrderInstruction> {
     const accounts = gmOrderAccounts(p.funded, p.marketToken, p.isLong, p.ordersBefore);
     const instruction = await this.program.methods
@@ -430,6 +447,7 @@ export class PropsVaultClient {
         orderType: orderType(p.orderType),
         triggerPrice: bn(p.triggerPrice),
         sizeDeltaUsd: bn(p.sizeDeltaUsd),
+        maxFee: bn(p.maxFee ?? NO_FEE_LIMIT),
       })
       .accountsStrict({ ...eventCpi(), authority: p.trader, config: configPda(), funded: p.funded.address, ...accounts })
       .instruction();
@@ -445,6 +463,7 @@ export class PropsVaultClient {
     return slot.marketToken;
   }
 
+  /** Every update re-assesses the order's Props fee at the current rate; `maxFee` as in `openPosition`. */
   updateOrder(p: {
     trader: PublicKey;
     funded: FundedRef;
@@ -452,11 +471,12 @@ export class PropsVaultClient {
     triggerPrice?: bigint;
     acceptablePrice?: bigint;
     sizeDeltaUsd?: bigint;
+    maxFee?: bigint;
   }): Promise<TransactionInstruction> {
     const marketToken = this.trackedOrderMarket(p.funded, p.order);
     const opt = (v?: bigint) => (v === undefined ? null : bn(v));
     return this.program.methods
-      .updateOrder({ triggerPrice: opt(p.triggerPrice), acceptablePrice: opt(p.acceptablePrice), sizeDeltaUsd: opt(p.sizeDeltaUsd) })
+      .updateOrder({ triggerPrice: opt(p.triggerPrice), acceptablePrice: opt(p.acceptablePrice), sizeDeltaUsd: opt(p.sizeDeltaUsd), maxFee: bn(p.maxFee ?? NO_FEE_LIMIT) })
       .accountsStrict({
         ...eventCpi(),
         trader: p.trader,
@@ -469,6 +489,7 @@ export class PropsVaultClient {
         gmOrder: p.order,
         gmEventAuthority: gmEventAuthority(),
         gmtradeProgram: GMTRADE_PROGRAM_ID,
+        ownerUsdc: ownerUsdcAddress(p.funded.address),
       })
       .instruction();
   }
@@ -628,6 +649,29 @@ export class PropsVaultClient {
         systemProgram: SystemProgram.programId,
       })
       .remainingAccounts((p.positions ?? []).map(readonly))
+      .instruction();
+  }
+
+  /**
+   * Settles a funded account's order fees due: `charge` (USDC base units) moves from its USDC to the fee vault, `waive`
+   * is forgiven. `expectedDue` / `expectedSettlements` = the account's `orderFeesDue` / `orderFeeSettlements` the amounts
+   * were computed from: a stale settlement fails (`InvalidFeeSettlement`), and so does a replayed one (every settlement
+   * advances the count), a total above the fees due or a charge above the account's USDC.
+   */
+  settleOrderFees(p: { riskAuthority: PublicKey; funded: PublicKey; charge: bigint; waive: bigint; expectedDue: bigint; expectedSettlements: bigint }): Promise<TransactionInstruction> {
+    return this.program.methods
+      .settleOrderFees(bn(p.charge), bn(p.waive), bn(p.expectedDue), bn(p.expectedSettlements))
+      .accountsStrict({
+        ...eventCpi(),
+        riskAuthority: p.riskAuthority,
+        config: configPda(),
+        funded: p.funded,
+        owner: ownerPda(p.funded),
+        ownerUsdc: ownerUsdcAddress(p.funded),
+        feeVault: feeVaultPda(),
+        usdcMint: USDC_MINT,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
       .instruction();
   }
 

@@ -27,7 +27,8 @@ use crate::{
 /// 2. every tracked order (ascending index),
 /// 3. the MarketConfig of every distinct market among used slots (first appearance), writable.
 ///
-/// Orders whose account is gone are dropped. Orders GMTrade executed or cancelled but left open stay tracked, outside
+/// Orders whose account is gone are dropped and their fees become due. Orders GMTrade executed or cancelled but left open
+/// stay tracked, outside
 /// the pending sums, until close_completed_order sweeps their escrow, so the account is not flat while one still holds
 /// funds. Slot size/collateral come from the Position; market open interest follows each slot's committed size; idle
 /// flat slots are freed.
@@ -62,6 +63,7 @@ pub fn sync(accounts: &[AccountView], _data: &[u8]) -> Result {
     let mut dropped = [Address::default(); MAX_ORDERS];
     let mut n_dropped = 0;
     let mut finished = [false; MAX_ORDERS];
+    let mut gone = [false; MAX_ORDERS];
     for (j, o) in f.orders.iter_mut().enumerate().filter(|(_, o)| !o.is_free()) {
         let v = next()?;
         keys_eq(v.address(), &o.order, E::InvalidRemainingAccounts)?;
@@ -69,9 +71,13 @@ pub fn sync(accounts: &[AccountView], _data: &[u8]) -> Result {
             dropped[n_dropped] = o.order;
             n_dropped += 1;
             *o = TrackedOrder::default();
+            gone[j] = true;
         } else {
             finished[j] = !gmtrade::is_pending_order(v, &gm_program)?;
         }
+    }
+    for j in (0..MAX_ORDERS).filter(|&j| gone[j]) {
+        f.make_fee_due(j)?;
     }
 
     let mut committed_before = [0u128; MAX_SLOTS];
@@ -165,8 +171,8 @@ pub fn top_up_owner(accounts: &[AccountView], _data: &[u8]) -> Result {
 }
 
 /// Permissionless: closes a tracked order GMTrade executed or cancelled but left open, returning its escrowed funds and
-/// rent to the owner PDA, and stops tracking it. Pending orders are refused. The next sync settles the slot from the
-/// position.
+/// rent to the owner PDA, and stops tracking it. An executed order's fee becomes due; a cancelled one's is released, as
+/// by cancel_order (it never executed). Pending orders are refused. The next sync settles the slot from the position.
 pub fn close_completed_order(accounts: &[AccountView], _data: &[u8]) -> Result {
     #[rustfmt::skip]
     let [
@@ -208,12 +214,19 @@ pub fn close_completed_order(accounts: &[AccountView], _data: &[u8]) -> Result {
     require(f.is_open(), E::InvalidAccountStatus)?;
     let idx = f.find_order(gm_order.address()).ok_or(E::OrderNotTracked)?;
     require(!gmtrade::is_pending_order(gm_order, &c.gmtrade_program)?, E::OrderPending)?;
+    // Read before the CPI closes the order account.
+    let cancelled = gmtrade::is_cancelled_order(gm_order, &c.gmtrade_program)?;
     let bump = [f.owner_bump];
     let owner_signer: &[&[u8]] = &[OWNER_SEED, funded.address().as_ref(), &bump];
     order.invoke(&[owner_signer], "completed")?;
     f.orders[idx] = TrackedOrder::default();
+    if cancelled {
+        f.order_fees[idx].set(0);
+    } else {
+        f.make_fee_due(idx)?;
+    }
     let mut e = event::<EV>(disc::COMPLETED_ORDER_CLOSED);
-    e.key(funded.address()).key(gm_order.address()).i64(now()?);
+    e.key(funded.address()).key(gm_order.address()).i64(now()?).bool(cancelled);
     emit(event_authority, &e)
 }
 

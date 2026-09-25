@@ -29,7 +29,7 @@ pub struct SyncFunded<'info> {
 /// 2. every tracked order (ascending index),
 /// 3. the MarketConfig of every distinct market among used slots (first appearance), writable.
 ///
-/// Orders whose account is gone are dropped. Orders GMTrade executed or cancelled but left open stay
+/// Orders whose account is gone are dropped and their fees become due. Orders GMTrade executed or cancelled but left open stay
 /// tracked, outside the pending sums, until close_completed_order sweeps their escrow, so the account
 /// is not flat while one still holds funds. Slot size/collateral come from the Position; market open
 /// interest follows each slot's committed size; idle flat slots are freed.
@@ -52,15 +52,20 @@ pub(crate) fn sync<'info>(ctx: Context<'_, '_, 'info, 'info, SyncFunded<'info>>)
 
     let mut orders_dropped = Vec::new();
     let mut finished = [false; MAX_ORDERS];
+    let mut dropped = [false; MAX_ORDERS];
     for (j, o) in f.orders.iter_mut().enumerate().filter(|(_, o)| !o.is_free()) {
         let ai = next()?;
         require_keys_eq!(ai.key(), o.order, VaultError::InvalidRemainingAccounts);
         if ai.owner != &gm_program {
             orders_dropped.push(o.order);
             *o = TrackedOrder::default();
+            dropped[j] = true;
         } else {
             finished[j] = !gmtrade::is_pending_order(ai, &gm_program)?;
         }
+    }
+    for j in (0..MAX_ORDERS).filter(|&j| dropped[j]) {
+        f.make_fee_due(j)?;
     }
 
     let mut committed_before = [0u128; MAX_SLOTS];
@@ -188,19 +193,28 @@ pub struct CloseCompletedOrder<'info> {
 }
 
 /// Permissionless: closes a tracked order GMTrade executed or cancelled but left open, returning its
-/// escrowed funds and rent to the owner PDA, and stops tracking it. Pending orders are refused. The
-/// next sync settles the slot from the position.
+/// escrowed funds and rent to the owner PDA, and stops tracking it. An executed order's fee becomes due; a cancelled
+/// one's is released, as by cancel_order (it never executed). Pending orders are refused. The next sync settles the
+/// slot from the position.
 pub(crate) fn close_completed_order(ctx: Context<CloseCompletedOrder>) -> Result<()> {
     let a = &ctx.accounts;
     require!(a.funded.is_open(), VaultError::InvalidAccountStatus);
     let order = a.gm_order.key();
     let idx = a.funded.find_order(&order).ok_or(VaultError::OrderNotTracked)?;
     require!(!gmtrade::is_pending_order(&a.gm_order, &a.config.gmtrade_program)?, VaultError::OrderPending);
+    // Read before the CPI closes the order account.
+    let cancelled = gmtrade::is_cancelled_order(&a.gm_order, &a.config.gmtrade_program)?;
     let funded_key = a.funded.key();
     let owner_seeds: &[&[u8]] = &[OWNER_SEED, funded_key.as_ref(), &[a.funded.owner_bump]];
     close_order_cpi!(a).invoke(&[owner_seeds], "completed")?;
-    ctx.accounts.funded.orders[idx] = TrackedOrder::default();
-    emit_cpi!(CompletedOrderClosed { funded: funded_key, order, ts: now()? });
+    let f = &mut ctx.accounts.funded;
+    f.orders[idx] = TrackedOrder::default();
+    if cancelled {
+        f.order_fees[idx] = 0;
+    } else {
+        f.make_fee_due(idx)?;
+    }
+    emit_cpi!(CompletedOrderClosed { funded: funded_key, order, ts: now()?, cancelled });
     Ok(())
 }
 
