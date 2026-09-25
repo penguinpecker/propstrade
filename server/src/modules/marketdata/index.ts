@@ -15,6 +15,7 @@ import { parse } from '../../errors.ts';
 import { adminAuth } from '../../routes/admin.ts';
 import type { MarketDataService, MarketState, ModuleContext } from '../types.ts';
 import { fetchAllowlist, type MarketConfigLimits } from './allowlist.ts';
+import { covers, createHistoryStore, type CandleWindow } from './history.ts';
 import { createPriceRecord, mergeCandles } from './record.ts';
 import { createUpstreams, within, type UpstreamStatus } from './upstreams.ts';
 
@@ -40,11 +41,28 @@ const MARKET_INFO_TIMEOUT_MS = 45_000; // a background refresh; the service has 
 // old answers 'live') and again this long after each bucket boundary, when the cache key rotates.
 const PREWARM_EVERY_S = 60;
 const PREWARM_AFTER_BOUNDARY_S = 2;
+// The table's copy of a series' latest window only has to reach within two buckets of now at the next boot (the
+// pre-warm then patches it, about 2 s after ready when GMTrade is quick): it is rewritten when the window's start
+// rotates or this long after its last write, not by every pre-warm (that rewrote all 340 rows of ~30 KB every minute,
+// measured 2026-09-25).
+const LATEST_STORE_EVERY_MS = 5 * 60_000;
 // Index tokens per full-window batch: 8 × 300 candles answer in 0.1-4 s depending on the span, 17 take 3 s and all 68
 // time out (measured 2026-09-24); a 3-bucket patch for all 68 takes 0.1-0.3 s. Fill order: the app's default chart
 // interval first (a fresh process gets its 24h change from one small request ahead of the fills), then 5m.
 const PREWARM_CHUNK = 8;
 const PREWARM_ORDER: CandleInterval[] = ['1h', '5m', '15m', '4h', '1D'];
+// The history backfill (after the first pre-warm pass): every series is walked in turn and its newest missing page of
+// PAGE_BARS settled bars (pages are aligned to multiples of their span, so a page never moves) is fetched and stored,
+// until the series holds BACKFILL_BARS or reaches GMTrade's history start (an empty page, stored as the marker). One
+// query at a time, only while GMTrade is idle and quick (no request fetch or pre-warm batch in flight, the candles
+// source ok and its last answer under BACKFILL_MAX_LATENCY_MS), one every BACKFILL_EVERY_MS. Measured 2026-09-25: a
+// 300-bar page answers in 0.1-0.3 s when GMTrade is idle, so the 68 markets' 1,972 pages take about 75 minutes.
+// ponytail: an empty page inside a closure (a stock's 5m page on a weekend) reads as that series' history start, as
+// the app's own scroll does; derive the start from the 1D series if that ever matters.
+const PAGE_BARS = 300;
+const BACKFILL_BARS: Record<CandleInterval, number> = { '5m': 1_000, '15m': 1_000, '1h': 2_000, '4h': 2_000, '1D': 2_000 };
+const BACKFILL_EVERY_MS = 2_000;
+const BACKFILL_MAX_LATENCY_MS = 2_000;
 
 /** What the service does while each outside source fails (reported by /v1/health). */
 const FALLBACKS: Record<string, string> = {
@@ -53,6 +71,7 @@ const FALLBACKS: Record<string, string> = {
   trades: 'Recent trades show the last list fetched.',
   marketInfo: '24h volume keeps its last value.',
   solanaRpc: 'The funded-trading allowlist keeps its last value.',
+  candleStore: 'Chart history is kept in memory only; windows fetched meanwhile are written once the database is back.',
 };
 
 /** GMTrade keeps revising a candle for seconds after its bucket closes: a window is settled once its last bucket
@@ -137,6 +156,7 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     ? ctx.log.warn({ upstream: name, since: s.since, error: s.lastError }, `marketdata: ${name} is down (${s.lastError}). ${s.fallback}`)
     : ctx.log.info({ upstream: name }, `marketdata: ${name} recovered`)));
   const record = createPriceRecord(ctx.sql);
+  const history = createHistoryStore(ctx.sql, (call) => upstreams.track('candleStore', call));
   let lastTickAt = 0;
 
   let pairs = new Map<string, Pair>();
@@ -157,14 +177,22 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
   const pinned = new Map<string, string>();
   const candleCache = new Map<string, { at: number; ttl: number; candles: Candle[] }>();
   const tradeCache = new Map<string, { at: number; trades: MarketTrade[] }>();
-  /** The latest window GMTrade returned by symbol:resolution, with its cache key: the copy a later window of the same
-   *  series answers from at once, and what the pre-warm patches. */
-  const lastGood = new Map<string, { at: number; key: string; start: number; end: number; candles: Candle[] }>();
+  /** The latest window GMTrade returned by symbol:resolution, with its cache key and when the table last got it: the
+   *  copy a later window of the same series answers from at once, and what the pre-warm patches. */
+  const lastGood = new Map<string, { at: number; storedAt: number; key: string; start: number; end: number; candles: Candle[] }>();
   /** When each resolution was last pre-warmed (unix seconds) and the bucket it saw then. */
   const warmed = new Map<number, { at: number; bucket: number }>();
   /** The pre-warm batch GMTrade is answering, if any: a request's own fetch queues behind it. */
   let filling: Promise<unknown> | null = null;
   const inflight = new Map<string, Promise<unknown>>();
+  /** The backfill's query in flight, if any (a pre-warm batch waits behind it); whether the first pre-warm pass is
+   *  over (it starts the backfill); the page in progress when each series was last found complete (revisited once it
+   *  rotates), and the series the walk visits next; how many series the table restored at boot. */
+  let backfilling: Promise<unknown> | null = null;
+  let warmedOnce = false;
+  const backfilled = new Map<string, number>();
+  let backfillCursor = 0;
+  let warmFromTable = 0;
 
   /** One upstream call per key at a time. It runs to the end even when no request waits for it any more. */
   function shared<T>(key: string, call: () => Promise<T>): Promise<T> {
@@ -182,7 +210,7 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
    *  `filling` while it runs, for the fetches that queue behind it. The pre-warm can wait: under constant misses, the
    *  requests keep the copies they ask for fresh themselves. */
   async function fillBatch(call: () => Promise<Map<string, Candle[]>>) {
-    const running = () => [...inflight].flatMap(([key, p]) => (key.startsWith('candles:') ? [p] : []));
+    const running = () => [...inflight].flatMap(([key, p]) => (key.startsWith('candles:') ? [p] : [])).concat(backfilling ? [backfilling] : []);
     for (let busy = running(); busy.length; busy = running()) await Promise.allSettled(busy);
     const batch = upstreams.track('candles', call);
     filling = batch;
@@ -201,15 +229,25 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
   }
 
   /** Caches a window GMTrade returned. The latest window of a series also becomes its copy, evicting the key it
-   *  rotated from; a refresh that finished after the key rotated never replaces a newer copy. */
+   *  rotated from; a refresh that finished after the key rotated never replaces a newer copy. The copy (once it rotated,
+   *  or LATEST_STORE_EVERY_MS after its last write) and every settled window with candles are written through to the
+   *  table (only GMTrade's own answers reach here, never a fallback). A settled window GMTrade answered empty stays in
+   *  memory only: stored, it would answer that range empty from every process for good, and the backfill would take it
+   *  for the series' history start, while the answer may be a transient one (a backend hiccup lists no candles without
+   *  an error). */
   function remember(symbol: string, res: number, w: ReturnType<typeof candleWindow>, list: Candle[], nowSec: number) {
     const key = candleKey(symbol, res, w);
     if (candleCache.size >= 1_000) candleCache.delete(candleCache.keys().next().value!);
     candleCache.set(key, { at: Date.now(), ttl: candleCacheTtl(w.end, res, nowSec), candles: list });
+    const isSettled = settled(w.end, res, nowSec);
     const prev = lastGood.get(`${symbol}:${res}`);
-    if (!w.latest || (prev && prev.end > w.end)) return;
-    if (prev && prev.key !== key) candleCache.delete(prev.key);
-    lastGood.set(`${symbol}:${res}`, { at: Date.now(), key, start: w.start, end: w.end, candles: list });
+    const copy = w.latest && !(prev && prev.end > w.end);
+    const rewrite = copy && (!prev || prev.start !== w.start || Date.now() - prev.storedAt >= LATEST_STORE_EVERY_MS);
+    if (copy) {
+      if (prev && prev.key !== key) candleCache.delete(prev.key);
+      lastGood.set(`${symbol}:${res}`, { at: Date.now(), storedAt: rewrite || !prev ? Date.now() : prev.storedAt, key, start: w.start, end: w.end, candles: list });
+    }
+    if (rewrite || (isSettled && list.length)) history.put({ symbol, res, start: w.start, end: w.end, candles: list, settled: isSettled, at: Date.now() });
   }
 
   const limits = ({ category, marketToken, pureUsdc }: { category: MarketCategory; marketToken: string; pureUsdc: boolean }): PropsLimits => {
@@ -371,6 +409,70 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
       await warm(res, nowSec).catch(() => {});
       await refreshOpens24h(false);
     }
+    warmedOnce = true;
+  }
+
+  /** Every market's index token by symbol × interval, the order the backfill walks. */
+  const allSeries = () => [...indexTokens()].flatMap(([symbol, token]) => PREWARM_ORDER.map((interval) => ({ symbol, token, interval })));
+
+  /** One backfill visit (see BACKFILL_BARS): the next series whose completeness is unknown, or known from an earlier
+   *  page, gets its newest missing page fetched and stored. The table is re-read on every visit, so a restart resumes
+   *  where the last process stopped and a page fetched for a request is never fetched again. */
+  async function backfill() {
+    if (!warmedOnce || filling || [...inflight.keys()].some((key) => key.startsWith('candles:'))) return;
+    const source = upstreams.status('candles');
+    if (source.state !== 'ok' || (source.latencyMs ?? Infinity) >= BACKFILL_MAX_LATENCY_MS) return;
+    const series = allSeries();
+    const nowSec = Math.floor(Date.now() / 1000);
+    const pageOf = (res: number) => Math.floor(nowSec / (PAGE_BARS * res)); // the page in progress: the series' latest window covers it
+    let pick: (typeof series)[number] | undefined;
+    for (let i = 0; i < series.length && !pick; i++) {
+      const s = series[backfillCursor]!;
+      backfillCursor = (backfillCursor + 1) % series.length;
+      if (backfilled.get(`${s.symbol}:${INTERVAL_SECONDS[s.interval]}`) !== pageOf(INTERVAL_SECONDS[s.interval])) pick = s;
+    }
+    if (!pick) return;
+    const { symbol, token, interval } = pick;
+    const res = INTERVAL_SECONDS[interval];
+    const span = PAGE_BARS * res;
+    const current = pageOf(res);
+    const coverage = await history.coverage(symbol, res).catch(() => null);
+    if (!coverage) return; // the database is unreachable: the store logged the outage once; the next visit asks again
+    const { ranges, historyEnd: firstHistoryEnd } = coverage;
+    if (filling || [...inflight.keys()].some((key) => key.startsWith('candles:'))) return; // a fetch began meanwhile
+    let historyEnd = firstHistoryEnd;
+    /** The newest page not stored; 'done' when they all are back to BACKFILL_BARS or the next lies before GMTrade's
+     *  history start, 'wait' when it has not settled yet. */
+    const next = (): { start: number; end: number } | 'done' | 'wait' => {
+      for (let k = 1; k <= Math.ceil(BACKFILL_BARS[interval] / PAGE_BARS); k++) {
+        const start = (current - k) * span;
+        const end = start + (PAGE_BARS - 1) * res;
+        if (covers(ranges, start, end, res)) continue;
+        if (end <= historyEnd) return 'done';
+        return settled(end, res, nowSec) ? { start, end } : 'wait';
+      }
+      return 'done';
+    };
+    const page = next();
+    if (typeof page === 'string') {
+      if (page === 'done') backfilled.set(`${symbol}:${res}`, current);
+      return;
+    }
+    const fetching = upstreams.track('candles', () => gm.fetchCandles(token, res, page.start, page.end));
+    backfilling = fetching;
+    let list: Candle[];
+    try {
+      list = await fetching;
+    } finally {
+      backfilling = null;
+    }
+    history.put({ symbol, res, start: page.start, end: page.end, candles: list, settled: true, at: Date.now() });
+    if (!(await history.flush())) return; // not stored: the next visit fetches it again
+    ranges.push(page);
+    if (!list.length) historyEnd = Math.max(historyEnd, page.end);
+    if (next() !== 'done') return;
+    backfilled.set(`${symbol}:${res}`, current);
+    ctx.log.info({ symbol, interval, windows: ranges.length, historyStart: !list.length }, `marketdata: ${symbol} ${interval} history backfilled`);
   }
 
   async function refreshAllowlist() {
@@ -411,6 +513,8 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
   });
 
   const ready = (async () => {
+    // Every series' latest window from the table, read while the snapshot loads: the copies a restart would have lost.
+    const restoring = history.latest().catch((err) => (ctx.log.warn({ err }, 'marketdata: candle history could not be read'), [] as CandleWindow[]));
     for (let attempt = 0; ; attempt++) {
       try {
         await feed.start();
@@ -443,7 +547,17 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     });
     every(5_000, 'market publish', publishChangedMarkets);
     every(60_000, 'market-info', refreshPairs, 3);
+    // The restored copies are in place before the pre-warm runs, so it only patches them and a restart costs nothing. A
+    // request served meanwhile (the allowlist read above is a round trip) may have fetched a fresher copy: that one stays.
+    for (const w of await restoring) {
+      if ((lastGood.get(`${w.symbol}:${w.res}`)?.at ?? 0) < w.at) {
+        lastGood.set(`${w.symbol}:${w.res}`, { at: w.at, storedAt: w.at, key: candleKey(w.symbol, w.res, w), start: w.start, end: w.end, candles: w.candles });
+      }
+      warmFromTable += 1;
+    }
     every(1_000, 'candle pre-warm', prewarm);
+    every(1_000, 'candle history', history.flush);
+    every(BACKFILL_EVERY_MS, 'candle backfill', backfill);
     if (programId) every(60_000, 'allowlist', refreshAllowlist, 3);
     every(60_000, 'price record', record.flush);
     every(3_600_000, 'price record pruning', record.prune);
@@ -467,21 +581,33 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     const cached = candleCache.get(key);
     const base = { symbol: row.symbol, interval, source: 'gmtrade' as const };
     if (cached && Date.now() - cached.at < cached.ttl) return { ...base, candles: cached.candles, freshness: 'live' };
-    // One refresh of this exact window runs in the background whatever answers below; it caches only when it succeeds.
-    const fetching = shared(`candles:${key}`, () => upstreams.track('candles', () => gm.fetchCandles(pool.meta!.indexToken.pubkey, res, w.start, w.end))
-      .then((list) => (remember(row.symbol, res, w, list, nowSec), list)));
     // A copy answers at once: this window's expired entry or the series' latest window (the bucket before this one,
     // when the key has just rotated), whichever GMTrade returned last. It is 'live' for a settled window it reaches
     // the end of (final candles) and, under two minutes old and ending at the current or previous bucket, for the
     // latest one (live ticks move its last candle in the app); otherwise the price record completes it and it is
     // 'delayed'.
+    const isSettled = settled(w.end, res, nowSec);
     const latest = lastGood.get(`${row.symbol}:${res}`);
     const copy = latest && latest.start <= w.start && (!cached || latest.at > cached.at)
       ? { at: latest.at, end: latest.end, candles: latest.candles.filter((c) => c.time >= w.start && c.time <= w.end) }
       : cached && { at: cached.at, end: w.end, candles: cached.candles };
-    if (copy && ((settled(w.end, res, nowSec) && copy.end >= w.end) || (copy.end >= w.nowBucket - res && Date.now() - copy.at < 120_000))) {
-      return { ...base, candles: copy.candles, freshness: 'live' };
+    const fromCopy = copy && ((isSettled && copy.end >= w.end) || (copy.end >= w.nowBucket - res && Date.now() - copy.at < 120_000));
+    // A copy reaching the window's end answers without a refresh: final candles for a settled window, and for the latest
+    // one the pre-warm patches the copy every minute (after a restart, the table's copies answer without one call).
+    if (fromCopy && copy.end >= w.end) return { ...base, candles: copy.candles, freshness: 'live' };
+    // A settled window the table covers (stored pages, windows fetched before) is final too: no GMTrade call.
+    if (isSettled) {
+      const stored = await history.covering(row.symbol, res, w.start, w.end, latest).catch(() => null);
+      if (stored) {
+        candleCache.set(key, { at: Date.now(), ttl: candleCacheTtl(w.end, res, nowSec), candles: stored });
+        return { ...base, candles: stored, freshness: 'live' };
+      }
     }
+    // One refresh of this exact window runs in the background whatever answers below; it caches (and, settled, stores)
+    // only when it succeeds.
+    const fetching = shared(`candles:${key}`, () => upstreams.track('candles', () => gm.fetchCandles(pool.meta!.indexToken.pubkey, res, w.start, w.end))
+      .then((list) => (remember(row.symbol, res, w, list, nowSec), list)));
+    if (fromCopy) return { ...base, candles: copy.candles, freshness: 'live' }; // a bucket short: the refresh fills the rotated key
     const recorded = await record.candles(row.symbol, res, w.start, w.end).catch(() => []);
     const list = mergeCandles(copy?.candles ?? [], recorded);
     if (list.length) return { ...base, candles: list, freshness: 'delayed' };
@@ -521,7 +647,7 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
     return within(fetching, TRADES_WAIT_MS);
   }
 
-  /** Each outside source's state, for /v1/health. */
+  /** Each outside source's state, for /v1/health; the candles source also carries the chart history's state. */
   function health(): Record<string, UpstreamStatus> {
     const silentMs = Date.now() - lastTickAt;
     const priceFeed: UpstreamStatus = {
@@ -530,7 +656,11 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
       lastError: !lastTickAt ? 'no price received yet' : silentMs > 60_000 ? `no price for ${Math.round(silentMs / 1000)} s`
         : feed.mode === 'poll' ? 'live stream reconnecting' : null,
     };
-    return { priceFeed, ...upstreams.report() };
+    const candles: UpstreamStatus = {
+      ...upstreams.status('candles'),
+      history: { seriesWarmAtBoot: warmFromTable, backfill: { seriesDone: backfilled.size, seriesTotal: started ? allSeries().length : 0, windowsStored: history.stored() } },
+    };
+    return { priceFeed, ...upstreams.report(), candles };
   }
 
   async function quote(symbol: string, side: 'Long' | 'Short', sizeUsd: string): Promise<PriceImpactQuote> {

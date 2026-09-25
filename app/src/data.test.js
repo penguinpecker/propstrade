@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { compactUsd, freshnessLabel, isCurrent, marginFor, marketPrice, percent, pickMarkets, signedUsd, stageRestriction, tierRules, usd, usdBase } from './data.js';
+import { WATCHLIST_MAX, compactUsd, freshnessLabel, isCurrent, marginFor, marketPrice, percent, pickMarkets, signedUsd, stageRestriction, tierRules, toggleWatchlist, usd, usdBase, validWatchlist } from './data.js';
 
 describe('formatters', () => {
   it('show a dash for values the API reports as unavailable', () => {
@@ -68,6 +68,21 @@ describe('stageRestriction', () => {
     expect(stageRestriction(btc, 'evaluation', USDC)).toBeNull();
     expect(stageRestriction(doge, 'practice', USDC)).toBeNull();
     expect(stageRestriction(aave, 'practice', USDC)).toEqual({ label: 'Not available in practice', reason: 'AAVE has no USDC-only pool on GMTrade, so it cannot be traded here.' });
+  });
+});
+
+describe('watchlist', () => {
+  const full = Array.from({ length: WATCHLIST_MAX }, (_, i) => `M${i}`);
+  it('reads only symbol-shaped strings from storage, each once, capped; anything but a list is the fallback', () => {
+    expect(validWatchlist(['BTC', 'BTC', 'btc', 1, null, 'X'.repeat(17), 'BAD SYM', {}, ['SOL']], ['ETH'])).toEqual(['BTC', 'btc']);
+    expect(validWatchlist([...full, 'ONE MORE', 'M99'], [])).toEqual(full);
+    for (const junk of ['BTC', { 0: 'BTC' }, 12, null]) expect(validWatchlist(junk, ['ETH'])).toEqual(['ETH']);
+  });
+  it('adds a symbol last, removes one, and leaves a full watchlist as it is', () => {
+    expect(toggleWatchlist(['BTC'], 'ETH')).toEqual(['BTC', 'ETH']);
+    expect(toggleWatchlist(['BTC', 'ETH'], 'BTC')).toEqual(['ETH']);
+    expect(toggleWatchlist(full, 'ETH')).toBe(full);
+    expect(toggleWatchlist(full, 'M0')).toEqual(full.slice(1));
   });
 });
 

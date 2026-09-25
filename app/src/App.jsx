@@ -1,8 +1,8 @@
 import React, { createContext, lazy, Suspense, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { ArrowRight, ArrowUpRight, Bell, BookOpen, Check, ChevronDown, ExternalLink, HelpCircle, LayoutGrid, Menu, Moon, Search, ShieldCheck, Sun, Wallet, X } from 'lucide-react';
-import { MARKET_TABS, dateTime, explorerAddress, explorerTx, freshnessLabel, isCurrent, marketPrice, percent, pickMarkets, shortAddress, stageRestriction, tierRules, usd } from './data.js';
-import { Badge, Brand, Button, DataRow, Dialog, Empty, FreshnessBadge, IconButton, InlineLink, MarketIcon, Notice, Pending, RuleList, SessionNotice, Tabs, Unavailable, WalletOptions } from './ui.jsx';
+import { MARKET_TABS, WATCHLIST_MAX, dateTime, explorerAddress, explorerTx, freshnessLabel, isCurrent, marketPrice, percent, pickMarkets, shortAddress, stageRestriction, tierRules, toggleWatchlist, usd, validWatchlist } from './data.js';
+import { Badge, Brand, Button, DataRow, Dialog, Empty, FreshnessBadge, IconButton, InlineLink, MarketIcon, Notice, Pending, RuleList, SessionNotice, Tabs, Unavailable, WalletOptions, WatchlistStar } from './ui.jsx';
 import Trading from './Trading.jsx';
 import { AccountsPage, AccountPage, PerformancePage, ActivityPage, MarketsPage } from './Workspace.jsx';
 import { FundingPage, ProgramPage, ConnectPage, CheckoutPage, PaymentPage, ResultPage, ActivationPage } from './Onboarding.jsx';
@@ -19,11 +19,13 @@ const STREAM_LABELS = { connecting: 'Connecting to live data…', connected: 'Li
 const NETWORK_LABEL = env.cluster === 'mainnet-beta' ? 'Solana' : 'Solana · Localnet';
 /** Which notification kinds each preference toggle controls; account notices always show. */
 const NOTIFICATION_PREFS = { fill: 'fills', risk: 'risk', payout: 'payouts' };
+const DEFAULT_WATCHLIST = ['BTC', 'ETH', 'SOL', 'XAU'];
 
 const AppContext = createContext(null);
 export const useApp = () => useContext(AppContext);
 const read = (key, fallback) => { try { const value = localStorage.getItem('props.' + key); return value ? JSON.parse(value) : fallback; } catch { return fallback; } };
-export function useSaved(key, fallback) { const [value, setValue] = useState(() => read(key, fallback)); useEffect(() => { try { localStorage.setItem('props.' + key, JSON.stringify(value)); } catch { /* private mode: keep it for this visit */ } }, [key, value]); return [value, setValue]; }
+/** `init` maps what was read (a trust boundary) to the first value: validation, or a start value that then gets saved. */
+export function useSaved(key, fallback, init = value => value) { const [value, setValue] = useState(() => init(read(key, fallback))); useEffect(() => { try { localStorage.setItem('props.' + key, JSON.stringify(value)); } catch { /* private mode: keep it for this visit */ } }, [key, value]); return [value, setValue]; }
 /** An empty hash opens the terminal of the stage the trader last worked in. */
 const parseHash = () => { const [path, search = ''] = location.hash.slice(1).split('?'); return { path: path && path !== '/' ? path : `/trade/${read('stage', 'funded')}`, query: new URLSearchParams(search) }; };
 /** Pages that show one account: `?id=` names it (notification, past-account and result links), else the stage's account. */
@@ -41,7 +43,7 @@ export default function App() {
   const queryClient = useQueryClient();
   const session = useSession();
   const signedIn = session.status === 'signed-in';
-  const [favorites, setFavorites] = useSaved('favorites', ['BTC', 'ETH', 'SOL', 'XAU']);
+  const [favorites, setFavorites] = useSaved('favorites', DEFAULT_WATCHLIST, saved => validWatchlist(saved, DEFAULT_WATCHLIST));
   const [prefs, setPrefs] = useSaved('preferences', { fills: true, risk: true, payouts: true, density: 'Comfortable', currency: 'USD', motion: false, theme: 'dark' });
   const theme = prefs.theme === 'light' ? 'light' : 'dark';
   const setTheme = next => setPrefs(prev => ({ ...prev, theme: next }));
@@ -50,6 +52,8 @@ export default function App() {
   const [mobileNav, setMobileNav] = useState(false);
   const showsNotification = n => n.kind === 'account' || prefs[NOTIFICATION_PREFS[n.kind]] !== false;
   const notify = useCallback((message, detail = '') => setToast({ message, detail, key: Date.now() }), []);
+  /** Stars a market or unstars it; a full watchlist says so instead of adding. */
+  const toggleFavorite = symbol => { const next = toggleWatchlist(favorites, symbol); if (next === favorites) notify('Your watchlist is full', `It holds ${WATCHLIST_MAX} markets. Unstar one to add another.`); else setFavorites(next); };
   const streamStatus = useStream(`${env.apiUrl}/v1/stream`, session.me?.wallet ?? '', event => {
     applyStreamEvent(queryClient, event);
     if (event.type === 'notification' && showsNotification(event.notification)) notify(event.notification.title, event.notification.body);
@@ -92,7 +96,7 @@ export default function App() {
   const selectAccount = (next, to = path.startsWith('/trade') ? 'trade' : 'account') => { setSelected(prev => ({ ...prev, [next.stage]: next.id })); setStage(next.stage); navigate(`/${to}/${next.stage}`); };
   const copy = async (value) => { try { await navigator.clipboard.writeText(value); notify('Copied to clipboard'); } catch { notify('Copy unavailable', 'Select the address and copy it manually.'); } };
   const openRecord = record => setModal({ type: 'record', record });
-  const value = { path, query, navigate, stage, setStage, config, tiers, tier, setTierId, markets, marketsQuery, market, marketSymbol, selectMarket, accounts, accountsQuery, account, accountFor, selectAccount, session, signedIn, favorites, setFavorites, prefs, setPrefs, theme, setTheme, modal, setModal, closeModal, notify, streamStatus, live, openRecord, copy, showsNotification, notificationsQuery };
+  const value = { path, query, navigate, stage, setStage, config, tiers, tier, setTierId, markets, marketsQuery, market, marketSymbol, selectMarket, accounts, accountsQuery, account, accountFor, selectAccount, session, signedIn, favorites, toggleFavorite, prefs, setPrefs, theme, setTheme, modal, setModal, closeModal, notify, streamStatus, live, openRecord, copy, showsNotification, notificationsQuery };
   const currentSection = path.startsWith('/trade') || path === '/markets' ? 'Trade' : ['/payouts', '/payout/review', '/payout/receipt'].includes(path) ? 'Payouts' : ['/verify', '/vault'].includes(path) ? 'Verify' : path.includes('account') || ['/performance', '/activity', '/result', '/activate'].includes(path) ? 'Accounts' : '';
   const navItems = [['Trade', `/trade/${stage}`], ['Accounts', '/accounts'], ['Payouts', '/payouts'], ['Verify', '/verify']];
   let page;
@@ -127,7 +131,7 @@ export default function App() {
     <footer className="app-footer"><div><span className={`connection-dot ${live ? '' : 'offline'}`} /><span role="status">{STREAM_LABELS[streamStatus]}</span></div><div>{ScreenIndex && <a href="#/screens"><LayoutGrid size={12} /> Screen index</a>}<button onClick={() => setModal('rules')}>Rules</button><button onClick={() => setModal('help')}><HelpCircle size={13} /> Help</button><span className="network-label">{NETWORK_LABEL} <span className="solana-lines" aria-hidden="true"><i /><i /><i /></span></span></div></footer>
   </div>
   {toast && <div className="toast" role="status" key={toast.key}><span className="toast-check"><Check size={16} /></span><div><strong>{toast.message}</strong>{toast.detail && <p>{toast.detail}</p>}</div><IconButton icon={X} label="Dismiss notification" onClick={() => setToast(null)} /></div>}
-  {modal === 'markets' && <MarketPicker onClose={closeModal} />}
+  {(modal === 'markets' || modal?.type === 'markets') && <MarketPicker onClose={closeModal} tab={modal?.tab ?? null} />}
   {modal === 'accounts' && <AccountSwitcher onClose={closeModal} />}
   {modal === 'wallet' && <WalletDialog session={session} onClose={closeModal} navigate={navigate} notify={notify} />}
   {modal === 'rules' && <RulesDialog onClose={closeModal} />}
@@ -137,11 +141,18 @@ export default function App() {
   </AppContext.Provider>;
 }
 
-/** "Find a market": category tabs (the last one used is remembered), sub-category chips and a search within them. */
-function MarketPicker({ onClose }) {
-  const { markets, marketsQuery, favorites, selectMarket, stage, config } = useApp();
+/**
+ * "Find a market": category tabs (the one clicked last is remembered; opened on a given `tab`, as the watchlist bar's
+ * "+" opens All, where markets can be added, that tab is shown until one is clicked and not remembered), sub-category
+ * chips and a search within them. A star on every row adds the market to the watchlist or removes it, without
+ * choosing it.
+ */
+function MarketPicker({ onClose, tab: startTab }) {
+  const { markets, marketsQuery, favorites, toggleFavorite, selectMarket, stage, config } = useApp();
   const [savedTab, setTab] = useSaved('marketTab', 'All');
-  const tab = MARKET_TABS.includes(savedTab) ? savedTab : 'All';
+  const [shownTab, setShownTab] = useState(startTab);
+  const wanted = shownTab ?? savedTab;
+  const tab = MARKET_TABS.includes(wanted) ? wanted : 'All';
   const [chosen, setSubcategory] = useState(null);
   const [search, setSearch] = useState('');
   const input = useRef(null);
@@ -153,9 +164,9 @@ function MarketPicker({ onClose }) {
   // Every new selection starts at its first market, not at the scroll position of the last one.
   useEffect(() => { list.current.scrollTop = 0; }, [tab, subcategory, search]);
   const loaded = marketsQuery.isSuccess;
-  const chooseTab = next => { setTab(next); setSubcategory(null); };
+  const chooseTab = next => { setShownTab(null); setTab(next); setSubcategory(null); };
   const where = subcategory ? `${tab} › ${subcategory}` : tab === 'Watchlist' ? 'your watchlist' : tab;
-  return <Dialog title="Find a market" className="market-picker" onClose={onClose}><div className="search-field"><Search size={17} /><input ref={input} placeholder="Search markets, symbols or asset classes" aria-label="Search markets" value={search} onChange={e => setSearch(e.target.value)} /><kbd>ESC</kbd></div><Tabs className="picker-tabs" items={MARKET_TABS.map(t => ({ value: t, label: <>{t}{loaded && <span className="quiet">{counts[t]}</span>}</> }))} value={tab} onChange={chooseTab} />{loaded && subcategories.length > 0 && <div className="period-control picker-groups" role="group" aria-label={`${tab} sub-categories`}>{[[null, `All ${tab}`, counts[tab]], ...subcategories.map(([name, size]) => [name, name, size])].map(([value, label, size]) => <button key={label} aria-pressed={subcategory === value} className={subcategory === value ? 'active' : ''} onClick={() => setSubcategory(value)}>{label} <span className="quiet">{size}</span></button>)}</div>}<div className="market-picker-list" ref={list}>{marketsQuery.isPending ? <Pending>Loading GMTrade markets…</Pending> : marketsQuery.isError ? <Unavailable title="Markets are unavailable" error={marketsQuery.error} retry={marketsQuery.refetch} /> : rows.map(m => <button key={m.symbol} onClick={() => selectMarket(m.symbol)}><MarketIcon market={m} /><span><strong>{m.pair}</strong><small>{m.name} · {stageRestriction(m, stage, config.data?.usdcMint)?.label ?? 'Perpetual'}</small></span><span className="picker-price"><strong>{marketPrice(m.price, m)}</strong>{freshnessLabel(m) ? <FreshnessBadge market={m} /> : <small className={m.change24h > 0 ? 'positive' : 'negative'}>{percent(m.change24h)}</small>}</span><ArrowUpRight size={15} /></button>)}<div role="status">{loaded && !rows.length && (search && matchesAnywhere ? <Empty title={`No match in ${where}`} action={<Button variant="secondary" small onClick={() => { chooseTab('All'); input.current.focus(); }}>Search all markets</Button>}>“{search}” matches {matchesAnywhere} {matchesAnywhere === 1 ? 'market' : 'markets'} elsewhere.</Empty> : tab === 'Watchlist' && !search ? <Empty title="Your watchlist is empty">Star a market on the Markets page to add it here.</Empty> : <Empty title="No matching market">Try a symbol such as BTC or an asset class.</Empty>)}</div></div><p className="dialog-note">{markets.length ? `${markets.length} GMTrade perpetual markets. Prices update live.` : 'Markets come from GMTrade.'}</p></Dialog>;
+  return <Dialog title="Find a market" className="market-picker" onClose={onClose}><div className="search-field"><Search size={17} /><input ref={input} placeholder="Search markets, symbols or asset classes" aria-label="Search markets" value={search} onChange={e => setSearch(e.target.value)} /><kbd>ESC</kbd></div><Tabs className="picker-tabs" items={MARKET_TABS.map(t => ({ value: t, label: <>{t}{loaded && <span className="quiet">{counts[t]}</span>}</> }))} value={tab} onChange={chooseTab} />{loaded && subcategories.length > 0 && <div className="period-control picker-groups" role="group" aria-label={`${tab} sub-categories`}>{[[null, `All ${tab}`, counts[tab]], ...subcategories.map(([name, size]) => [name, name, size])].map(([value, label, size]) => <button key={label} aria-pressed={subcategory === value} className={subcategory === value ? 'active' : ''} onClick={() => setSubcategory(value)}>{label} <span className="quiet">{size}</span></button>)}</div>}<div className="market-picker-list" ref={list}>{marketsQuery.isPending ? <Pending>Loading GMTrade markets…</Pending> : marketsQuery.isError ? <Unavailable title="Markets are unavailable" error={marketsQuery.error} retry={marketsQuery.refetch} /> : rows.map(m => <div className="picker-row" key={m.symbol}><button className="picker-market" onClick={() => selectMarket(m.symbol)}><MarketIcon market={m} /><span><strong>{m.pair}</strong><small>{m.name} · {stageRestriction(m, stage, config.data?.usdcMint)?.label ?? 'Perpetual'}</small></span><span className="picker-price"><strong>{marketPrice(m.price, m)}</strong>{freshnessLabel(m) ? <FreshnessBadge market={m} /> : <small className={m.change24h > 0 ? 'positive' : 'negative'}>{percent(m.change24h)}</small>}</span><ArrowUpRight size={15} /></button><WatchlistStar symbol={m.symbol} watched={favorites.includes(m.symbol)} onToggle={toggleFavorite} /></div>)}<div role="status">{loaded && !rows.length && (search && matchesAnywhere ? <Empty title={`No match in ${where}`} action={<Button variant="secondary" small onClick={() => { chooseTab('All'); input.current.focus(); }}>Search all markets</Button>}>“{search}” matches {matchesAnywhere} {matchesAnywhere === 1 ? 'market' : 'markets'} elsewhere.</Empty> : tab === 'Watchlist' && !search ? <Empty title="Your watchlist is empty">Star a market in another tab to add it here.</Empty> : <Empty title="No matching market">Try a symbol such as BTC or an asset class.</Empty>)}</div></div><p className="dialog-note">{favorites.length >= WATCHLIST_MAX ? `Your watchlist is full: it holds ${WATCHLIST_MAX} markets. Unstar one to add another.` : markets.length ? `${markets.length} GMTrade perpetual markets. Prices update live.` : 'Markets come from GMTrade.'}</p></Dialog>;
 }
 
 function AccountSwitcher({ onClose }) {
