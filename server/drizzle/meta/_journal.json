@@ -64,6 +64,13 @@
       "when": 1790321315369,
       "tag": "0008_white_label_order_notes",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1790360930415,
+      "tag": "0009_referrals",
+      "breakpoints": true
     }
   ]
 }

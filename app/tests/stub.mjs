@@ -170,10 +170,40 @@ function createWallet(state, wallet) {
   w.history[funded].push({ id: 'funded-trade-0', symbol: 'BTC', side: 'Long', openedAt: now - 3 * DAY, closedAt: now - 2 * DAY, sizeUsd: '8200', entryPrice: '63842.5', exitPrice: '64412.8', ...costs('4.92', '4.10', '0.50', '0.32', '0.18'), netPnl: '312.50', venue: 'exchange', signatures: [fakeSignature('funded-open'), fakeSignature('funded-close')] });
   w.payouts.push(payout(w, 0, 'paid', now - 2 * DAY));
   w.payoutSeq = 1;
+  // Referrals: three traders signed up with this wallet's code; the funded one's fills paid these rewards (10% of each fee).
+  const referees = [0, 1, 2].map(i => fakeKey(`referee:${wallet}:${i}`));
+  w.referral = {
+    code: referralCode(state, wallet), by: null, createdAt: now - 30 * DAY, paidUsd: '5',
+    referees: referees.map((referee, i) => ({ wallet: referee, evaluation: i < 2, funded: i === 0, volumeUsd: i === 0 ? '118060' : '0' })),
+    rewards: [['BTC', '49.2', 2 * HOUR], ['ETH', '18', 6 * HOUR], ['SOL', '3.6', 2 * DAY], ['SOL', '0.036', 3 * DAY]]
+      .map(([symbol, feeUsd, ago]) => ({ at: now - ago, referee: referees[0], symbol, feeUsd, rewardUsd: String(Number(feeUsd) / 10) })),
+  };
   state.wallets.set(wallet, w);
   state.accounts.set(traderProfilePda(owner).toBase58(), { owner: PROGRAM_ID, encode: () => encodeAccount('traderProfile', { wallet: owner, identityHash: Array(32).fill(7), verifiedAt: new BN(0), activeFunded: 1, evaluationCount: 2, bump: 255 }) });
   state.accounts.set(funded, { owner: PROGRAM_ID, encode: () => encodeAccount('fundedAccount', fundedAccount(w)) });
   return w;
+}
+
+/** A wallet's referral code, as the server gives it: the first 8 characters of the address upper-cased, more while another wallet holds those. */
+function referralCode(state, wallet) {
+  for (let n = 8; ; n += 1) {
+    const code = wallet.slice(0, n).toUpperCase();
+    const owner = state.referralCodes.get(code);
+    if (!owner || owner === wallet) { state.referralCodes.set(code, wallet); return code; }
+  }
+}
+
+/** GET /v1/me/referrals. The window to bind a referrer: none yet, 7 days from the first sign-in, nothing bought but practice. */
+function referralSummary(state, w) {
+  const r = w.referral;
+  const earned = r.rewards.reduce((sum, x) => sum + Number(x.rewardUsd), 0);
+  const open = !r.by && Date.now() < r.createdAt + 7 * DAY && !w.accounts.some(a => a.stage !== 'practice');
+  return {
+    code: r.code, referredBy: r.by && state.wallets.get(r.by).referral.code, canSetReferrer: open, setReferrerUntil: open ? r.createdAt + 7 * DAY : null, rewardBps: 1000,
+    referees: r.referees.length, refereesWithEvaluation: r.referees.filter(x => x.evaluation).length, refereesFunded: r.referees.filter(x => x.funded).length,
+    fundedVolumeUsd: String(r.referees.reduce((sum, x) => sum + Number(x.volumeUsd), 0)),
+    earnedUsd: earned.toFixed(6), paidUsd: r.paidUsd, pendingUsd: (earned - Number(r.paidUsd)).toFixed(6), recent: r.rewards.map(x => ({ ...x, referee: `${x.referee.slice(0, 4)}…${x.referee.slice(-4)}` })), // the server masks referees
+  };
 }
 
 function fundedAccount(w) {
@@ -212,6 +242,7 @@ export async function startStub() {
   const state = {
     genesis: MAINNET_GENESIS, streamUp: true, streamDelayMs: 0, closeDelayMs: 1000, cancelNextClose: null, sessions: new Map(), nonces: new Map(), streams: new Set(), logouts: 0, signatures: 0,
     markets: MARKETS.map(m => market(m)), wallets: new Map(), accounts: new Map(), statuses: new Map(), sent: [], simulationLogs: null, simulations: 0, blockHeight: 10, trustKeys: new Map(),
+    referralCodes: new Map(), referrerPosts: 0,
   };
   for (const t of TIERS) state.accounts.set(tierPda(t.id).toBase58(), { owner: PROGRAM_ID, encode: () => tierAccount(t) });
   for (const m of state.markets) for (const [address, account] of onchainMarket(m)) state.accounts.set(address, account);
@@ -376,6 +407,23 @@ export async function startStub() {
         return send(res, 204, undefined, { 'set-cookie': 'props_session=; Max-Age=0; Path=/' });
       case 'GET /v1/me':
         return w ? send(res, 200, { wallet, kyc: w.kyc, profile: traderProfilePda(new PublicKey(wallet)).toBase58(), usdcBalance: '1234.5', solBalance: '0.25' }) : send(res, 401, { error: { code: 'unauthorized', message: 'Sign in required.' } });
+      case 'GET /v1/me/referrals': return needWallet() || send(res, 200, referralSummary(state, w));
+      case 'POST /v1/me/referrer': {
+        if (needWallet()) return;
+        state.referrerPosts += 1;
+        // The server's checks, in its order and words (server/src/routes/referrals.ts).
+        const r = w.referral;
+        const refuse = (status, code, message) => send(res, status, { error: { code, message } });
+        if (r.by) return refuse(409, 'already_referred', 'You already have a referrer, and it cannot be changed');
+        if (Date.now() >= r.createdAt + 7 * DAY) return refuse(403, 'referral_window_closed', 'A referral code can only be added in the first 7 days after your first sign-in');
+        if (w.accounts.some(a => a.stage !== 'practice')) return refuse(403, 'referral_window_closed', 'A referral code can only be added before you buy an evaluation');
+        const referrer = state.referralCodes.get(String(body.code ?? '').trim().toUpperCase());
+        if (!referrer) return refuse(404, 'unknown_referral_code', 'No such referral code');
+        if (referrer === wallet) return refuse(422, 'own_referral_code', 'You cannot use your own referral code');
+        r.by = referrer;
+        walletData(referrer).referral.referees.push({ wallet, evaluation: false, funded: false, volumeUsd: '0' });
+        return send(res, 200, referralSummary(state, w));
+      }
       case 'POST /v1/kyc/start':
         if (needWallet()) return;
         w.kyc = 'pending';
@@ -469,6 +517,10 @@ export async function startStub() {
       const p = w.payouts.find(x => x.id === match[1]);
       return p ? send(res, 200, p) : notFound(res);
     }
+    if (route === 'GET /v1/referrals') return send(res, 200, { rewardBps: 1000 });
+    // Public: whether a referral code exists, in any case (a wallet gets its code when the stub first serves it).
+    if ((match = /^GET \/v1\/referrals\/([^/]+)$/.exec(route)))
+      return send(res, 200, { valid: state.referralCodes.has(decodeURIComponent(match[1]).trim().toUpperCase()) }, { 'cache-control': 'no-store' });
     // Public: a trader by wallet address (the Search page); a wallet this stub never served is unknown.
     if ((match = /^GET \/v1\/traders\/([^/]+)$/.exec(route))) {
       const address = decodeURIComponent(match[1]);
@@ -574,6 +626,8 @@ export async function startStub() {
   const url = `http://127.0.0.1:${server.address().port}`;
   return {
     url, state, publish, walletData,
+    /** A trader who signed up just now and bought nothing yet: the practice account only, inside the referral window. */
+    newTrader: wallet => { const w = walletData(wallet); w.accounts = w.accounts.filter(a => a.stage === 'practice'); w.referral.createdAt = Date.now(); return w; },
     close: () => { for (const s of state.streams) s.res.destroy(); server.close(); },
   };
 }

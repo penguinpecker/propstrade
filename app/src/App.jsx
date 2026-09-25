@@ -1,6 +1,6 @@
 import React, { createContext, lazy, Suspense, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { ArrowRight, ArrowUpRight, Bell, BookOpen, Check, ChevronDown, HelpCircle, LayoutGrid, Menu, Moon, Search, ShieldCheck, Sun, Wallet, X } from 'lucide-react';
+import { ArrowRight, ArrowUpRight, Bell, BookOpen, Check, ChevronDown, HelpCircle, Info, LayoutGrid, Menu, Moon, Search, ShieldCheck, Sun, Wallet, X } from 'lucide-react';
 import { MARKET_TABS, WATCHLIST_MAX, dateTime, explorerAddress, explorerTx, freshnessLabel, isCurrent, marketPrice, percent, pickMarkets, rates, shortAddress, stageRestriction, tierRules, toggleWatchlist, usd, validWatchlist } from './data.js';
 import { Badge, Brand, Button, DataRow, Dialog, Empty, FreshnessBadge, FullAddress, IconButton, InlineLink, MarketIcon, Notice, PageHeading, Pending, RuleList, SessionNotice, Tabs, Unavailable, WalletOptions, WatchlistStar } from './ui.jsx';
 import Trading from './Trading.jsx';
@@ -8,6 +8,7 @@ import { AccountsPage, AccountPage, PerformancePage, ActivityPage, MarketsPage }
 import { FundingPage, ProgramPage, ConnectPage, CheckoutPage, PaymentPage, ResultPage, ActivationPage } from './Onboarding.jsx';
 import { PayoutsPage, PayoutReview, PayoutReceipt, VaultPage, SettingsPage } from './Money.jsx';
 import { SearchPage } from './Search.jsx';
+import { ReferralsPage, SignupReferral, useReferralSignIn } from './Referrals.jsx';
 import { env } from './lib/env';
 import { applyStreamEvent, keys, useAccounts, useConfig, useMarkets, useNotifications, useReadNotifications } from './lib/queries';
 import { GOOGLE_ONLY } from './lib/privy';
@@ -55,7 +56,8 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [mobileNav, setMobileNav] = useState(false);
   const showsNotification = n => n.kind === 'account' || prefs[NOTIFICATION_PREFS[n.kind]] !== false;
-  const notify = useCallback((message, detail = '') => setToast({ message, detail, key: Date.now() }), []);
+  const notify = useCallback((message, detail = '', tone = 'done') => setToast({ message, detail, tone, key: Date.now() }), []);
+  useReferralSignIn(session, notify);
   /** Stars a market or unstars it; a full watchlist says so instead of adding. */
   const toggleFavorite = symbol => { const next = toggleWatchlist(favorites, symbol); if (next === favorites) notify('Your watchlist is full', `It holds ${WATCHLIST_MAX} markets. Unstar one to add another.`); else setFavorites(next); };
   const streamStatus = useStream(`${env.apiUrl}/v1/stream`, session.me?.wallet ?? '', event => {
@@ -108,8 +110,8 @@ export default function App() {
   const copy = async (value) => { try { await navigator.clipboard.writeText(value); notify('Copied to clipboard'); } catch { notify('Copy unavailable', 'Select the address and copy it manually.'); } };
   const openRecord = record => setModal({ type: 'record', record });
   const value = { path, query, navigate, stage, setStage, config, tiers, tier, setTierId, markets, marketsQuery, market, marketSymbol, selectMarket, accounts, accountsQuery, account, accountFor, selectAccount, session, signedIn, favorites, toggleFavorite, prefs, setPrefs, theme, setTheme, modal, setModal, closeModal, notify, streamStatus, live, openRecord, copy, showsNotification, notificationsQuery };
-  const currentSection = path.startsWith('/trade') || path === '/markets' ? 'Trade' : ['/payouts', '/payout/review', '/payout/receipt'].includes(path) ? 'Payouts' : ['/search', '/verify', '/vault'].includes(path) ? 'Search' : path.includes('account') || ['/performance', '/activity', '/result', '/activate'].includes(path) ? 'Accounts' : '';
-  const navItems = [['Trade', `/trade/${stage}`], ['Accounts', '/accounts'], ['Payouts', '/payouts'], ['Search', '/search']];
+  const currentSection = path.startsWith('/trade') || path === '/markets' ? 'Trade' : ['/payouts', '/payout/review', '/payout/receipt'].includes(path) ? 'Payouts' : ['/search', '/verify', '/vault'].includes(path) ? 'Search' : path === '/referrals' ? 'Referrals' : path.includes('account') || ['/performance', '/activity', '/result', '/activate'].includes(path) ? 'Accounts' : '';
+  const navItems = [['Trade', `/trade/${stage}`], ['Accounts', '/accounts'], ['Payouts', '/payouts'], ['Search', '/search'], ['Referrals', '/referrals']];
   let page;
   if (path.startsWith('/trade')) page = <Trading />;
   else if (path === '/get-funded') page = <FundingPage />;
@@ -130,6 +132,7 @@ export default function App() {
   else if (path === '/search' || path === '/verify') page = <SearchPage />;
   else if (path === '/vault') page = <VaultPage />;
   else if (path === '/settings') page = <SettingsPage />;
+  else if (path === '/referrals') page = <ReferralsPage />;
   else if (ScreenIndex && path === '/screens') page = <Suspense fallback={null}><ScreenIndex /></Suspense>;
   else page = <div className="page"><PageHeading title="This page has moved." description="This link is out of date."><Button variant="secondary" onClick={() => navigate('/get-funded')}>Get funded</Button><Button onClick={() => navigate(`/trade/${stage}`)}>Open workspace</Button></PageHeading></div>;
   const unread = (notificationsQuery.data ?? []).filter(n => !n.read && showsNotification(n)).length;
@@ -141,7 +144,7 @@ export default function App() {
     <main id="main" tabIndex="-1" className={path.startsWith('/trade') ? 'terminal-main' : ''}>{page}</main>
     <footer className="app-footer"><div><span className={`connection-dot ${live ? '' : 'offline'}`} /><span role="status">{STREAM_LABELS[streamStatus]}</span></div><div>{ScreenIndex && <a href="#/screens"><LayoutGrid size={12} /> Screen index</a>}<button onClick={() => setModal('rules')}>Rules</button><button onClick={() => setModal('help')}><HelpCircle size={13} /> Help</button><span className="network-label">{NETWORK_LABEL} <span className="solana-lines" aria-hidden="true"><i /><i /><i /></span></span></div></footer>
   </div>
-  {toast && <div className="toast" role="status" key={toast.key}><span className="toast-check"><Check size={16} /></span><div><strong>{toast.message}</strong>{toast.detail && <p>{toast.detail}</p>}</div><IconButton icon={X} label="Dismiss notification" onClick={() => setToast(null)} /></div>}
+  {toast && <div className="toast" role="status" key={toast.key}><span className="toast-check">{toast.tone === 'info' ? <Info size={16} /> : <Check size={16} />}</span><div><strong>{toast.message}</strong>{toast.detail && <p>{toast.detail}</p>}</div><IconButton icon={X} label="Dismiss notification" onClick={() => setToast(null)} /></div>}
   {(modal === 'markets' || modal?.type === 'markets') && <MarketPicker onClose={closeModal} tab={modal?.tab ?? null} />}
   {modal === 'accounts' && <AccountSwitcher onClose={closeModal} />}
   {modal === 'wallet' && <WalletDialog session={session} onClose={closeModal} navigate={navigate} notify={notify} />}
@@ -215,6 +218,6 @@ function WalletDialog({ session, onClose, navigate, notify }) {
   const signedIn = session.status === 'signed-in';
   const usdc = session.me?.usdcBalance;
   async function disconnect() { await session.disconnect(); onClose(); notify('Wallet disconnected'); }
-  return <Dialog title={signedIn ? 'Your wallet' : 'Connect a wallet'} onClose={onClose}><div className="wallet-summary"><div className="wallet-large"><Wallet size={25} /></div>{session.address ? <FullAddress address={session.address} /> : <strong>{GOOGLE_ONLY ? 'Sign in with Google' : 'Choose a Solana wallet'}</strong>}<Badge tone="purple">{session.walletName ?? 'Solana wallet'}</Badge></div><SessionNotice session={session}>{signedIn ? (session.autoSigns ? 'Signed in with Google. Props.trade signs each action when you confirm it here, with no wallet prompt.' : 'Signed in. Every transaction still needs your approval in your wallet.') : 'Signing in proves this wallet is yours. It sends no transaction and costs nothing.'}</SessionNotice>{signedIn ? <><DataRow label="USDC balance" value={usdc == null ? 'Unavailable' : usd(usdc)} /><DataRow label="Network" value={NETWORK_LABEL} /><div className="button-row"><Button variant="secondary" onClick={disconnect}>Disconnect</Button><Button onClick={() => navigate('/settings')}>Preferences</Button></div></> : session.address ? <div className="button-row"><Button variant="secondary" onClick={disconnect}>Disconnect</Button><Button disabled={session.status === 'signing' || session.network.state === 'wrong'} onClick={session.signIn}>{session.status === 'signing' ? (session.autoSigns ? 'Signing in…' : 'Check your wallet…') : 'Sign in'}</Button></div> : <WalletOptions session={session} onChoose={session.connect} />}</Dialog>;
+  return <Dialog title={signedIn ? 'Your wallet' : 'Connect a wallet'} onClose={onClose}><div className="wallet-summary"><div className="wallet-large"><Wallet size={25} /></div>{session.address ? <FullAddress address={session.address} /> : <strong>{GOOGLE_ONLY ? 'Sign in with Google' : 'Choose a Solana wallet'}</strong>}<Badge tone="purple">{session.walletName ?? 'Solana wallet'}</Badge></div><SessionNotice session={session}>{signedIn ? (session.autoSigns ? 'Signed in with Google. Props.trade signs each action when you confirm it here, with no wallet prompt.' : 'Signed in. Every transaction still needs your approval in your wallet.') : 'Signing in proves this wallet is yours. It sends no transaction and costs nothing.'}</SessionNotice>{!signedIn && <SignupReferral />}{signedIn ? <><DataRow label="USDC balance" value={usdc == null ? 'Unavailable' : usd(usdc)} /><DataRow label="Network" value={NETWORK_LABEL} /><div className="button-row"><Button variant="secondary" onClick={disconnect}>Disconnect</Button><Button onClick={() => navigate('/settings')}>Preferences</Button></div></> : session.address ? <div className="button-row"><Button variant="secondary" onClick={disconnect}>Disconnect</Button><Button disabled={session.status === 'signing' || session.network.state === 'wrong'} onClick={session.signIn}>{session.status === 'signing' ? (session.autoSigns ? 'Signing in…' : 'Check your wallet…') : 'Sign in'}</Button></div> : <WalletOptions session={session} onChoose={session.connect} />}</Dialog>;
 }
 

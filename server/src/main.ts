@@ -6,6 +6,7 @@ import { registerModules, type ModuleStatus } from './modules/index.js';
 import type { Services } from './modules/types.js';
 import { createStreamHub } from './stream.js';
 import { notifications } from './db/schema.js';
+import { backfillReferralCodes } from './routes/referrals.js';
 
 const config = loadConfig();
 const { sql, db } = createDb(config.DATABASE_URL);
@@ -16,6 +17,12 @@ const services: Services = {};
 const app = await buildApp({
   config, db, sql, hub, modules, services, rpc, logger: loggerOptions(config.LOG_LEVEL),
 });
+
+// Users from before the referral program get their codes, oldest first; sign-ins give new users theirs.
+backfillReferralCodes(db).then(
+  (given) => { if (given) app.log.info({ given }, 'referral codes given'); },
+  (err: unknown) => app.log.error({ err }, 'referral code backfill failed'),
+);
 
 const shutdown = new AbortController();
 await registerModules({

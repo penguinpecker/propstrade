@@ -30,7 +30,7 @@ const marketRef = m => ({ marketToken: m.marketToken, symbol: m.symbol });
 const sideMaxLeverage = (market, side) => Math.max(1, (side === 'Long' ? market.maxLeverageLong : market.maxLeverageShort) ?? market.maxLeverage);
 /** Where a slider label sits: under the thumb at fraction `f` of the track (8 px = half the native thumb), the first and last flush with the track's ends. */
 const labelAt = f => f <= 0 ? undefined : f >= 1 ? { justifySelf: 'end' } : { left: `calc(8px + ${f} * (100% - 16px))`, transform: 'translateX(-50%)' };
-function useDebounced(value, ms) { const [debounced, setDebounced] = useState(value); useEffect(() => { const id = setTimeout(() => setDebounced(value), ms); return () => clearTimeout(id); }, [value, ms]); return debounced; }
+export function useDebounced(value, ms) { const [debounced, setDebounced] = useState(value); useEffect(() => { const id = setTimeout(() => setDebounced(value), ms); return () => clearTimeout(id); }, [value, ms]); return debounced; }
 const sessionBadge = m => m.session === 'unknown' ? ['neutral', 'Session unknown'] : [m.session === 'open' ? 'green' : 'amber', `${['Stocks', 'Forex'].includes(m.category) ? 'Session' : 'Market'} ${m.session}`];
 const rate = value => value == null ? DASH : `${number(value, 4)}%`;
 /** "L +0.0012% · S -0.0009%" for a pair of hourly rates: funding signed (longs pay when positive), borrowing always paid. */

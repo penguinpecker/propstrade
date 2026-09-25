@@ -22,7 +22,7 @@ const ApproveBody = z.object({ identityHash: z.string().regex(/^[0-9a-f]{64}$/, 
 const RejectBody = z.object({ reason: z.string().trim().min(1).max(500) });
 
 /** Postgres unique_violation, raw or wrapped by drizzle. */
-const isUniqueViolation = (err: unknown): boolean =>
+export const isUniqueViolation = (err: unknown): boolean =>
   typeof err === 'object' && err !== null &&
   ((err as { code?: string }).code === '23505' || isUniqueViolation((err as { cause?: unknown }).cause));
 

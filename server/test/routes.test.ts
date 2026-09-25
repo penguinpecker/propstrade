@@ -78,7 +78,7 @@ describe('GET /v1/me', () => {
   });
 
   it('reports balances as unavailable (null) when the RPC fails, never a made-up number', async () => {
-    const failing = await makeApp({ rpc: { getMultipleAccountsInfo: async () => { throw new Error('429 Too Many Requests'); } } });
+    const failing = await makeApp({ rpc: { ...fixtureRpc(), getMultipleAccountsInfo: async () => { throw new Error('429 Too Many Requests'); } } });
     try {
       const user = await signIn(failing.app);
       const res = await failing.app.inject({ method: 'GET', url: '/v1/me', headers: { cookie: user.cookie } });

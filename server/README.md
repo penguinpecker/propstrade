@@ -55,6 +55,12 @@ npm run typecheck --workspace @props/server
 | `GET /v1/admin/kyc?status=&limit=` | admin | review queue with the linked chain job's status |
 | `POST /v1/admin/kyc/:id/approve` `{ identityHash, country, region? }` | admin | 32-byte hex salted identity hash, made by `scripts/admin/identity-hash.ts` from the reviewed document, and the residence the documents show (checked like `/v1/kyc/start`, recorded on the request); queues a sealed `set_identity` chain job; one approved wallet per identity |
 | `POST /v1/admin/kyc/:id/reject` `{ reason }` | admin | |
+| `GET /v1/referrals` | – | `{ rewardBps }`: the referral program's reward rate (`src/routes/referrals.ts`) |
+| `GET /v1/referrals/:code` | – | `{ valid }`: whether a referral code exists, typed in any case (`src/routes/referrals.ts`); 60 a minute per client; `no-store` |
+| `GET /v1/me/referrals` | cookie | `ReferralSummary`: the wallet's code (given at its first sign-in), its referrer's code, whether it may still add one and until when, its referees, their funded volume, rewards earned / paid / owed, the latest 50 rewards (referees masked, first 4 … last 4) |
+| `POST /v1/me/referrer` `{ code }` | cookie | binds the referrer once → `ReferralSummary`; 404 `unknown_referral_code`, 409 `already_referred`, 422 `own_referral_code`, 403 `referral_window_closed` (7 days after the first sign-in, or once an evaluation is bought); 30 a minute |
+| `GET /v1/admin/referrals?limit=` | admin | every referrer with its code, referees, `earnedUsd`, `paidUsd`, `pendingUsd`, most owed first |
+| `POST /v1/admin/referrals/payouts` `{ referrer, amountUsd, signature, note? }` | admin | records USDC sent to a referrer: above 0 and at most what it is owed (409 `exceeds_pending`), the transfer's base58 signature once per referrer (409 `payout_recorded`); only to a referrer who passed identity review (409 `referrer_unverified`) and only when that confirmed transaction moves at least the amount into the referrer's USDC (422 `payout_not_found` / `payout_not_sent`) |
 
 Admin routes take `Authorization: Bearer $ADMIN_API_TOKEN` (constant-time compare) and write `admin_audit_log`.
 Chain jobs and evaluation results carry an HMAC keyed from `SESSION_SECRET` (`src/lib/integrity.ts`); the executor signs

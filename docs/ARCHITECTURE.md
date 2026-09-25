@@ -268,7 +268,8 @@ notifications) · auth routes · `GET /v1/me` · `GET /v1/accounts` · `GET /v1/
 `/orders`, `/history`, `/activity`, `/performance`) · `POST /v1/sim/:id/orders` · `DELETE /v1/sim/:id/orders/:orderId` ·
 `POST /v1/sim/:id/positions/:positionId/close` · `PUT /v1/sim/:id/positions/:positionId/protection` ·
 `POST /v1/practice/reset` · `GET /v1/payouts` · `GET /v1/payouts/:id` · `GET /v1/verify?q=` · `GET /v1/vault` ·
-`POST /v1/kyc/start` · admin (`ADMIN_API_TOKEN`): payout review, KYC approve, pauses.
+`POST /v1/kyc/start` · `GET /v1/referrals` · `GET /v1/referrals/:code` · `GET /v1/me/referrals` · `POST /v1/me/referrer` · admin
+(`ADMIN_API_TOKEN`): payout review, KYC approve, pauses, referral payouts.
 Funded trading, evaluation purchase, activation and payout requests are **wallet-signed transactions built in the
 browser with `packages/sdk`**; the server never holds user keys.
 
@@ -707,6 +708,31 @@ Launch (round 3, `docs/runbooks/launch.md` is the go-live procedure):
   parameter named: the instructions overwrite them all, and Squads may execute an older proposal after a newer one.
 - Identity hashes come only from `scripts/admin/identity-hash.ts`: HMAC-SHA256 under IDENTITY_SALT of one document in
   canonical form (`<ISSUER alpha-2>:<PASSPORT|ID_CARD>:<NUMBER A-Z0-9>`), so one document always gives one hash.
+
+Referrals (2026-09-25, `server/src/routes/referrals.ts`, migration 0009): a wallet's code is the shortest prefix of its
+address, 8 characters or more, upper-cased, that no other user holds (`users.referral_code`: unique, upper case by a
+check constraint, so a code typed in any case, trimmed and upper-cased, matches once). Sign-in gives it, in its own
+transaction after the user row is written, under one advisory lock (`LOCK_KEYS.referralCodes`, always taken before any
+user row, so it never deadlocks with the backfill), which also serializes the boot backfill that gives the users from
+before 0009 theirs, oldest `created_at` first (the first come keeps the short one). `POST /v1/me/referrer` binds a
+referrer once (`users.referred_by` = its wallet): 404 `unknown_referral_code`, 409 `already_referred`, 422
+`own_referral_code`, 403 `referral_window_closed` from 7 days after `users.created_at` or once the wallet has an indexed
+evaluation (one bought seconds before the bind and not indexed yet is not seen). The venue loop's fill transaction
+(`chain/venue.ts syncFills`) writes the referrer's reward with every new funded fill of a referred trader:
+`REFERRAL_REWARD_BPS` (default 1000, 0–5000) of the fill's order fee (`venue.ts orderFeeUsd`: never the liquidation
+fee `fee_usd` also holds, so no one earns from their own liquidations; never funding or borrowing), rounded down to the micro-dollar, one `referral_rewards` row per fill
+(`venue_fill_id` unique) with the rate it used. Practice and evaluation fills (`sim_fills`) earn nothing. Props.trade pays
+rewards in USDC by hand, nothing onchain: `GET /v1/admin/referrals` lists what each referrer earned, was paid and is
+owed; `POST /v1/admin/referrals/payouts` records a transfer (above 0 and at most what is owed, its signature once per
+referrer, in `admin_audit_log`) only for a referrer with an approved `kyc_requests` row (409 `referrer_unverified`:
+`kyc_requests_approved_identity_uq` allows one approved wallet per person and every funded referee has one, so a funded
+trader's second wallet is never paid) and only when the confirmed transaction moves at least the amount into the
+referrer's own USDC (422 `payout_not_found` / `payout_not_sent`; one batch transaction can be recorded for each referrer
+it pays). `GET /v1/me/referrals` answers the page (`ReferralSummary`: the referrer by code, never by wallet; referees
+masked to first 4 … last 4); `GET /v1/referrals` answers the rate (public); `GET /v1/referrals/:code` answers
+`{ valid }` (public, 60 a minute, `no-store`). Known: because a code is the start of a wallet, the public check tells
+whether a given wallet has signed in (60 a minute per client); only random codes would hide that. Two different people
+referring each other each earn on the other's funded fees, as on any referral program.
 
 Deployment (2026-09-23): app on Vercel (`propstrade.vercel.app`), server + Postgres 18 on Railway. With no custom domain
 yet, the app's `vercel.json` proxies `/v1/*` to the Railway service (uncached, except `/v1/candles` which the edge

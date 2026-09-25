@@ -10,6 +10,7 @@ import { loadConfig } from '../src/config.js';
 import { createDb } from '../src/db/client.js';
 import type { Services } from '../src/modules/types.js';
 import type { BalanceRpc } from '../src/routes/account.js';
+import type { PayoutRpc } from '../src/routes/referrals.js';
 import { createStreamHub } from '../src/stream.js';
 import { testDatabaseUrl } from './db.js';
 
@@ -27,19 +28,24 @@ export function testConfig() {
   });
 }
 
-/** Stand-in for the RPC connection: answers getMultipleAccountsInfo from a fixture map. */
-export function fixtureRpc(accounts: Map<string, AccountInfo<Buffer>> = new Map()): BalanceRpc & { calls: number } {
+/** Stand-in for the RPC connection: answers getMultipleAccountsInfo and getTransaction from fixture maps. */
+export function fixtureRpc(
+  accounts: Map<string, AccountInfo<Buffer>> = new Map(), transactions: Map<string, unknown> = new Map(),
+): BalanceRpc & PayoutRpc & { calls: number } {
   const rpc = {
     calls: 0,
     async getMultipleAccountsInfo(keys: PublicKey[]) {
       rpc.calls++;
       return keys.map((k) => accounts.get(k.toBase58()) ?? null);
     },
+    async getTransaction(signature: string) {
+      return transactions.get(signature) ?? null;
+    },
   };
-  return rpc as BalanceRpc & { calls: number };
+  return rpc as unknown as BalanceRpc & PayoutRpc & { calls: number };
 }
 
-export async function makeApp(opts: { rpc?: BalanceRpc; logger?: FastifyServerOptions['logger']; services?: Services } = {}) {
+export async function makeApp(opts: { rpc?: BalanceRpc & PayoutRpc; logger?: FastifyServerOptions['logger']; services?: Services } = {}) {
   const config = testConfig();
   const { sql, db } = createDb(config.DATABASE_URL);
   const hub = createStreamHub();
@@ -61,18 +67,19 @@ export function signMessage(message: string, keypair: Keypair): string {
 
 type App = Awaited<ReturnType<typeof makeApp>>['app'];
 
-export async function requestNonce(app: App, wallet: string): Promise<NonceResponse> {
-  const res = await app.inject({ method: 'POST', url: '/v1/auth/nonce', payload: { wallet } });
+export async function requestNonce(app: App, wallet: string, remoteAddress?: string): Promise<NonceResponse> {
+  const res = await app.inject({ method: 'POST', url: '/v1/auth/nonce', payload: { wallet }, remoteAddress });
   if (res.statusCode !== 200) throw new Error(`nonce failed: ${res.body}`);
   return res.json();
 }
 
-/** Full Sign-In With Solana round trip; returns the Cookie header value for later requests. */
-export async function signIn(app: App, keypair = Keypair.generate()): Promise<{ cookie: string; wallet: string; keypair: Keypair }> {
+/** Full Sign-In With Solana round trip; returns the Cookie header value for later requests. `remoteAddress` puts it in
+ *  that client's sign-in rate limit (30 a minute) instead of the default one's. */
+export async function signIn(app: App, keypair = Keypair.generate(), remoteAddress?: string): Promise<{ cookie: string; wallet: string; keypair: Keypair }> {
   const wallet = keypair.publicKey.toBase58();
-  const { message } = await requestNonce(app, wallet);
+  const { message } = await requestNonce(app, wallet, remoteAddress);
   const res = await app.inject({
-    method: 'POST', url: '/v1/auth/verify', payload: { wallet, message, signature: signMessage(message, keypair) },
+    method: 'POST', url: '/v1/auth/verify', payload: { wallet, message, signature: signMessage(message, keypair) }, remoteAddress,
   });
   if (res.statusCode !== 200) throw new Error(`verify failed: ${res.body}`);
   const cookie = res.cookies.find((c) => c.name === SESSION_COOKIE);

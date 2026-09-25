@@ -422,8 +422,8 @@ the Node provider (without it Railpack sees the root `Cargo.toml` and builds the
    | `RAILPACK_NODE_NPM_INSTALL` | `npm ci` (build-time only: makes Railpack install exactly the lockfile instead of `npm install`) |
 
    Leave `PORT` (Railway sets it), `HOST`, `LOG_LEVEL`, `TRUST_PROXY_HOPS` (1 = Railway's edge; set 2 when the API is
-   reached through the app's Vercel rewrite, section 7) and
-   `SIM_FILL_DELAY_MS` unset unless you mean to change their defaults. From the CLI, single-quote reference values and
+   reached through the app's Vercel rewrite, section 7), `SIM_FILL_DELAY_MS` and `REFERRAL_REWARD_BPS` (1000: referrers
+   earn 10 % of the exchange fee on their referees' funded fills) unset unless you mean to change their defaults. From the CLI, single-quote reference values and
    pipe secrets in, so no secret appears in a command line or shell history:
 
    ```sh
@@ -672,6 +672,7 @@ Then announce `<DOMAIN>`.
 | Onchain balances | `node scripts/admin/status.ts` daily (its `warnings` list) | Risk key < 0.05 SOL, KYC key < 0.02 SOL, treasury < one owner float, an enabled tier the capital cannot fund. |
 | Pool depth | GMTrade pools of every enabled market, daily (learnings §8) | Lower `--max-position-usd` / `--max-total-oi-usd` with `upsert-markets.ts`. |
 | RPC | Helius dashboard: credits and rate-limit errors | Upgrade the plan before the credits run out. |
+| Referral rewards owed | weekly: `curl -s -H "Authorization: Bearer $ADMIN_API_TOKEN" https://api.<DOMAIN>/v1/admin/referrals` (each referrer with its code, referees, `earnedUsd`, `paidUsd`, `pendingUsd`, most owed first) | A referrer is owed USDC: send it from the operations wallet, then record it with the transfer's signature: `curl -s -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" -H 'content-type: application/json' -d '{"referrer":"<WALLET>","amountUsd":"<AMOUNT>","signature":"<SIGNATURE>"}' https://api.<DOMAIN>/v1/admin/referrals/payouts` (409 `referrer_unverified` until the referrer has passed identity review, `exceeds_pending` above what it is owed, `payout_recorded` for a signature already recorded for it; 422 when that confirmed transaction does not move at least the amount into the referrer's USDC; logged in `admin_audit_log`). |
 | Vault reconciliation | weekly: `status.ts` allocated principal vs `select sum(principal) from funded_accounts where status <> 'closed';` (`railway connect Postgres`) | They differ, or the capital vault is not deposits − withdrawals − principal posted + closure returns + vault profit share + swept fees. |
 | Database | Railway metrics; a daily off-platform dump | `railway run --service Postgres -- sh -c 'PGHOST=$RAILWAY_TCP_PROXY_DOMAIN PGPORT=$RAILWAY_TCP_PROXY_PORT pg_dump --format=custom -f props-$(date -u +%F).dump'` (needs the Postgres service's public TCP proxy, and a `pg_dump` at least as new as the server). `railway run` puts the Postgres service's variables in the environment and `pg_dump` reads `PGUSER`, `PGPASSWORD` and `PGDATABASE` from there, so the password is on no command line and in no history. Railway volume backups have no point-in-time restore. |
 
@@ -860,6 +861,7 @@ variable that is not documented there and here):
 | `LOG_LEVEL` | no | pino level (info) |
 | `TRUST_PROXY_HOPS` | no | trusted reverse proxies (1 = Railway's edge; 2 when the app's Vercel rewrite fronts the API, see section 7) |
 | `SIM_FILL_DELAY_MS` | no | sim keeper delay (2000, minimum 1000) |
+| `REFERRAL_REWARD_BPS` | no | referrers' share of the exchange fee on each funded fill of the traders they referred, bps (1000 = 10 %, at most 5000; 0 stops new rewards) |
 | `RISK_AUTHORITY_KEYPAIR` | yes on mainnet | risk authority secret key (JSON byte array or base58) |
 | `KYC_AUTHORITY_KEYPAIR` | yes on mainnet | KYC authority secret key |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | no | keeper alerts to Telegram |

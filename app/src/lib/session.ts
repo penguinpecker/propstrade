@@ -51,6 +51,8 @@ export interface Session {
   network: NetworkCheck;
   /** Plain-English reason for the last failure or session change, cleared by the next action. */
   notice: string | null;
+  /** Shows a notice where the session's guidance is (the wallet dialog, the Connect page, Settings). */
+  setNotice(notice: string | null): void;
   connect(name: WalletName): void;
   signIn(): Promise<void>;
   disconnect(): Promise<void>;
@@ -237,7 +239,7 @@ export function useSession(): Session {
     : options.length ? 'disconnected' : 'no-wallet';
 
   const walletName = privy?.address || privy?.pending ? PRIVY_WALLET as WalletName : adapter?.name ?? null;
-  return { status, wallets: options, walletName, address, autoSigns: !!privy?.address, me: me ?? null, network, notice, connect, signIn, disconnect };
+  return { status, wallets: options, walletName, address, autoSigns: !!privy?.address, me: me ?? null, network, notice, setNotice, connect, signIn, disconnect };
 }
 
 /** The connected account and its transaction signer: the Privy wallet when that is connected, else the browser wallet. */

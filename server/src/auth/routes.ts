@@ -8,6 +8,7 @@ import type { Db } from '../db/client.js';
 import { authNonces, sessions, users } from '../db/schema.js';
 import { ApiError, parse } from '../errors.js';
 import { walletSchema } from '../lib/solana.js';
+import { assignReferralCode } from '../routes/referrals.js';
 import type { StreamHub } from '../stream.js';
 import { SIWS_STATEMENT, buildSiwsMessage, nonceOf, verifySiwsSignature } from './siws.js';
 
@@ -103,11 +104,16 @@ export function registerAuth(app: FastifyInstance, { db, config, hub }: { db: Db
 
     const token = randomBytes(32).toString('base64url');
     const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
-    await db.transaction(async (tx) => {
-      await tx.insert(users).values({ wallet }).onConflictDoUpdate({ target: users.wallet, set: { lastLoginAt: sql`now()` } });
+    const user = await db.transaction(async (tx) => {
+      const [row] = await tx.insert(users).values({ wallet }).onConflictDoUpdate({ target: users.wallet, set: { lastLoginAt: sql`now()` } })
+        .returning({ referralCode: users.referralCode });
       await tx.delete(sessions).where(and(eq(sessions.wallet, wallet), lt(sessions.expiresAt, sql`now()`)));
       await tx.insert(sessions).values({ wallet, tokenHash: hashToken(token), expiresAt });
+      return row;
     });
+    // In its own transaction, after the user row's lock is released: every code assignment takes the codes lock first,
+    // then user rows (the boot backfill too), so the two never wait on each other in a circle.
+    if (!user?.referralCode) await db.transaction((tx) => assignReferralCode(tx, wallet));
     reply.setCookie(SESSION_COOKIE, token, {
       httpOnly: true, secure: true, sameSite: 'lax', path: '/', expires: expiresAt,
     });

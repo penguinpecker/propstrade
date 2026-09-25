@@ -25,6 +25,7 @@ describe('api client', () => {
     await api.quote('BTC', 'Short', '2500.5');
     await api.payoutEligibility('Funded/1');
     await api.trader('Wallet/1');
+    await api.referralCode('AB/CD');
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
       '/v1/accounts/practice%3AWallet%2F1/positions',
       '/v1/candles?symbol=BTC&interval=15m',
@@ -32,6 +33,7 @@ describe('api client', () => {
       '/v1/quote?symbol=BTC&side=Short&sizeUsd=2500.5',
       '/v1/accounts/Funded%2F1/payout-eligibility',
       '/v1/traders/Wallet%2F1',
+      '/v1/referrals/AB%2FCD',
     ]);
   });
 
