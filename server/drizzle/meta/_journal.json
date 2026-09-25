@@ -36,6 +36,13 @@
       "when": 1790163069511,
       "tag": "0004_price_bars",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1790293084012,
+      "tag": "0005_candle_windows",
+      "breakpoints": true
     }
   ]
 }

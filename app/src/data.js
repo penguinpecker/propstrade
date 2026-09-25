@@ -79,6 +79,17 @@ export function stageRestriction(market, stage, usdcMint) {
     ? { label: 'Not available for funded trading', reason: market.unavailableReason ?? 'Not available for funded trading.' }
     : { label: 'Not available in evaluations', reason: `${market.symbol} is not available in evaluations: they trade only the markets funded accounts can.` };
 }
+/** How many markets the watchlist holds: the trading page shows it in one row. */
+export const WATCHLIST_MAX = 12;
+const SYMBOL = /^[A-Za-z0-9]{1,16}$/; // the shape the API accepts
+/**
+ * A watchlist read from storage (a trust boundary): symbol-shaped strings only, each once, at most WATCHLIST_MAX;
+ * anything but a list is `fallback`.
+ */
+export const validWatchlist = (value, fallback) => Array.isArray(value)
+  ? [...new Set(value.filter(s => typeof s === 'string' && SYMBOL.test(s)))].slice(0, WATCHLIST_MAX) : fallback;
+/** The watchlist with `symbol` added (last) or removed; a full one comes back as it is, the same array. */
+export const toggleWatchlist = (list, symbol) => list.includes(symbol) ? list.filter(s => s !== symbol) : list.length < WATCHLIST_MAX ? [...list, symbol] : list;
 /** Tabs of the market picker, in the Markets page's order. */
 export const MARKET_TABS = ['All', 'Watchlist', 'Crypto', 'Commodities', 'Forex', 'Stocks'];
 /**

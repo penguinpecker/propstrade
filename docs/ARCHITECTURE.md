@@ -334,6 +334,22 @@ Data (round 1): 15m/4h candles come natively from GMTrade's candle service (veri
 `update_fees_state` before every simulated action (reproduced 28/28 real fills: opens, full closes, liquidations, SOL VI).
 Candle prices are USD × 1e18 for every token. Subsquid ids are chain-ordered (`id_DESC` is fast).
 
+Chart history (2026-09-25, `server/src/modules/marketdata/history.ts`, table `candle_windows`): GMTrade candle windows
+survive a restart. Every series' (market × interval) latest 300-bar window is written through when it rotates or five
+minutes after its last write (not by every pre-warm: that was 340 rows of ~30 KB a minute) and read back at boot before
+the pre-warm runs, so a restarted process answers every chart live from the table and the pre-warm only patches; every
+settled window a request fetched with candles is stored (an empty answer stays in memory: stored, it would answer that
+range empty for good), and a request for a settled window answers from memory, then the table (stored windows
+overlapping it, contiguous), and only then GMTrade (the 4 s wait and 503 remain for a window nobody ever had). A
+backfill walks market × interval after the first pre-warm pass, one aligned 300-bar page per visit every 2 s, only
+while no request fetch or pre-warm batch is in flight and GMTrade's last answer took under 2 s, back to 2,000 bars
+(1h/4h/1D) or 1,000 (5m/15m) or GMTrade's history start (an empty page, stored as the marker), then every page as it
+completes; a restart resumes from the table. Storage is capped per series at the app's reach (30,000 bars, oldest
+fetched evicted): a 300-bar page is ≈ 10.5 KB stored, the first fill ≈ 20 MB, a series grows to the cap over time
+(5m in ≈ 100 days, 15m in ≈ 300 days), ≈ 70 MB per interval at the cap, ≈ 360 MB in all. `/v1/health` →
+`upstreams.candles.history` shows the series restored at boot and the backfill's progress; `upstreams.candleStore`
+is the table's own state.
+
 Server (round 1): Node 22 + tsx (no build step). Session cookie `__Host-props_session`. Global Origin check on unsafe
 methods. Leader lock connection uses `max_lifetime: null`. `ModuleContext` carries config, db, sql, rpc, notify.
 Money in DB = numeric(38,6).
@@ -341,6 +357,12 @@ Money in DB = numeric(38,6).
 App (round 1): `VITE_RPC_URL` and `VITE_API_URL` are required at build time (the public mainnet RPC rejects browser
 requests). **The API must be same-site with the app** (e.g. app `props.trade`, API `api.props.trade`) or the
 SameSite=Lax session cookie will not flow.
+
+App (watchlist): the watchlist lives in the browser (`props.favorites`; on read, a trust boundary, only symbol-shaped
+strings count, each once, at most 12: `validWatchlist`). A star on every row of the Markets page and of the market
+picker adds a market or removes it without choosing it; the picker's Watchlist tab and the trading page's watchlist bar
+follow at once, the bar's "+" opens the picker on All, and the order is the catalog's. A full watchlist says so (a
+toast on the Markets page; in the picker its own note, since a toast sits under an open dialog).
 
 Sim engine (round 2, `server/src/modules/sim`):
 - Account money is USDC. Every fill carries its realized P&L (an increase: its costs; a decrease or liquidation: payout

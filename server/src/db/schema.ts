@@ -412,6 +412,29 @@ export const priceBars = pgTable('price_bars', {
 }, (t) => [primaryKey({ columns: [t.symbol, t.t] })]);
 
 /**
+ * GMTrade candle windows kept for the charts (modules/marketdata/history.ts). A series' (symbol, resolution) latest
+ * 300-bar window, unsettled and rewritten when it rotates or five minutes after its last write, restores the in-memory
+ * copies after a restart; settled windows (fetched for a request, or by the backfill in 300-bar pages aligned to
+ * multiples of their span) answer history scrolls without GMTrade. start_time and end_time are the unix seconds of the
+ * first and last bucket; candles is the answer GMTrade gave for that range (empty only for a backfill page past its
+ * history start, the marker the backfill stops at). Bounded per series to what the app's chart can reach (30,000 bars,
+ * the oldest-fetched settled windows beyond it evicted). jsonb keeps a 300-bar page in about 10.5 KB (31 KB of JSON,
+ * measured 2026-09-25): the backfill's first fill of 68 markets (2,000 bars for 1h/4h/1D, 1,000 for 5m/15m) is about
+ * 20 MB stored, and since every page is kept once it completes, a series grows to the cap over time (5m in about 100
+ * days, 15m in about 300 days, the slower ones over years): about 70 MB per interval at the cap, 360 MB if every
+ * series reached it.
+ */
+export const candleWindows = pgTable('candle_windows', {
+  symbol: text('symbol').notNull(),
+  resolution: integer('resolution').notNull(),
+  startTime: bigint('start_time', { mode: 'number' }).notNull(),
+  endTime: bigint('end_time', { mode: 'number' }).notNull(),
+  candles: jsonb('candles').notNull(),
+  fetchedAt: now('fetched_at'),
+  settled: boolean('settled').notNull(),
+}, (t) => [primaryKey({ columns: [t.symbol, t.resolution, t.startTime] })]);
+
+/**
  * GMTrade program deploys the keeper has seen (the program data's last-deploy slot). acknowledged_at is when the deploy
  * was accepted as reviewed: GMTRADE_DEPLOY_SLOT on first sight (or, without it, the first deploy seen), else an operator
  * through the admin API. Until then it is an upgrade: detected_at is when it was noticed, handled_at when every active

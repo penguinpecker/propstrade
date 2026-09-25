@@ -1,8 +1,9 @@
 // marketdata module through Fastify inject against live GMTrade services (PROPS_OFFLINE=1 skips the
 // live tests). The Props allowlist is served by a local JSON-RPC stub holding MarketConfig accounts encoded by the
 // props_vault client in @props/sdk. The candle cache and pre-warm run against a stand-in feed and candle service on
-// node's mock timers, which move the clock across bucket boundaries.
-import { test, type TestContext } from 'node:test';
+// node's mock timers, which move the clock across bucket boundaries; the candle history table tests add a real
+// Postgres (TEST_DATABASE_URL, as the other module suites; skipped without it).
+import { after, test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -17,11 +18,19 @@ import {
   type Idl, type KeeperMarket, type KeeperToken,
 } from '@props/gmtrade';
 import { PropsVaultClient } from '@props/sdk';
+import { createDb, type Sql } from '../../db/client.ts';
+import { runMigrations } from '../../db/migrate.ts';
+import { recreateDatabase, testDatabaseUrl } from '../../../test/db.ts';
 import type { ModuleContext } from '../types.ts';
 import register, { candleCacheTtl, candleWindow, changedForDisplay, createMarketData, type MarketDataOptions } from './index.ts';
 import { fetchAllowlist, marketConfigAddress } from './allowlist.ts';
+import { covers, createHistoryStore } from './history.ts';
 
 const skip = process.env.PROPS_OFFLINE === '1';
+const dbSkip = !process.env.TEST_DATABASE_URL;
+/** Real time, whatever the mock clock says: lets database I/O land between mock ticks. */
+const realSetTimeout = setTimeout;
+const io = (ms = 30) => new Promise<void>((r) => realSetTimeout(r, ms));
 const PROGRAM_ID = base58Encode(createHash('sha256').update('props-vault-test-program').digest());
 const SOL_POOL = '6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc';
 const BTC_POOL = 'Dqq58gS1TgRMDouUbdvhhzc51XXTNHG921WLxH9X2eB8';
@@ -147,19 +156,20 @@ function stubFeed(nowSec: number) {
 }
 
 /** A candle service that records every call and answers with synthetic candles whose `open` is the call's number (so a
- *  response says which call it came from) and whose `close` is the bucket time. The calls `hang` matches (single-token
- *  ones, for `true`) wait until `release` resolves or rejects them; a batch call `fail` matches is rejected, and a batch
- *  answer leaves the `omit`ted token out. */
+ *  response says which call it came from) and whose `close` is the bucket time, from `since` on (its history start:
+ *  nothing before). The calls `hang` matches (single-token ones, for `true`) wait until `release` resolves or rejects
+ *  them; a batch call `fail` matches is rejected, and a batch answer leaves the `omit`ted token out. */
 function stubCandles() {
   type Call = { batch: boolean; tokens: string[]; res: number; from: number; to: number };
   const calls: Call[] = [];
   let hanging: (call: Call) => boolean = () => false;
   let failing: (call: Call) => boolean = () => false;
   let omitted = '';
+  let since = 0;
   let pending: ((ok: boolean) => void)[] = [];
   const bars = (from: number, to: number, res: number, tag: number): Candle[] => {
     const out: Candle[] = [];
-    for (let time = from; time <= to; time += res) out.push({ time, open: tag, high: tag, low: tag, close: time });
+    for (let time = from; time <= to; time += res) if (time >= since) out.push({ time, open: tag, high: tag, low: tag, close: time });
     return out;
   };
   /** `answer()` now, or once `release` lets a hanging call go. */
@@ -185,6 +195,9 @@ function stubCandles() {
   return {
     gm, calls,
     single: () => calls.filter((c) => !c.batch),
+    /** The backfill's calls: single-token pages aligned to multiples of their span. */
+    pages: () => calls.filter((c) => !c.batch && c.from % (300 * c.res) === 0 && c.to - c.from === 299 * c.res),
+    since: (time: number) => { since = time; },
     hang: (when: boolean | ((call: Call) => boolean)) => { hanging = typeof when === 'boolean' ? (c) => when && !c.batch : when; },
     fail: (when: (call: Call) => boolean) => { failing = when; },
     omit: (token: string) => { omitted = token; },
@@ -197,32 +210,65 @@ function stubCandles() {
   };
 }
 
-/** The module on mock timers (the clock starts at `nowSec`), the stand-in feed and candle service, the RPC stub. */
-async function stubbedStart(t: TestContext, nowSec: number) {
-  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: nowSec * 1000 });
+/** A logger that keeps the warnings' messages, for what the module logs once per outage. */
+function recordingLog(warnings: string[]): ModuleContext['log'] {
+  const noop = () => {};
+  const log = { level: 'warn', silent: noop, fatal: noop, error: noop, info: noop, debug: noop, trace: noop, child: () => log, warn: (obj: unknown, msg?: string) => { warnings.push(msg ?? String(obj)); } };
+  return log as unknown as ModuleContext['log'];
+}
+
+/** The module on the mock clock as it stands, the stand-in feed and candle service, the RPC stub, and the candle
+ *  history table when `sql` is a real database (else its writes fail quietly, as they would with the database down;
+ *  `warnings` collects what is logged). */
+async function stubbedModule(t: TestContext, opts: { sql?: Sql; warnings?: string[] } = {}) {
   const { url, server } = await rpcStub(await allowlistAccounts());
   const app = Fastify({ logger: false });
   const abort = new AbortController();
   const candles = stubCandles();
   const events: StreamEvent[] = [];
   const ctx: ModuleContext = {
-    app, log: app.log, env: { PROGRAM_ID, RPC_URL: url }, services: {}, signal: abort.signal, publish: (event) => events.push(event),
-    config: {} as never, db: {} as never, sql: {} as never, rpc: {} as never, notify: async () => {},
+    app, log: opts.warnings ? recordingLog(opts.warnings) : app.log, env: { PROGRAM_ID, RPC_URL: url }, services: {}, signal: abort.signal,
+    publish: (event) => events.push(event),
+    config: {} as never, db: {} as never, sql: opts.sql ?? ({} as never), rpc: {} as never, notify: async () => {},
   };
-  const { feed, tick } = stubFeed(nowSec);
+  const { feed, tick } = stubFeed(Math.floor(Date.now() / 1000));
   const service = await createMarketData(ctx, { feed, gm: candles.gm });
   await app.ready();
   await service.ready();
-  t.after(async () => { abort.abort(); await app.close(); server.close(); });
+  let stopped = false;
+  const stop = async () => { if (stopped) return; stopped = true; abort.abort(); await app.close(); server.close(); };
+  t.after(stop);
   const get = async <T>(path: string) => {
     const res = await app.inject({ method: 'GET', url: path });
     return { status: res.statusCode, body: res.json() as T, headers: res.headers };
   };
   const settle = () => new Promise((r) => setImmediate(r));
-  /** Moves the clock ahead a second at a time, letting each timer's asynchronous work finish before the next second. */
-  const advance = async (seconds: number) => { for (let i = 0; i < seconds; i++) { t.mock.timers.tick(1_000); await settle(); } };
-  return { get, candles, events, tick, advance, settle, jump: (sec: number) => t.mock.timers.setTime(sec * 1000) };
+  /** Moves the clock ahead a second at a time, letting each timer's asynchronous work finish before the next second
+   *  (with a database, its I/O too). */
+  const advance = async (seconds: number) => { for (let i = 0; i < seconds; i++) { t.mock.timers.tick(1_000); await settle(); if (opts.sql) await io(); } };
+  return { service, get, candles, events, tick, advance, settle, stop, jump: (sec: number) => t.mock.timers.setTime(sec * 1000) };
 }
+
+/** The module on mock timers (the clock starts at `nowSec`). */
+async function stubbedStart(t: TestContext, nowSec: number, opts: { sql?: Sql; warnings?: string[] } = {}) {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: nowSec * 1000 });
+  return stubbedModule(t, opts);
+}
+
+// ---- the candle history table: this suite's own database, migrated once, its candle tables emptied for each test ----
+let historyDb: Sql | undefined;
+async function freshTables(): Promise<Sql> {
+  if (!historyDb) {
+    const url = new URL(testDatabaseUrl());
+    url.pathname += '_marketdata';
+    await recreateDatabase(url.toString());
+    await runMigrations(url.toString());
+    historyDb = createDb(url.toString()).sql;
+  }
+  await historyDb`truncate candle_windows, price_bars`;
+  return historyDb;
+}
+after(async () => { await historyDb?.end(); });
 
 test('allowlist: MarketConfig PDAs are read and decoded with the IDL bundled in @props/sdk', async () => {
   const { url, server } = await rpcStub(await allowlistAccounts());
@@ -422,6 +468,226 @@ test('candles: a window with no copy waits for GMTrade, then answers 503 with re
   assert.equal(candles.single().length, 2);
   const bad = await get<ApiError>('/v1/candles?symbol=SOL&interval=2h');
   assert.deepEqual([bad.status, bad.headers['cache-control']], [400, 'no-store']);
+});
+
+// ---- the candle history table (a real Postgres) ----
+
+/** Waits (real time, up to a second) for the database to hold what `read` looks for. */
+async function untilStored<T>(read: () => Promise<T[]>): Promise<T[]> {
+  let rows = await read();
+  for (let i = 0; i < 50 && !rows.length; i++) { await io(20); rows = await read(); }
+  return rows;
+}
+
+/** Moves `m`'s clock two seconds at a time until `check` holds, at most `maxSeconds`. */
+async function advanceUntil(m: { advance: (seconds: number) => Promise<void> }, check: () => boolean, maxSeconds: number, what: string) {
+  for (let s = 0; s < maxSeconds && !check(); s += 2) await m.advance(2);
+  assert.ok(check(), `timed out waiting for ${what}`);
+}
+
+test('candle history: a restarted process serves every latest window live from the table before any GMTrade call, and its pre-warm only patches', { skip: dbSkip }, async (t) => {
+  const sql = await freshTables();
+  const boundary = 1_800_000_600;
+  const first = await stubbedStart(t, boundary - 61, { sql });
+  await first.advance(2); // the first pass fills every window; the history flush a second later writes the copies
+  const written = await sql<{ n: number }[]>`select count(*)::int as n from candle_windows where not settled`;
+  assert.equal(written[0]!.n, 45, 'one latest window per market and interval');
+  assert.equal(first.service.health().candles!.history!.seriesWarmAtBoot, 0);
+  await first.stop();
+
+  first.jump(boundary - 30); // a new process 30 s later, on the same table
+  const second = await stubbedModule(t, { sql });
+  for (const symbol of ['SOL', 'BTC', 'M7']) {
+    for (const interval of Object.keys(INTERVAL_SECONDS)) {
+      const r = await second.get<CandlesResponse>(`/v1/candles?symbol=${symbol}&interval=${interval}`);
+      assert.deepEqual([r.status, r.body.freshness, r.body.candles.length, r.headers['cache-control']], [200, 'live', 300, LIVE], `${symbol} ${interval}`);
+    }
+  }
+  assert.equal(second.candles.calls.length, 0, 'no GMTrade call');
+  assert.deepEqual(second.service.health().candles!.history, { seriesWarmAtBoot: 45, backfill: { seriesDone: 0, seriesTotal: 45, windowsStored: 0 } });
+  await second.advance(1); // the pre-warm: one patch of the last three buckets per resolution, no full window and no 24h-change request
+  assert.deepEqual(second.candles.calls.map((c) => [c.batch, c.tokens.length, c.res, c.to - c.from]), PREWARM.map((res) => [true, 9, res, 2 * res]));
+  await second.advance(1); // a catalog rebuild
+  const rows = (await second.get<Market[]>('/v1/markets')).body;
+  assert.equal(rows.filter((row) => row.change24h !== null).length, 9, '24h change from the restored 5m copies');
+});
+
+test('candle history: a settled window the table covers answers live with the hour-long header and no GMTrade call; one fetched for a request is stored for the next process', { skip: dbSkip }, async (t) => {
+  const sql = await freshTables();
+  const boundary = 1_800_000_600;
+  const { get, candles, advance, stop } = await stubbedStart(t, boundary - 61, { sql });
+  await advance(1);
+  // The third and fourth 5m pages back, as the backfill stores them, holding candles with open 77.
+  const span = 300 * 300;
+  const page = (k: number) => { const start = (Math.floor((boundary - 60) / span) - k) * span; return { start, end: start + 299 * 300 }; };
+  const stored = (p: { start: number; end: number }) => JSON.stringify(Array.from({ length: 300 }, (_, i) => ({ time: p.start + i * 300, open: 77, high: 77, low: 77, close: p.start + i * 300 })));
+  await sql`insert into candle_windows ${sql([page(3), page(4)].map((p) => ({ symbol: 'SOL', resolution: 300, start_time: p.start, end_time: p.end, candles: stored(p), fetched_at: new Date().toISOString(), settled: true })))}`;
+  const from = page(4).start + 100 * 300;
+  const to = page(3).start + 49 * 300;
+  const r = await get<CandlesResponse>(`/v1/candles?symbol=SOL&interval=5m&from=${from}&to=${to}`);
+  assert.deepEqual([r.status, r.body.freshness, r.body.candles.length, r.body.candles[0]!.time, r.body.candles.at(-1)!.time, r.headers['cache-control']], [200, 'live', 250, from, to, SETTLED]);
+  assert.ok(r.body.candles.every((c) => c.open === 77), 'from the table');
+  assert.equal(candles.single().length, 0, 'no GMTrade call');
+  // A window the table has a hole in (the fifth page back is missing) is fetched, and stays stored.
+  const hole = { from: page(5).start + 200 * 300, to: page(4).start + 9 * 300 };
+  const fetched = await get<CandlesResponse>(`/v1/candles?symbol=SOL&interval=5m&from=${hole.from}&to=${hole.to}`);
+  assert.deepEqual([fetched.status, fetched.body.freshness, fetched.body.candles.length, fetched.headers['cache-control']], [200, 'live', 110, SETTLED]);
+  assert.deepEqual(candles.single().map((c) => [c.from, c.to]), [[hole.from, hole.to]]);
+  await advance(1); // the history flush
+  const row = await untilStored(() => sql<{ settled: boolean }[]>`select settled from candle_windows where symbol = 'SOL' and resolution = 300 and start_time = ${hole.from}`);
+  assert.deepEqual(row.map((x) => x.settled), [true]);
+  await stop();
+  const next = await stubbedModule(t, { sql });
+  const again = await next.get<CandlesResponse>(`/v1/candles?symbol=SOL&interval=5m&from=${hole.from}&to=${hole.to}`);
+  assert.deepEqual([again.status, again.body.freshness, again.body.candles.length, again.headers['cache-control']], [200, 'live', 110, SETTLED]);
+  assert.equal(next.candles.single().length, 0, 'the next process never asks GMTrade for it');
+});
+
+test('candle history: a delayed answer (a copy completed from the price record) is never stored; the fetch that lands is', { skip: dbSkip }, async (t) => {
+  const sql = await freshTables();
+  const boundary = 1_800_000_600;
+  const { get, candles, advance, settle, jump } = await stubbedStart(t, boundary - 61, { sql });
+  await advance(1); // the 5m copy ends at boundary - 300
+  candles.hang(true);
+  await sql`insert into price_bars ${sql(Array.from({ length: 15 }, (_, i) => ({ symbol: 'SOL', t: boundary + i * 60, open: '1', high: '1', low: '1', close: '1' })))}`;
+  jump(boundary + 4 * 300 + 61); // an outage: a settled window that starts inside the copy and ends after it
+  const r = await get<CandlesResponse>(`/v1/candles?symbol=SOL&interval=5m&from=${boundary - 5 * 300}&to=${boundary + 2 * 300}`);
+  assert.deepEqual([r.status, r.body.freshness, r.body.candles.length, r.headers['cache-control']], [200, 'delayed', 8, 'no-store']);
+  await advance(2); // two history flushes
+  const before = await sql<{ n: number }[]>`select count(*)::int as n from candle_windows where symbol = 'SOL' and resolution = 300 and settled`;
+  assert.equal(before[0]!.n, 0, 'nothing stored while GMTrade has not answered');
+  candles.release(true);
+  await settle();
+  await advance(1);
+  const after = await untilStored(() => sql<{ start_time: string; end_time: string }[]>`select start_time, end_time from candle_windows where symbol = 'SOL' and resolution = 300 and settled`);
+  assert.deepEqual(after.map((x) => [Number(x.start_time), Number(x.end_time)]), [[boundary - 1_500, boundary + 600]], "GMTrade's answer, once it landed");
+});
+
+test("candle history: a series' latest window is rewritten when it rotates or five minutes after its last write, not by every pre-warm", { skip: dbSkip }, async (t) => {
+  const sql = await freshTables();
+  const boundary = 1_800_000_600; // a 5m boundary that is not a 15m one
+  const { advance } = await stubbedStart(t, boundary - 61, { sql });
+  const writtenAt = async (res: number) => (await sql<{ at: string }[]>`
+    select distinct extract(epoch from fetched_at)::bigint::text as at from candle_windows where not settled and resolution = ${res}`).map((r) => Number(r.at));
+  await advance(2); // the first pass at boundary - 60, flushed a second later
+  assert.deepEqual([await writtenAt(300), await writtenAt(3_600)], [[boundary - 60], [boundary - 60]]);
+  await advance(62); // every resolution pre-warmed again at boundary (a minute later): only the 5m windows, which rotated there, are rewritten
+  assert.deepEqual([await writtenAt(300), await writtenAt(3_600)], [[boundary], [boundary - 60]]);
+  await advance(240); // the 1h pre-warm at boundary + 240 comes five minutes after the first write
+  assert.deepEqual(await writtenAt(3_600), [boundary + 240]);
+});
+
+test('candle history: a settled window GMTrade answers empty is kept in memory only, never stored: a restarted process asks GMTrade again', { skip: dbSkip }, async (t) => {
+  const sql = await freshTables();
+  const boundary = 1_800_000_600;
+  const { get, candles, advance, stop } = await stubbedStart(t, boundary - 61, { sql });
+  await advance(1);
+  const from = boundary - 20 * 86_400;
+  const url = `/v1/candles?symbol=SOL&interval=5m&from=${from}&to=${from + 99 * 300}`;
+  candles.since(from + 100 * 300); // GMTrade's history starts after the window (or its backend answered an empty list)
+  const r = await get<CandlesResponse>(url);
+  assert.deepEqual([r.status, r.body.freshness, r.body.candles.length, r.headers['cache-control']], [200, 'live', 0, SETTLED]);
+  assert.deepEqual(candles.single().map((c) => [c.from, c.to]), [[from, from + 99 * 300]]);
+  await advance(2); // two history flushes
+  const stored = await sql<{ n: number }[]>`select count(*)::int as n from candle_windows where symbol = 'SOL' and resolution = 300 and start_time = ${from}`;
+  assert.equal(stored[0]!.n, 0, 'the empty answer is stored');
+  await stop();
+  const next = await stubbedModule(t, { sql });
+  next.candles.since(from + 100 * 300);
+  const again = await next.get<CandlesResponse>(url);
+  assert.deepEqual([again.status, again.body.freshness, again.body.candles.length], [200, 'live', 0]);
+  assert.deepEqual(next.candles.single().map((c) => [c.from, c.to]), [[from, from + 99 * 300]], 'asked again, not answered from the table');
+});
+
+test('candle backfill: while the database is unreachable the store logs the outage once; the visits do not log it every 2 s', async (t) => {
+  const warnings: string[] = [];
+  const { advance } = await stubbedStart(t, 1_800_000_539, { warnings }); // no database: every table call fails
+  await advance(12); // the first pre-warm pass, the flushes that make the store 'down', then five backfill visits
+  assert.deepEqual(warnings.filter((m) => /candleStore|backfill/.test(m)), [
+    'marketdata: candleStore is down (sql is not a function). Chart history is kept in memory only; windows fetched meanwhile are written once the database is back.',
+  ]);
+});
+
+test("candle history store: a series keeps its newest-fetched windows up to the app's reach (30,000 bars); a latest window replaces the series' previous one", { skip: dbSkip }, async () => {
+  const sql = await freshTables();
+  const store = createHistoryStore(sql, (call) => call());
+  const window = (i: number, settled: boolean, at: number) => ({ symbol: 'SOL', res: 60, start: i * 120_000, end: i * 120_000 + 1_999 * 60, candles: [], settled, at });
+  for (let i = 0; i < 16; i++) store.put(window(i, true, 1_000 * (i + 1))); // sixteen 2,000-bar windows, each fetched a second after the one before
+  assert.equal(await store.flush(), true);
+  const kept = await sql<{ start_time: string }[]>`select start_time from candle_windows where settled order by fetched_at`;
+  assert.deepEqual(kept.map((r) => Number(r.start_time)), Array.from({ length: 15 }, (_, i) => (i + 1) * 120_000), 'the first fetched is gone: the fifteen after it hold 30,000 bars');
+  assert.equal(store.stored(), 15);
+  store.put(window(100, false, 20_000));
+  assert.equal(await store.flush(), true);
+  store.put(window(101, false, 21_000));
+  assert.equal(await store.flush(), true);
+  const latest = await sql<{ start_time: string }[]>`select start_time from candle_windows where not settled`;
+  assert.deepEqual(latest.map((r) => Number(r.start_time)), [101 * 120_000]);
+  assert.equal(covers([{ start: 0, end: 240 }, { start: 300, end: 600 }], 60, 540, 60), true);
+  assert.equal(covers([{ start: 0, end: 240 }, { start: 360, end: 600 }], 60, 540, 60), false, 'a hole at 300');
+  assert.equal(covers([{ start: 0, end: 240 }], 0, 300, 60), false, 'short of the end');
+});
+
+test("candle backfill: after the first pre-warm pass, one aligned page per visit while GMTrade is idle and quick, stopping at its history start; a restart resumes from the table", { skip: dbSkip }, async (t) => {
+  const sql = await freshTables();
+  const boundary = 1_800_000_600;
+  const nowSec = boundary - 61;
+  const first = await stubbedStart(t, nowSec, { sql });
+  const pageOf = (res: number, k: number) => { const start = (Math.floor(nowSec / (300 * res)) - k) * 300 * res; return { start, end: start + 299 * res }; };
+  const pages = (m: { candles: ReturnType<typeof stubCandles> }) => m.candles.pages().map((c) => [c.tokens[0], c.res, c.from, c.to]);
+  const progress = (m: { service: { health(): Record<string, { history?: { backfill: { seriesDone: number; windowsStored: number } } }> } }) => m.service.health().candles!.history!.backfill;
+  // GMTrade's history starts 400 hours ago: the newest 1h page back is cut short, the one before it empty, and every 4h
+  // and 1D page lies before it; the 5m and 15m pages back to their targets are whole.
+  first.candles.since(nowSec - 400 * 3_600);
+  await first.advance(1); // the first pre-warm pass; the backfill starts a second later
+  assert.equal(pages(first).length, 0);
+  await first.advance(2);
+  assert.deepEqual(pages(first), [[BTC_INDEX, 3_600, pageOf(3_600, 1).start, pageOf(3_600, 1).end]], 'the first visit: BTC 1h, the newest settled page');
+  const short = await sql<{ n: number; last: number }[]>`select jsonb_array_length(candles) as n, (candles -> -1 ->> 'time')::bigint as last from candle_windows where settled`;
+  assert.ok(short[0]!.n > 0 && short[0]!.n < 300 && Number(short[0]!.last) === pageOf(3_600, 1).end, `stored as GMTrade answered it: ${short[0]!.n} candles`);
+
+  first.candles.hang(true); // a request whose window nobody has (10 days back: inside GMTrade's history, beyond every copy): its fetch is in flight
+  const user = first.get<CandlesResponse>(`/v1/candles?symbol=SOL&interval=5m&from=${boundary - 10 * 86_400}&to=${boundary - 10 * 86_400 + 99 * 300}`);
+  await io();
+  await first.advance(2);
+  assert.equal(pages(first).length, 1, 'no page while a request fetch is in flight');
+  first.candles.release(true); // answered after 2 s on the clock: too slow for the backfill until a quicker answer
+  first.candles.hang(false);
+  await first.settle();
+  assert.equal((await user).status, 200);
+  await first.advance(2);
+  assert.equal(pages(first).length, 1, 'no page after a slow answer');
+  await first.advance(58); // the pre-warm's minute: quick answers again
+  assert.deepEqual(pages(first)[1], [BTC_INDEX, 300, pageOf(300, 1).start, pageOf(300, 1).end], 'then the next series, BTC 5m');
+
+  const fetchedSoFar = pages(first).length;
+  first.candles.hang(true); // the next page fails: the source is degraded until a call succeeds (the pre-warm, a minute later)
+  await first.advance(2);
+  assert.equal(pages(first).length, fetchedSoFar + 1);
+  first.candles.release(false);
+  first.candles.hang(false);
+  await first.settle();
+  await first.advance(4);
+  assert.equal(pages(first).length, fetchedSoFar + 1, 'no page while the source is degraded');
+  await first.advance(60);
+  assert.ok(pages(first).length > fetchedSoFar + 1, 'resumed once the pre-warm succeeded');
+
+  const secondHour = () => first.candles.pages().some((c) => c.tokens[0] === BTC_INDEX && c.res === 3_600 && c.from === pageOf(3_600, 2).start);
+  await advanceUntil(first, secondHour, 300, "BTC 1h's second page");
+  const marker = await sql<{ n: number }[]>`select jsonb_array_length(candles) as n from candle_windows where symbol = 'BTC' and resolution = 3600 and start_time = ${pageOf(3_600, 2).start}`;
+  assert.deepEqual(marker.map((x) => x.n), [0], "GMTrade's history start, stored as an empty page");
+  await advanceUntil(first, () => progress(first).seriesDone === 45, 500, 'every series complete');
+  const fetched = first.candles.pages();
+  assert.equal(fetched.filter((c) => c.tokens[0] === BTC_INDEX && c.res === 3_600).length, 2, 'the empty page is never asked for again');
+  assert.equal(new Set(fetched.map((c) => `${c.tokens[0]}:${c.res}:${c.from}`)).size, 9 * 12, 'per market: 1h two pages, 5m and 15m four each, 4h and 1D one empty each');
+  assert.equal(fetched.length, 9 * 12 + 1, 'each page once, plus the attempt that failed');
+  assert.equal(progress(first).windowsStored, 9 * 12 + 1, "the pages and the request's window");
+  await first.stop();
+
+  const next = await stubbedModule(t, { sql }); // a restart: the table tells what is stored, nothing is fetched again
+  await advanceUntil(next, () => progress(next).seriesDone === 45, 200, 'every series found complete');
+  assert.equal(next.candles.pages().length, 0);
+  assert.equal(progress(next).windowsStored, 9 * 12 + 1);
 });
 
 test('price frames: every 100 ms, only the symbols whose price or session moved; a new timestamp alone sends nothing', async (t) => {

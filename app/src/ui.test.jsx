@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { LineGraph, SessionNotice } from './ui.jsx';
+import { LineGraph, SessionNotice, WatchlistStar } from './ui.jsx';
 
 const render = (network, notice) => renderToStaticMarkup(<SessionNotice session={{ network, notice }}>Signing in proves this wallet is yours.</SessionNotice>);
 const SLOW_RPC = { state: 'unreachable', reason: 'The Solana connection is not responding.' };
@@ -24,6 +24,14 @@ describe('SessionNotice', () => {
   it('announces session problems to assistive technology from one persistent live region', () => {
     for (const html of [render({ state: 'ok' }, 'Your session expired. Sign in again to continue.'), render({ state: 'ok' }, null)])
       expect(html).toMatch(/^<div class="notice (amber|neutral)" role="status">/);
+  });
+});
+
+describe('WatchlistStar', () => {
+  const star = watched => renderToStaticMarkup(<WatchlistStar symbol="TAO" watched={watched} onToggle={() => {}} />);
+  it('names the action it will take and fills the star of a watched market', () => {
+    expect(star(false)).toMatch(/^<button class="favorite-button " aria-label="Add TAO to watchlist"/);
+    expect(star(true)).toMatch(/^<button class="favorite-button selected" aria-label="Remove TAO from watchlist"/);
   });
 });
 

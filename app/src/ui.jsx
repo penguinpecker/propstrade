@@ -1,5 +1,5 @@
 import React, { useId, useLayoutEffect, useRef } from 'react';
-import { ArrowUpRight, ArrowRight, ArrowLeft, Bitcoin, CircleDollarSign, Cpu, Euro, PoundSterling, Smartphone, Check, X, ChevronDown, Info, ExternalLink, TriangleAlert, Wallet } from 'lucide-react';
+import { ArrowUpRight, ArrowRight, ArrowLeft, Bitcoin, CircleDollarSign, Cpu, Euro, PoundSterling, Smartphone, Check, X, ChevronDown, Info, ExternalLink, Star, TriangleAlert, Wallet } from 'lucide-react';
 import { bpsPercent, date, freshnessLabel, usd, utcTime } from './data.js';
 
 export function Brand({ compact = false }) {
@@ -10,6 +10,11 @@ export function Button({ children, variant = 'primary', small = false, className
 }
 export function IconButton({ icon: Icon, label, className = '', ...props }) {
   return <button className={`icon-button ${className}`} aria-label={label} title={label} {...props}><Icon size={17} strokeWidth={1.7} /></button>;
+}
+/** Adds a market to the watchlist or removes it: filled while the market is watched. */
+export function WatchlistStar({ symbol, watched, onToggle }) {
+  const label = watched ? `Remove ${symbol} from watchlist` : `Add ${symbol} to watchlist`;
+  return <button className={`favorite-button ${watched ? 'selected' : ''}`} aria-label={label} title={label} onClick={() => onToggle(symbol)}><Star size={15} /></button>;
 }
 export function Badge({ children, tone = 'neutral', dot = false, title }) { return <span className={`badge ${tone}`} title={title}>{dot && <i />}{children}</span>; }
 /** Marks a market price that is not live ("Stale", "Delayed", "Unavailable"), with the time of GMTrade's last update. */

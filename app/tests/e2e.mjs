@@ -288,7 +288,7 @@ try {
       await page.keyboard.press('Control+k');
       const dialog = page.getByRole('dialog', { name: 'Find a market' });
       const search = dialog.getByLabel('Search markets');
-      const rows = dialog.locator('.market-picker-list > button');
+      const rows = dialog.locator('.market-picker-list > .picker-row');
       const pairs = () => rows.locator('strong').filter({ hasText: '/' }).allInnerTexts();
       const tab = name => dialog.getByRole('tab', { name: new RegExp(`^${name}`) });
       const chips = dialog.getByRole('group', { name: /sub-categories$/ }).getByRole('button');
@@ -381,6 +381,47 @@ try {
       await page.keyboard.press('Escape');
       await dialog.waitFor({ state: 'detached' });
       assert.equal(await page.evaluate(() => document.activeElement.className), 'search-trigger');
+    });
+
+    await check('watchlist: the bar\'s + opens the picker on All, a star adds a market without choosing it or closing, the bar follows, a reload keeps it, the markets page removes it', async () => {
+      await page.goto(`${siteUrl}/#/trade/funded`);
+      const bar = page.locator('.watchlist-bar');
+      const inBar = symbol => bar.getByRole('button', { name: new RegExp(`^${symbol}`) });
+      const dialog = page.getByRole('dialog', { name: 'Find a market' });
+      const tab = name => dialog.getByRole('tab', { name: new RegExp(`^${name}`) });
+      const watchlistCount = async () => Number(await tab('Watchlist').locator('.quiet').innerText());
+      const heading = () => page.locator('.market-select strong').innerText();
+      await inBar('BTC').waitFor();
+      assert.equal(await inBar('EUR').count(), 0);
+      // The remembered tab is Crypto; the + still opens on All, where markets can be added, and Crypto stays remembered.
+      await page.keyboard.press('Control+k');
+      await tab('Crypto').click();
+      await page.keyboard.press('Escape');
+      await dialog.waitFor({ state: 'detached' });
+      await bar.getByRole('button', { name: 'Add a market to your watchlist' }).click();
+      assert.equal(await tab('All').getAttribute('aria-selected'), 'true', 'the + did not open the picker on All');
+      const [before, shown] = [await watchlistCount(), await heading()];
+      await dialog.getByRole('button', { name: 'Add EUR to watchlist' }).click();
+      await dialog.getByRole('button', { name: 'Remove EUR from watchlist' }).waitFor();
+      assert.deepEqual([await watchlistCount(), await heading()], [before + 1, shown], 'the star did not only star');
+      await page.keyboard.press('Escape');
+      await dialog.waitFor({ state: 'detached' });
+      await inBar('EUR').waitFor();
+      await page.keyboard.press('Control+k');
+      assert.equal(await tab('Crypto').getAttribute('aria-selected'), 'true', 'the + replaced the remembered tab');
+      await tab('Watchlist').click();
+      await dialog.locator('.market-picker-list > .picker-row').getByText('EUR / USD').waitFor();
+      await tab('All').click(); // remembered, for the checks that open the picker next
+      await page.keyboard.press('Escape');
+      await dialog.waitFor({ state: 'detached' });
+      await page.reload();
+      await inBar('EUR').waitFor();
+      await page.goto(`${siteUrl}/#/markets`);
+      await page.getByRole('button', { name: 'Remove EUR from watchlist' }).click();
+      await page.getByRole('button', { name: 'Add EUR to watchlist' }).waitFor();
+      await page.goto(`${siteUrl}/#/trade/funded`);
+      await inBar('BTC').waitFor();
+      assert.equal(await inBar('EUR').count(), 0, 'EUR is still in the watchlist bar');
     });
 
     await check('chart: GMTrade candles, OHLC of the last candle, and live ticks move it', async () => {
@@ -693,7 +734,7 @@ try {
         await page.goto(`${siteUrl}/#/trade/${stage}`);
         await page.locator('.order-panel').waitFor();
         await page.keyboard.press('Control+k');
-        await page.getByRole('dialog', { name: 'Find a market' }).getByRole('button', { name: /FARTCOIN/ }).click();
+        await page.getByRole('dialog', { name: 'Find a market' }).getByRole('button', { name: /^FARTCOIN/ }).click();
         await page.locator('.order-panel').getByText(copy).waitFor();
         assert.ok(await page.locator('.order-panel').getByRole('button', { name: /Buy \/ Long FARTCOIN/ }).isDisabled(), `${stage}: the order can still be submitted`);
       }

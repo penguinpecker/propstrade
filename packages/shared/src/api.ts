@@ -103,6 +103,9 @@ export interface AppConfig {
 export interface UpstreamStatus {
   state: 'checking' | 'ok' | 'degraded' | 'down'; since: Millis | null; lastOkAt: Millis | null; lastError: string | null;
   latencyMs: number | null; fallback: string;
+  /** The candles source only: the chart history the server keeps in its database — how many series (market ×
+   *  interval) it restored the latest window of at boot, and the background backfill's progress. */
+  history?: { seriesWarmAtBoot: number; backfill: { seriesDone: number; seriesTotal: number; windowsStored: number } };
 }
 /** `status` is 'degraded' when the database is down (HTTP 503) or an outside source is down (HTTP 200: fallbacks serve). */
 export interface Health {

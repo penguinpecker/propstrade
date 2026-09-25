@@ -124,8 +124,8 @@
 :root[data-theme="dark"] .screen-thumbnail { background:#231d2b; }
 :root[data-theme="dark"] .dialog { border:1px solid #44374f; box-shadow:0 24px 80px rgba(0,0,0,.5); }
 :root[data-theme="dark"] .dialog::backdrop { background:rgba(6,4,10,.66); }
-:root[data-theme="dark"] :is(.market-picker-list>button:hover,.account-picker>button:hover) { background:#2b2236; }
-:root[data-theme="dark"] .market-picker-list>button>svg { color:#b9a3c9; }
+:root[data-theme="dark"] :is(.picker-row:hover,.account-picker>button:hover) { background:#2b2236; }
+:root[data-theme="dark"] .picker-market>svg { color:#b9a3c9; }
 :root[data-theme="dark"] .wallet-large { background:#33233f; border-color:#5c3f70; color:#bf98df; }
 :root[data-theme="dark"] .notification-icon { background:#30233e; color:#c0a2dc; }
 :root[data-theme="dark"] .help-links svg { color:#b799d2; }
