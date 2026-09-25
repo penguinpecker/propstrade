@@ -962,6 +962,15 @@ try {
         assert.deepEqual(await ticket.locator('.order-summary .data-row > span').allInnerTexts(), ['Liq. price', 'Margin', 'Fees']);
         assert.equal(await ticket.getByRole('button', { name: 'About margin' }).getAttribute('title'), 'The exchange takes the fee out of this margin');
         assert.equal(await ticket.getByRole('button', { name: 'About leverage and margin' }).getAttribute('title'), 'Higher leverage needs less margin and brings the liquidation price closer. BTC / USD allows up to 25×.');
+        // The Fees row's info button breaks the round trip down: open + close fee = the row, then holding costs and the rest.
+        const feesButton = ticket.getByRole('button', { name: 'Fee breakdown' });
+        const breakdown = await feesButton.getAttribute('title');
+        const [open, close] = [/Open fee \$([\d.]+)/, /Est\. close fee \$([\d.]+)/].map(re => Number(breakdown.match(re)?.[1]));
+        const feesRow = Number((await ticket.locator('.order-summary .data-row').nth(2).locator('strong').innerText()).replace(/[$,]/g, ''));
+        assert.ok(Math.abs(open + close - feesRow) < 0.011, `open ${open} + close ${close} is not the Fees row ${feesRow}: ${breakdown}`);
+        assert.match(breakdown, /Borrow \+ funding .+\/h while open · No Props\.trade fee per order$/);
+        await feesButton.click();
+        await page.locator('.toast').filter({ hasText: 'Open fee' }).waitFor({ timeout: 3_000 });
         // The order button: at least 48 px tall and whole in the window without scrolling the page or the order panel.
         await page.evaluate(() => scrollTo(0, 0));
         assert.equal(await ticket.evaluate(el => el.scrollTop), 0);
