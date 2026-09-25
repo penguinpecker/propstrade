@@ -248,7 +248,9 @@ test('keeper against solana-test-validator: top-up, session-guard close with a c
 
     // ---- operator alerts: stale prices under an open funded position, order churn, a chain job that failed for good
     solFreshness = 'stale';
-    await t.db.insert(chainJobs).values({ kind: 'reject_payout', subject: 'AnotherPayout', payload: {}, mac: '0'.repeat(64), status: 'failed', lastError: 'simulation failed: InvalidPayoutStatus' });
+    // Stamped on the keeper's clock, which runs ahead of the database's to reach a session close: the check looks at
+    // jobs that failed within its last 24 h (it missed this one whenever the next close was a day or more away).
+    await t.db.insert(chainJobs).values({ kind: 'reject_payout', subject: 'AnotherPayout', payload: {}, mac: '0'.repeat(64), status: 'failed', lastError: 'simulation failed: InvalidPayoutStatus', updatedAt: new Date(keeperNow()) });
     await t.db.insert(gmOrders).values(Array.from({ length: 50 }, (_, i) => ({
       address: `Churn${i}`, fundedAccount: fundedB.toBase58(), marketToken: MARKETS.SOL.token.toBase58(), symbol: 'SOL', side: 'Long' as const,
       kind: 'Market' as const, isIncrease: true, sizeUsd: '10', status: 'executed' as const, createSignature: 'churn', createdAt: new Date(keeperNow()), closedAt: new Date(),
