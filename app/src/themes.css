@@ -70,7 +70,6 @@
 :root[data-theme="dark"] .position-protection { border-bottom-color:#74548e; }
 :root[data-theme="dark"] .side-toggle button.active.long { background:#203e33; color:#8cd6b6; }
 :root[data-theme="dark"] .side-toggle button.active.short { background:#442732; color:#efabbb; }
-:root[data-theme="dark"] .ticket-subrow button { background:#2a2136; border-color:#4d395e; color:#c8a5e7; }
 :root[data-theme="dark"] .protection-title>svg { color:#b79ecb; }
 :root[data-theme="dark"] .leg-inputs input { border-color:#4c415b; }
 :root[data-theme="dark"] .ticket-account { background:#1c1922; }

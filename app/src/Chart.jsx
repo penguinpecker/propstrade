@@ -25,7 +25,7 @@ const VERTICAL_PAN_PX = 6;
 const FONT = 'Manrope, sans-serif';
 /** Touch screens: a vertical swipe on the chart scrolls the page (a drag across still pans time), and the axis text is a size up. */
 const COARSE = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
-const FONT_SIZE = COARSE ? 11 : 10;
+const FONT_SIZE = COARSE ? 12 : 11;
 /** Height of one price-axis label: the library pads its text by 2.5 px per 12 px of font above and below. */
 const AXIS_LABEL = FONT_SIZE * 17 / 12;
 const SCROLL = { mouseWheel: false, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: !COARSE };

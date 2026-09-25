@@ -403,7 +403,8 @@ try {
         assert.equal(await page.evaluate(() => { const d = document.querySelector('dialog'); return d.scrollHeight - d.clientHeight; }), 0, 'the dialog scrolls');
         await toEnd();
         await chips.filter({ hasText: 'Layer 1 & 2' }).click();
-        assert.deepEqual(await position(), [0, true], 'a new chip opens at its top');
+        // Its three markets fit this window since the rows got compact, so only the position is left to check.
+        assert.equal((await position())[0], 0, 'a new chip opens at its top');
       } finally {
         await page.setViewportSize({ width: 1920, height: 1080 });
       }
@@ -932,47 +933,112 @@ try {
       assert.deepEqual(await page.locator('.position-table thead th').allTextContents(), ['Market / side', 'Position size', 'Entry price', 'Mark price', 'Liq. price', 'Unrealized P&L', 'Fees accrued', 'TP / SL', '']);
       await row.getByText('98.12', { exact: true }).waitFor();
       await row.getByText('$4,600.00 · $1,533.33 margin').waitFor();
-      // Accrued costs with their split as the hover, and the market's rates for the position's side under the leverage badge.
+      // Accrued costs with their split as the hover, and the market's rates for the position's side as the market cell's
+      // hover: the row keeps two lines (touch screens, without hover, show the rates under the leverage badge).
       const fees = row.locator('td[title^="Borrowing"]');
       assert.equal(await fees.innerText(), '$3.60');
       assert.equal(await fees.getAttribute('title'), "Borrowing $0.62 · funding $0.22 · close fee $2.76: settled at this position's next fill");
-      assert.equal(await row.locator('.side-rate').innerText(), 'F +0.0012% · B 0.0008% / h');
+      assert.equal(await row.locator('td').first().getByRole('button').getAttribute('title'), 'Long rates per hour: funding +0.0012% · borrow 0.0008%\nFunding: Longs pay when positive, shorts when negative. Per 8h: L +0.0096% · S -0.0072% · per year: L +10.5120% · S -7.8840%');
+      assert.equal(await row.locator('.side-rate').count(), 0, 'the rates line is back in the desktop row');
     });
 
     /** Shows `symbol` in the terminal through the watchlist bar (earlier checks leave other markets selected). */
     const showMarket = async symbol => { await page.locator('.watchlist-bar').getByRole('button', { name: new RegExp(`^${symbol}`) }).click(); await page.locator('.market-select strong', { hasText: new RegExp(`^${symbol}`) }).waitFor(); };
+    /** Opens the ticket's Order details disclosure (this browser remembers it open or closed). */
+    const openDetails = async () => { const details = page.locator('.order-panel .order-details'); await details.waitFor(); if (!(await details.evaluate(d => d.open))) await details.locator('summary').click(); };
+
+    await check('ticket: three summary rows and a large order button in view at 1440x900; Order details holds the rest (collapsed at first, every row, kept across a reload); the market heading is one row at 1280 and 1440 px', async () => {
+      const ticket = page.locator('.order-panel');
+      const details = ticket.locator('.order-details');
+      const isOpen = () => details.evaluate(d => d.open);
+      await page.setViewportSize({ width: 1440, height: 900 });
+      try {
+        await page.goto(`${siteUrl}/#/trade/evaluation`);
+        await showMarket('BTC');
+        for (const clear of await ticket.getByRole('button', { name: 'Clear' }).all()) if (await clear.isEnabled()) await clear.click(); // TP/SL empty
+        await page.getByLabel('Order size in USD').fill('1000');
+        await ticket.getByRole('button', { name: '5×', exact: true }).click();
+        await page.waitForFunction(() => /\$\d/.test(document.querySelector('.order-summary')?.innerText.split('Liq. price')[1] ?? ''), null, { timeout: 5_000 });
+        assert.deepEqual(await ticket.locator('.order-summary .data-row > span').allInnerTexts(), ['Liq. price', 'Margin', 'Fees']);
+        assert.equal(await ticket.getByRole('button', { name: 'About margin' }).getAttribute('title'), 'The exchange takes the fee out of this margin');
+        assert.equal(await ticket.getByRole('button', { name: 'About leverage and margin' }).getAttribute('title'), 'Higher leverage needs less margin and brings the liquidation price closer. BTC / USD allows up to 25×.');
+        // The order button: at least 48 px tall and whole in the window without scrolling the page or the order panel.
+        await page.evaluate(() => scrollTo(0, 0));
+        assert.equal(await ticket.evaluate(el => el.scrollTop), 0);
+        const button = await ticket.locator('.order-submit').boundingBox();
+        assert.ok(button.height >= 48, `the order button is ${button.height}px tall`);
+        assert.ok(button.y >= 0 && button.y + button.height <= 900, `the order button spans y ${Math.round(button.y)}–${Math.round(button.y + button.height)} of a 900 px window`);
+        // Order details: collapsed on a first visit, with every row the summary leaves out.
+        assert.equal(await isOpen(), false, 'Order details starts open');
+        assert.equal(await details.locator('.data-row').first().isVisible(), false, 'the detail rows show while collapsed');
+        await details.locator('summary').click();
+        assert.equal(await isOpen(), true);
+        await page.waitForFunction(() => localStorage.getItem('props.orderDetails') === 'true');
+        const labels = await details.locator('.data-row > span').allInnerTexts();
+        for (const label of ['Estimated entry', 'Order value', 'Open fee', 'Est. close fee', 'Price impact', 'Borrow + funding · long', 'Slippage tolerance']) assert.ok(labels.some(l => l.startsWith(label)), `Order details lacks ${label}: ${labels.join(' | ')}`);
+        await details.getByText('+ = better than mark').waitFor();
+        await details.getByText('Props.trade charges no fee per order').waitFor();
+        await details.getByRole('button', { name: /%/ }).click(); // the slippage setting still opens its dialog
+        await page.getByRole('dialog', { name: 'Slippage tolerance' }).waitFor();
+        await page.keyboard.press('Escape');
+        // The state is this browser's: kept across a reload, open and closed.
+        await page.reload();
+        await details.locator('summary').waitFor();
+        assert.equal(await isOpen(), true, 'Order details closed after a reload');
+        await details.locator('summary').click();
+        assert.equal(await isOpen(), false);
+        await page.waitForFunction(() => localStorage.getItem('props.orderDetails') === 'false');
+        await page.reload();
+        await details.locator('summary').waitFor();
+        assert.equal(await isOpen(), false, 'Order details opened after a reload');
+        // The heading: pair, price, the four metrics and the session badge on one row, at most 64 px tall.
+        for (const width of [1280, 1440]) {
+          await page.setViewportSize({ width, height: 900 });
+          await page.locator('.market-heading .rate-metric').first().waitFor();
+          const heading = page.locator('.market-heading');
+          const items = await heading.evaluate(h => [...h.querySelectorAll(':scope > .market-select, :scope > .market-price, .market-metric, :scope > .badge')].filter(e => e.checkVisibility()).map(e => { const r = e.getBoundingClientRect(); return { top: r.top, bottom: r.bottom }; }));
+          assert.equal(items.length, 7, `${width}px: ${items.length} heading items`);
+          assert.ok(Math.max(...items.map(i => i.top)) < Math.min(...items.map(i => i.bottom)), `the heading wraps at ${width}px: ${JSON.stringify(items)}`);
+          const { height } = await heading.boundingBox();
+          assert.ok(height <= 64, `the heading is ${height}px tall at ${width}px`);
+        }
+      } finally {
+        await page.setViewportSize({ width: 1920, height: 1080 });
+      }
+    });
 
     await check('ticket: the leverage slider and presets change the margin, buying power and the quote rows without a dialog', async () => {
       await page.goto(`${siteUrl}/#/trade/evaluation`);
       await showMarket('BTC');
       const ticket = page.locator('.order-panel');
       const rowValue = label => ticket.locator('.execution-details .data-row', { has: page.locator('span', { hasText: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`) }) }).locator('strong').innerText();
+      await openDetails();
       await page.getByLabel('Order size in USD').fill('1000');
       await ticket.getByText('5× leverage').waitFor();
-      assert.equal(await rowValue('Required margin'), '$200.00');
+      assert.equal(await rowValue('Margin'), '$200.00');
       await ticket.getByRole('button', { name: '10×', exact: true }).click();
       await ticket.getByText('10× leverage').waitFor();
-      assert.equal(await rowValue('Required margin'), '$100.00');
+      assert.equal(await rowValue('Margin'), '$100.00');
       assert.equal(await page.getByRole('dialog').count(), 0, 'a dialog opened');
-      await ticket.getByLabel('Leverage').focus(); // the slider: the arrow keys step it by 1× (Crypto allows up to 25×)
+      await ticket.getByLabel('Leverage', { exact: true }).focus(); // the slider: the arrow keys step it by 1× (Crypto allows up to 25×)
       for (let i = 0; i < 10; i += 1) await page.keyboard.press('ArrowRight');
       await ticket.getByText('20× leverage').waitFor();
-      assert.equal(await ticket.getByLabel('Leverage').getAttribute('aria-valuetext'), '20×');
-      assert.equal(await rowValue('Required margin'), '$50.00');
+      assert.equal(await ticket.getByLabel('Leverage', { exact: true }).getAttribute('aria-valuetext'), '20×');
+      assert.equal(await rowValue('Margin'), '$50.00');
       // Page Up / Page Down move to the next label's value either way (not a tenth of the track, stuck at 1×).
       for (const [key, shown] of [['PageDown', '10×'], ['PageDown', '5×'], ['Home', '1×'], ['PageUp', '2×'], ['PageUp', '5×'], ['End', '25×'], ['PageDown', '10×'], ['PageUp', '25×']]) {
         await page.keyboard.press(key);
         await ticket.getByText(`${shown} leverage`).waitFor();
-        assert.equal(await ticket.getByLabel('Leverage').getAttribute('aria-valuetext'), shown, key);
+        assert.equal(await ticket.getByLabel('Leverage', { exact: true }).getAttribute('aria-valuetext'), shown, key);
       }
       await ticket.getByRole('button', { name: 'Max 25×' }).click();
       await ticket.getByText('25× leverage').waitFor();
-      await ticket.locator('.execution-details').getByText(/Est\. liquidation price/).waitFor();
-      await page.waitForFunction(() => /\$\d/.test(document.querySelector('.execution-details')?.innerText.split('Est. liquidation price')[1] ?? ''), null, { timeout: 5_000 });
+      await ticket.locator('.order-summary').getByText('Liq. price').waitFor();
+      await page.waitForFunction(() => /\$\d/.test(document.querySelector('.order-summary')?.innerText.split('Liq. price')[1] ?? ''), null, { timeout: 5_000 });
       const rows = await ticket.locator('.execution-details .data-row span').allInnerTexts();
-      for (const label of ['Estimated entry', 'Order value', 'Required margin', 'Open fee', 'Est. close fee', 'Round-trip fee', 'Price impact', 'Borrow + funding · long', 'Est. liquidation price', 'Slippage tolerance']) assert.ok(rows.some(r => r.startsWith(label)), `missing row ${label}: ${rows.join(' | ')}`);
+      for (const label of ['Liq. price', 'Margin', 'Fees', 'Estimated entry', 'Order value', 'Open fee', 'Est. close fee', 'Price impact', 'Borrow + funding · long', 'Slippage tolerance']) assert.ok(rows.some(r => r.startsWith(label)), `missing row ${label}: ${rows.join(' | ')}`);
       await ticket.getByText('Props.trade charges no fee per order').waitFor();
-      assert.equal(await rowValue('Round-trip fee'), '$1.20'); // 6 bps a leg on $1,000 in the stub
+      assert.equal(await rowValue('Fees'), '$1.20'); // round trip: 6 bps a leg on $1,000 in the stub
       assert.match(await rowValue('Borrow + funding · long'), /^≈ \$0\.02\/h · \$0\.48\/day$/); // (0.0012 + 0.0008)% of $1,000
       assert.equal(await ticket.getByText('Network fee').count(), 0, 'a simulated ticket shows a network fee');
     });
@@ -1005,7 +1071,7 @@ try {
       await ticket.getByRole('button', { name: 'Buy / Long' }).click();
     });
 
-    await check('ticket: the side\'s leverage and size limits from the market row cap both sliders, a size or margin outside them is explained under the size and blocks the order, and a stream update moves them', async () => {
+    await check('ticket: the side\'s leverage and size limits from the market row cap both sliders, a size or margin outside them is explained right above the order button and blocks the order, and a stream update moves them', async () => {
       await page.goto(`${siteUrl}/#/trade/evaluation`);
       await showMarket('ETH'); // the fixture's ETH: $2,500 of room for a new long, shorts up to 10×
       const ticket = page.locator('.order-panel');
@@ -1017,8 +1083,8 @@ try {
       await size.fill('3000');
       await ticket.getByText('Up to $2,500 can be opened long on ETH right now.').waitFor();
       assert.ok(await submit.isDisabled(), 'an order above the exchange\'s room can be sent');
-      // The message sits under the size field, in the ticket's error style.
-      assert.ok(await ticket.locator('.field:has([aria-label="Order size in USD"]) + p.field-error').isVisible(), 'the message is not right under the size field');
+      // The message sits right above the order button, in the ticket's error style.
+      assert.ok(await ticket.locator('p.field-error').evaluate(e => e.checkVisibility() && e.nextElementSibling?.classList.contains('order-submit')), 'the message is not right above the order button');
       // The size slider's 100% is the room (below this account's buying power), and the size input's max.
       await ticket.getByRole('button', { name: '100%', exact: true }).click();
       assert.equal(await size.inputValue(), '2500');
@@ -1029,10 +1095,10 @@ try {
       await ticket.getByText('The minimum margin on ETH is $1.00.').waitFor();
       assert.ok(await submit.isDisabled(), 'an order below the minimum margin can be sent');
       // $1.00 at 25×: at the minimum, but the fees come out of it first. The exchange's model refuses it (the quote runs
-      // it), and the ticket says so under the size in the server's words, once.
+      // it), and the ticket says so above the order button in the server's words, once.
       await size.fill('25');
       await ticket.getByText('A long on ETH needs at least $1.00 of margin after fees.').waitFor();
-      assert.ok(await ticket.locator('.field:has([aria-label="Order size in USD"]) ~ p.field-error').filter({ hasText: 'after fees' }).isVisible());
+      assert.ok(await ticket.locator('p.field-error', { hasText: 'after fees' }).evaluate(e => e.checkVisibility() && e.nextElementSibling?.classList.contains('order-submit')));
       assert.equal(await ticket.locator('p.field-error').count(), 1, (await ticket.locator('p.field-error').allInnerTexts()).join(' | '));
       assert.ok(await submit.isDisabled(), 'an order the exchange refuses can be sent');
       await size.fill('30'); // $1.20: enough after the fees
@@ -1043,7 +1109,7 @@ try {
       await side('Sell / Short').click();
       await ticket.getByText('10× leverage').waitFor();
       await ticket.getByRole('button', { name: 'Max 10×' }).waitFor();
-      assert.equal(await ticket.getByLabel('Leverage').getAttribute('aria-valuetext'), '10×');
+      assert.equal(await ticket.getByLabel('Leverage', { exact: true }).getAttribute('aria-valuetext'), '10×');
       await side('Buy / Long').click();
       await ticket.getByRole('button', { name: 'Max 25×' }).waitFor();
       await ticket.getByText('10× leverage').waitFor();
@@ -1099,7 +1165,7 @@ try {
             }
             const [rowBox, heights, fonts] = [await row.boundingBox(), await labels.evaluateAll(list => list.map(b => b.getBoundingClientRect().height)), await labels.evaluateAll(list => [...new Set(list.map(b => getComputedStyle(b).fontSize))])];
             assert.ok(Math.abs(rowBox.height - Math.max(...heights)) < 0.5, `${width}px ${name}: the label row is ${rowBox.height}px for ${Math.max(...heights)}px labels`);
-            assert.deepEqual(fonts, [width <= 800 ? '12px' : '8px'], `${width}px ${name}: label fonts ${fonts}`);
+            assert.deepEqual(fonts, [width <= 800 ? '13px' : '10px'], `${width}px ${name}: label fonts ${fonts}`);
           }
         } finally {
           if (width < 800) await page.getByRole('button', { name: 'Close order form' }).click({ timeout: 2_000 }).catch(() => undefined);
@@ -1332,6 +1398,7 @@ try {
         const row = page.locator('.position-table tbody tr').first();
         await row.waitFor();
         await page.locator('.price-chart canvas').first().waitFor();
+        await openDetails(); // the sweep reads rendered text: the Order details rows too
         await sweep(`${stage} terminal`);
         await page.locator('.trade-feed').getByRole('tab', { name: 'Liquidity' }).click();
         await sweep(`${stage} liquidity`);

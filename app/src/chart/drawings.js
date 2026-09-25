@@ -11,8 +11,8 @@ const HANDLE = 4.5;
 const DRAG_START = 3; // px a press moves before it drags a drawing
 const CLICK = 6; // a press that moves less is a click: a two-point tool then waits for a second click
 const NO_SCROLL = { mouseWheel: false, pressedMouseMove: false, horzTouchDrag: false, vertTouchDrag: false };
-const FONT = '500 12px Manrope, sans-serif';
-const SMALL = '500 10px Manrope, sans-serif';
+const FONT = '500 13px Manrope, sans-serif';
+const SMALL = '500 11px Manrope, sans-serif';
 const MONTHS = 'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split(' ');
 
 /** Fractional bar index of a time: interpolated between candles, extrapolated by the interval before the first and after the last. */

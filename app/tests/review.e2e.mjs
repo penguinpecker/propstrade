@@ -42,6 +42,9 @@ try {
   await page.getByText('Live data connected').waitFor({ timeout: 10_000 });
 
   await check('a slippage the dialog refuses to save is not used for a funded order', async () => {
+    // Slippage lives in the Order details disclosure, collapsed by default.
+    const details = ticket.locator('.order-details');
+    if (!(await details.evaluate(d => d.open))) await details.locator('summary').click();
     await ticket.getByRole('button', { name: /0\.5%/ }).click();
     await page.getByLabel('Maximum slippage (%)').fill('50');
     assert.ok(await page.getByRole('button', { name: 'Save tolerance' }).isDisabled(), 'the dialog accepts 50%');
