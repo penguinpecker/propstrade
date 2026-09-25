@@ -434,7 +434,8 @@ test('a funded account whose equity reached the floor is marked breached, then c
   chain.put(ownerUsdcAddress(fundedKey), chain.usdc(0n));
   chain.put(ownerPda(fundedKey), chain.system(250_000_000));
   const flatPosition = Keypair.generate().publicKey;
-  chain.client.fetchOwnerPositions = async (f) => (f.equals(fundedKey) ? [flatPosition] : []);
+  // Its one GMTrade Position is empty: it proves nothing to close_funded's flat check, so it is not passed.
+  chain.client.fetchOwnerPositions = async (f, o = {}) => (f.equals(fundedKey) && !o.open ? [flatPosition] : []);
   const r = recorder();
   const keeper = createKeeper({
     db: t.db, rpc: chain.rpc as never, client: chain.client, reader: { evaluation: async () => { throw new Error('unused'); }, market: async () => sol },
@@ -442,7 +443,7 @@ test('a funded account whose equity reached the floor is marked breached, then c
   });
   const stop = new AbortController();
   await runTicks(keeper, stop, keeper.run(stop.signal, async () => true, 20), 3);
-  assert.deepEqual(chain.lifecycle, ['markBreached', `closeFunded(${flatPosition.toBase58()})`], 'the owner PDA\'s GMTrade positions are passed for the flat check');
+  assert.deepEqual(chain.lifecycle, ['markBreached', 'closeFunded()'], 'only owner positions with a size are passed for the flat check');
   assert.deepEqual(chain.restricted, [], 'no restriction an operator could lift');
   assert.ok(r.alerts.some((a) => a.key === `breach:${address}` && a.level === 'critical'));
   assert.ok(r.alerts.some((a) => a.key === `closed:${address}`));

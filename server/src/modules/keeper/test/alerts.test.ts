@@ -20,6 +20,14 @@ function recorder() {
 }
 const settle = () => new Promise((r) => setImmediate(r));
 
+test('an alert logs its severity under its own key: pino writes its numeric level first, and JSON readers keep the last duplicate', () => {
+  const merged: object[] = [];
+  const keep = (o: object) => void merged.push(o);
+  const alerts = createAlerts({ env: {}, log: { info: keep, warn: keep, error: keep } as never });
+  alerts.send('breach:F', 'critical', 'Funded account F reached its equity floor');
+  assert.deepEqual(merged.at(-1), { alert: 'breach:F', severity: 'critical' });
+});
+
 test('alerts go to the log, Telegram and Sentry; the same key repeats only after its interval', async () => {
   const r = recorder();
   const alerts = createAlerts({

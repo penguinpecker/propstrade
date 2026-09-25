@@ -112,6 +112,15 @@ export function leverageAbove(p: PositionView, capBps: number): boolean {
   return p.size * BPS > (p.netValue ?? p.collateral * MICRO_TO_GM) * BigInt(capBps);
 }
 
+/**
+ * The session guard's rule, for funded accounts (the keeper) and evaluations (the sim engine) alike: from GUARD_LEAD_MS
+ * before the session's next close, a position above the closed-session cap on net value is closed.
+ */
+export function sessionGuard(schedule: Schedule, capBps: number, p: PositionView, now: number): boolean {
+  const close = nextSessionClose(schedule, now);
+  return close !== null && now >= close - GUARD_LEAD_MS && leverageAbove(p, capBps);
+}
+
 /** Would `sync` change anything: a slot's size, collateral or pending sum, an order gone, or an idle slot to free. */
 export function syncDiffers(v: AccountView): boolean {
   if (v.orders.some((o) => o.state === 'missing')) return true;
@@ -147,27 +156,28 @@ const steps: Record<StepKind, (v: AccountView, c: PlanContext) => Step | null> =
 
   /**
    * Equity at the floor ends the account, as a failed evaluation ends: `mark_breached` (terminal; the restriction lift
-   * cannot reopen it) and a close of every open position. A breached account keeps getting its positions closed
-   * whatever they are worth now (a liquidation can leave collateral behind), and is closed once flat (`closure`).
+   * cannot reopen it), alone in its transaction: it needs no SOL from the owner PDA and GMTrade cannot refuse it, so no
+   * close can hold it up. Then every open position is closed, whatever it is worth now (a liquidation can leave
+   * collateral behind), except one the model values at nothing: GMTrade refuses a user decrease of an insolvent
+   * position (and cancels it, at an execution fee), so only its liquidation closes that one. Equity reaches the floor
+   * only when every position is worth nothing, so the mark is never followed by a close at the same prices. Once flat
+   * the account is closed (`closure`).
    */
   breach: (v) => {
-    const closable = openSlots(v).filter((s) => v.markets.get(s.marketToken)?.open);
+    const closable = openSlots(v).filter((s) => v.markets.get(s.marketToken)?.open && (v.positions.get(s.gmPosition)?.netValue ?? 1n) > 0n);
     if (v.status === 'breached') {
       const actions = riskCloses(v, closable);
       return actions.length ? { kind: 'breach', actions, detail: 'the account breached its floor: closing its remaining positions' } : null;
     }
-    if (v.value === null || v.value > 0n) return null;
-    const mark = v.status === 'active' || v.status === 'restricted' ? [{ type: 'markBreached' } as const] : [];
-    const actions = [...mark, ...riskCloses(v, closable)];
-    return actions.length ? { kind: 'breach', actions, detail: 'equity is at or below the account floor' } : null;
+    if (v.value === null || v.value > 0n || (v.status !== 'active' && v.status !== 'restricted')) return null;
+    return { kind: 'breach', actions: [{ type: 'markBreached' }], detail: 'equity is at or below the account floor' };
   },
 
   session: (v, c) => {
     const targets = openSlots(v).filter((s) => {
       const m = v.markets.get(s.marketToken);
       if (!m?.open || !m.schedule) return false; // never try to close a closed market
-      const close = nextSessionClose(m.schedule, c.now);
-      return close !== null && c.now >= close - GUARD_LEAD_MS && leverageAbove(v.positions.get(s.gmPosition)!, m.closedMaxLeverageBps);
+      return sessionGuard(m.schedule, m.closedMaxLeverageBps, v.positions.get(s.gmPosition)!, c.now);
     });
     const actions = riskCloses(v, targets);
     const names = targets.map((s) => `${s.isLong ? 'Long' : 'Short'} ${v.markets.get(s.marketToken)!.symbol}`).join(', ');

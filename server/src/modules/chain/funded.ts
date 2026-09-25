@@ -89,7 +89,9 @@ export function createFundedProvider(d: { db: Db; venue: Venue; program: Program
     if (v && v.status !== 'closed' && funded.status !== 'closed') {
       const m = money(v, principal);
       [equity, realized, unrealized, notional, available, freshness] = [floor + m.value, m.realized, m.unrealized, m.notional, v.ownerUsdc, v.freshness];
-      status = STATUS[v.status] ?? status;
+      // A breached account still holding positions or orders is being closed ('Closing', a current account in the app);
+      // it reads 'breached' (ended) once flat.
+      status = v.status === 'breached' && !v.flat ? 'closure_pending' : STATUS[v.status] ?? status;
     } else {
       const [last] = await db.select().from(equitySnapshots).where(eq(equitySnapshots.accountId, row.id)).orderBy(desc(equitySnapshots.ts)).limit(1);
       equity = toGmUsd(last?.equity ?? row.sizeUsd);

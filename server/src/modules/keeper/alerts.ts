@@ -88,7 +88,8 @@ export function createAlerts(d: AlertDeps) {
       const now = Date.now();
       if (now - (sentAt.get(key) ?? -Infinity) < repeatMs) return;
       sentAt.set(key, now);
-      (level === 'critical' ? d.log.error : level === 'warning' ? d.log.warn : d.log.info).call(d.log, { alert: key, level }, text);
+      // `severity`, not `level`: pino writes its own numeric level first, and JSON readers keep the last duplicate key.
+      (level === 'critical' ? d.log.error : level === 'warning' ? d.log.warn : d.log.info).call(d.log, { alert: key, severity: level }, text);
       if (token && chat) {
         outbox.push(`[${level}] ${text}`.slice(0, TELEGRAM_MAX_CHARS));
         scheduleTelegram();

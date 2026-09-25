@@ -88,10 +88,13 @@ export function toFill(f: FillRow): Fill {
 
 export interface Mark { position: PositionRow; tick?: PriceTick; state?: MarketState; status?: PositionStatus }
 
-/** Values each open position at the latest tick with the live market state, as GMTrade would (pending fees included). */
-export async function markPositions(md: MarketDataService, positions: PositionRow[]): Promise<Mark[]> {
+/**
+ * Values each open position at the latest tick (or the one `prices` holds for its market) with the live market state, as
+ * GMTrade would (pending fees included).
+ */
+export async function markPositions(md: MarketDataService, positions: PositionRow[], prices?: ReadonlyMap<string, PriceTick>): Promise<Mark[]> {
   return Promise.all(positions.map(async (position): Promise<Mark> => {
-    const tick = md.price(position.symbol);
+    const tick = prices?.get(position.symbol) ?? md.price(position.symbol);
     if (!tick) return { position }; // no price yet (market data starting): nothing to value against
     const state = await md.marketState(position.marketToken).catch(() => undefined);
     if (!state) return { position, tick };

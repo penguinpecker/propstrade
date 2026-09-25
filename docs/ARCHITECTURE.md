@@ -307,7 +307,9 @@ Program (round 1, reviewed by two adversarial auditors, all findings fixed):
   frees slots. `sync` drops an order only once its account is gone; finished-but-open orders stay tracked (account not
   flat) until `close_completed_order` recovers their escrow.
 - `approve_payout` / `close_funded` require the owner's GMTrade Position accounts to EXIST and be size 0 (absent
-  addresses are rejected): the keeper passes SDK `fetchOwnerPositions()`.
+  addresses are rejected): the keeper and the job executor pass those with a size, SDK
+  `fetchOwnerPositions(funded, { open: true })` (an empty one proves nothing, and a transaction holds at most 16 with
+  `close_funded`, 13 with `approve_payout`).
 - Decrease orders need size ≥ $1 (GMTrade min) or CLOSE_ALL. Every non-protective order needs acceptable_price ≠ 0;
   TP/SL have none so they can always execute.
 - `initialize` starts with all pauses on; the trading pause also blocks `activate_funded` and `top_up_owner`; pauses
@@ -506,9 +508,20 @@ Sim engine (round 2, `server/src/modules/sim`):
 - The leader values every account with open positions in memory each second and locks an account only when a rule has
   work (liquidation, expired market order, status change, 5-min snapshot); ticks lock only accounts with an order the
   tick can execute. Accounts with only resting orders cost nothing.
-- Gap: the closed-session leverage guard (§1, §4.5.3) does not yet run for evaluations: it needs the keeper's session
-  schedule (keeper/sessions.ts in the keeper track) to know when a session closes. Until then an evaluation can hold a
-  position above `closedMaxLeverage` through a close.
+- Session guard (§1, §4.5.3) for evaluations too (2026-09-25; practice accounts are not guarded): in a market with a
+  session calendar (keeper/sessions.ts `SCHEDULES`: Stocks → NYSE, Forex → Friday 17:00 New York) and a
+  `closedMaxLeverage`, a position above the cap on net value is closed from 15 min before the close by the keeper's own
+  rule (`sessionGuard` in keeper/rules.ts): a CLOSE_ALL market decrease at the report, with a `risk` activity row and
+  notice. A position the rules pass finds liquidatable is liquidated instead.
+- Black swans (`server/test/sim/blackswan.*.test.ts`, on the recorded GMTrade state): a report through a stop loss fills
+  it at the report's price; past insolvency GMTrade refuses the stop (a user decrease) and the same step liquidates, once,
+  for exactly the collateral (close + liquidation fee + accrued costs, never more). A close's acceptable price (≤ 5%)
+  cancels it across a larger gap; a stop loss carries none. An hour of borrowing and funding costs a 20x SOL position
+  ~0.2 bp; fees alone make it liquidatable after ~19 days. A liquidating account costs ~35 statements: 300 at once take
+  1.6–5 s (laptop) of one sequential rules pass. What was open at 3c53c9d (a liquidation run from another market's fill
+  step pre-empting a stop loss of the same second, the pass liquidating each account at the price current when it
+  reached it, one report's 300 fill steps holding the server's whole pool, no session guard) is fixed: see Black-swan
+  handling below.
 - trades_root encoding: `packages/shared/src/merkle.ts` (Web Crypto; the server commits with it, the Verify page recomputes
   with it), leaves from `GET /v1/sim/:id/fills`, public once the result is onchain. Results go through the
   `sim_results` outbox: `onResolved` fires when decided and again every 5 min / at leadership start until
@@ -571,13 +584,15 @@ Keeper module (round 2):
 - Each tick (≤ 5 s) the leader reads every open funded account fresh (FundedAccount, owner USDC + lamports, its GMTrade
   Position and Order accounts in ONE `getMultipleAccounts` call, i.e. one slot, re-read if the FundedAccount changed
   since it listed them; model valuation), plans ONE transaction (most urgent first: owner top-up, equity breach,
-  session guard, upgrade restrict, cleanup, sync, closure of a flat breached account), sends it, reads again and re-plans until nothing is left. Every send
-  first asks Postgres whether this session still holds `LOCK_KEYS.keeper`; if not, nothing is sent and the term ends.
+  session guard, upgrade restrict, cleanup, sync, closure of a flat breached account), sends it, reads again and re-plans until nothing is left. Accounts
+  are worked on eight at a time. Every send first asks Postgres whether this session still holds `LOCK_KEYS.keeper`
+  (those checks and their sends pass one at a time); if not, nothing is sent and the term ends.
 - Breach = equity ≤ floor, i.e. V ≤ 0 (V as in the chain notes), decided only on `live`/`delayed` valuations and only
   when a second fresh read agrees: `mark_breached` (if active or restricted; terminal, so the restriction lift cannot
-  reopen it) + a CLOSE_ALL `close_position` per open slot in an open market, in one transaction when it fits. A breached
-  account keeps getting its remaining positions closed whatever they are worth now (liquidations can leave collateral),
-  and once flat (cleanup and sync done) is closed with `close_funded` (positions = `fetchOwnerPositions()`), so the
+  reopen it), alone in its transaction. A breached account then gets a CLOSE_ALL `close_position` per open slot in an
+  open market whose position the model values above zero (liquidations can leave collateral, prices recover); a
+  position worth nothing is left to GMTrade's liquidation, since GMTrade refuses a user decrease of an insolvent
+  position. Once flat (cleanup and sync done) it is closed with `close_funded` (the owner positions with a size), so the
   trader can activate the next evaluation they pass. The trader hears of it from the indexed `AccountBreached` event. With all 8 tracked-order slots used it first recovers finished orders
   (`close_completed_order`), then cancels the trader's own pending orders: those on the slots being closed (TP/SL
   first), then increases elsewhere, another position's TP/SL last; the trader is told which. A slot with a pending risk
@@ -610,9 +625,44 @@ Keeper module (round 2):
   of one alert key throttled to 30 min. Telegram gets one message per batch, at most every 4 s (its group limit is 20
   a minute), and a 429 is sent again after `retry_after`. Raised for breaches, failed keeper transactions, held payouts,
   GMTrade upgrades, stale prices (> 20 s) on markets with open funded positions, ≥ 50 orders/hour on one account, chain
-  jobs failed for good, an account the keeper cannot read or value, and an indexer more than 5 min behind.
+  jobs failed for good, an account the keeper cannot read or value, and an indexer more than 5 min behind. A failed
+  keeper transaction's key carries its cause (`failed:<funded>:<step>:<program error | sol | error>`), so a different
+  failure of the same step is raised at once; transactions expiring unlanded raise one `landing` alert for the keeper;
+  a forced close short of SOL names the owner PDA to fund. The log carries the alert's level as `severity` (pino's own
+  numeric `level` stays intact).
 - The venue loop keeps reading an account's GMTrade fills for 3 min after it goes flat (subsquid lags ~35 s), so the
   closing fills a payout review reconciles against are indexed.
+
+Black-swan handling (2026-09-25; tests in `server/src/modules/keeper/test/blackswan.keeper.test.ts`,
+`server/test/sim/blackswan.*.test.ts` and `server/src/modules/chain/test/send.test.ts`, each point one that failed at
+3c53c9d): what a 20-40 % gap does now.
+- Funded equity is at the floor only when every position is worth nothing (V = owner USDC + escrowed collateral + Σ net
+  value, each ≥ 0), so the keeper marks the account alone and places no forced close then: GMTrade would refuse a user
+  decrease of an insolvent position and cancel it at a 300,000-lamport execution fee, re-placed tick after tick (62 in
+  5 ticks for one account). GMTrade's liquidation closes those; the keeper syncs the account flat and closes it. A
+  position worth something again (a recovery before the liquidation) is closed. 30 all-in accounts at −30 %: 30
+  `mark_breached` transactions, the last account marked 3.2 s into the tick (59 s one account at a time), and all 30
+  closed once liquidated.
+- Throughput and congestion: eight accounts at a time, so an account whose transaction does not land no longer holds
+  the others for its blockhash lifetime (6 such accounts: every first send at 0 s, was one lifetime apart); 50 accounts
+  at 50 ms per RPC call tick in 0.8 s (5.2 s). The priority fee (`chain/send.ts`, keeper and job executor alike) is the
+  90th percentile of what landed on the transaction's writable accounts over the last 150 slots, within 100,000 and
+  10,000,000 µlamports/CU, doubled after each transaction that expired unlanded and halved after each that landed (per
+  connection); it rises per re-plan, not within one blockhash lifetime. A status poll the RPC does not answer is polled
+  again (up to 60), so a landed transaction is not reported as failed.
+- Closure and payouts pass only owner positions with a size: an account with 25 empty ones closes (16 filled a
+  `close_funded` transaction). The rent of empty positions still waits for `close_empty_position` (the gap above).
+- Alerts: `value:<funded>` when the model cannot value an account's positions while prices are live; causes in the
+  `failed:` keys; one `landing` alert; the owner PDA and ≈ 0.015 SOL per forced close in a SOL-shortage alert; `severity`
+  in the log line. The churn count (≥ 50 orders/hour) still includes the keeper's own orders, which no longer churn.
+- Sim: each rules pass decides at one price per market (300 identical positions with a crash report landing mid-pass:
+  300 identical endings, was 74-100 kept and the rest wiped); a liquidatable position's own report runs its executable
+  orders first, so a stop loss fills whichever market's report is processed first; the leader's fill and rules steps
+  hold at most 4 of the pool's 10 connections (`LEADER_STEPS`; 300 fill steps on one report: another module's read took
+  2 ms and a trader's request 17 ms, was 0.7-1.1 s each; the storm itself takes longer, 4 s from 0.85 s on a laptop,
+  and every fill keeps its report's price); evaluations get the session guard (above).
+- Display: a breached funded account still holding positions or orders reads `closure_pending` ("Closing", a current
+  account) until flat; an upstream's `lastError` in `/v1/health` is null once it answers again.
 
 Full-stack rehearsal (round 3, `scripts/local-stack.ts` + `app/tests/fullstack.e2e.mjs`):
 - marketdata decodes `MarketConfig` with the program IDL bundled in `@props/sdk` (the build the chain module pins

@@ -3,6 +3,8 @@
 //   fx    forex: the week ends Friday 17:00.
 // NYSE holidays and early closes as published on nyse.com for 2026–2027; later dates are not covered (see `covers`).
 export type Schedule = 'nyse' | 'fx';
+/** The calendar of a session-restricted market, by its marketdata category. */
+export const SCHEDULES: Readonly<Record<string, Schedule>> = { Stocks: 'nyse', Forex: 'fx' };
 
 const NYSE_HOLIDAYS = new Set([
   '2026-01-01', '2026-01-19', '2026-02-16', '2026-04-03', '2026-05-25', '2026-06-19', '2026-07-03', '2026-09-07', '2026-11-26', '2026-12-25',

@@ -121,3 +121,22 @@ describe('addresses and transactions', () => {
     assert.deepEqual(PROPS_VAULT_IDL, JSON.parse(readFileSync(built, 'utf8')), 'run: cp target/idl/props_vault.json packages/sdk/src/idl/');
   });
 });
+
+describe('owner positions', () => {
+  it('with `open`, lists only the owner PDA\'s GMTrade positions with a size, reading just their 16-byte size', async () => {
+    const [empty, open] = [Keypair.generate().publicKey, Keypair.generate().publicKey];
+    const asked: { dataSlice?: { offset: number; length: number } }[] = [];
+    const connection = {
+      async getProgramAccounts(_program: PublicKey, config: { dataSlice: { offset: number; length: number } }) {
+        asked.push(config);
+        const size = (n: number) => Buffer.alloc(16, n).subarray(0, config.dataSlice.length);
+        return [{ pubkey: empty, account: { data: size(0) } }, { pubkey: open, account: { data: size(1) } }];
+      },
+    };
+    const vault = new PropsVaultClient(connection as never);
+    const funded = Keypair.generate().publicKey;
+    assert.deepEqual((await vault.fetchOwnerPositions(funded)).map(String), [empty, open].map(String));
+    assert.deepEqual((await vault.fetchOwnerPositions(funded, { open: true })).map(String), [open.toBase58()]);
+    assert.deepEqual(asked.map((c) => c.dataSlice), [{ offset: 216, length: 0 }, { offset: 216, length: 16 }]);
+  });
+});

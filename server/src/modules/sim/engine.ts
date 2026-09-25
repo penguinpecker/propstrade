@@ -14,6 +14,8 @@
 // liquidation (GMTrade's own check, including its closed-market factor, read from the Market account) always runs.
 // Take profit, stop loss and 100% closes close the whole position at execution (GMTrade CLOSE_ALL, as funded places
 // them), and an account holds at most the 8 orders and 8 positions a funded account can (program MAX_ORDERS/MAX_SLOTS).
+// Evaluations also get the keeper's session guard (keeper/rules.ts sessionGuard): a stock or forex position above the
+// closed-session cap is closed from 15 minutes before the session ends, as on a funded account.
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { and, asc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
@@ -27,6 +29,8 @@ import { accountEvents, accounts, closedTrades, equitySnapshots, simFills, simOr
 import { ApiError } from '../../errors.ts';
 import type { Sealer } from '../../lib/integrity.ts';
 import type { EvaluationResult, EvaluationTerms, MarketDataService, MarketState, ModuleContext } from '../types.ts';
+import { sessionGuard } from '../keeper/rules.ts';
+import { SCHEDULES } from '../keeper/sessions.ts';
 import {
   PENDING, STALE_MS, TRADING, loadAccount, loadAccounts, loadBook, markPositions, modelAccount, orderList, practiceId, shortIdOf, snapshot,
   toFill, toOrder, value, type AccountRow, type Book, type Mark, type OrderRow, type PositionRow, type Valuation,
@@ -47,6 +51,11 @@ const MIN_DECREASE_USD = 10n ** 20n; // GMTrade's $1 minimum for a partial decre
 const MAX_ORDERS = 8; // programs/props_vault state.rs MAX_ORDERS: tracked orders, each take profit and stop loss included
 const MAX_POSITIONS = 8; // MAX_SLOTS: (market, side) pairs with a position or a pending increase
 const TERMINAL = new Set<string>(['passed', 'failed', 'breached']);
+/**
+ * Leader steps (fills, rules) holding a pool connection at once. The server has one pool of 10 connections for the API,
+ * the keeper and every module: one report's fill steps for 300 accounts, all at once, kept them all waiting.
+ */
+const LEADER_STEPS = 4;
 
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 type Notice = Pick<Notification, 'title' | 'body' | 'href' | 'kind'>;
@@ -140,6 +149,8 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
   const publishedAt = new Map<string, number>();
   const nearLimitNoticeAt = new Map<string, number>();
   let leading = false;
+  let leaderSteps = 0;
+  const stepQueue: (() => void)[] = [];
 
   // ---------- plumbing ----------
 
@@ -157,19 +168,36 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     return p;
   }
 
-  /** Runs `fn` in a transaction holding the account's row lock; stream events, notifications and results go out after commit. */
-  function inAccount<T>(accountId: string, fn: (tx: Tx, account: AccountRow, fx: Effects) => Promise<T>): Promise<T> {
+  /** Runs `fn` once fewer than LEADER_STEPS leader steps are in a transaction, first come first served. */
+  async function leaderStep<T>(fn: () => Promise<T>): Promise<T> {
+    if (leaderSteps < LEADER_STEPS) leaderSteps++;
+    else await new Promise<void>((resolve) => stepQueue.push(resolve));
+    try {
+      return await fn();
+    } finally {
+      const next = stepQueue.shift();
+      if (next) next(); // the slot passes on
+      else leaderSteps--;
+    }
+  }
+
+  /**
+   * Runs `fn` in a transaction holding the account's row lock; stream events, notifications and results go out after
+   * commit. `leader`: a fill or rules step, which waits for one of the LEADER_STEPS slots (a trader's request does not).
+   */
+  function inAccount<T>(accountId: string, fn: (tx: Tx, account: AccountRow, fx: Effects) => Promise<T>, leader = false): Promise<T> {
     return track(serial(accountId, async () => {
       const fx: Effects = {
         accountId, wallet: '', changed: false, filled: false, notices: [], resolved: [], watch: [], unwatch: [], onCommit: [],
       };
-      const result = await db.transaction(async (tx) => {
+      const transact = () => db.transaction(async (tx) => {
         await tx.select({ id: accounts.id }).from(accounts).where(eq(accounts.id, accountId)).for('update');
         const account = await loadAccount(tx, accountId);
         if (!account) throw new ApiError(404, 'not_found', 'Account not found');
         fx.wallet = account.wallet;
         return fn(tx, account, fx);
       });
+      const result = await (leader ? leaderStep(transact) : transact());
       await afterCommit(fx);
       return result;
     }));
@@ -571,7 +599,8 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     return triggered(order.kind, order.side === 'Long', unitOf(order.triggerPrice!, dec), tickUnits(tick, dec));
   }
 
-  async function fillOrders(tx: Tx, account: AccountRow, fx: Effects, tick: PriceTick) {
+  /** Executes, in placement order, the account's pending orders in `tick`'s market that `tick` can execute. */
+  async function runOrders(tx: Tx, account: AccountRow, fx: Effects, tick: PriceTick) {
     const orders = await tx.select().from(simOrders)
       .where(and(eq(simOrders.accountId, account.id), eq(simOrders.symbol, tick.symbol), inArray(simOrders.status, PENDING)))
       .orderBy(asc(simOrders.createdAt));
@@ -579,6 +608,10 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       const state = await md.marketState(order.marketToken);
       if (executable(order, tick, state)) await execute(tx, account, fx, order, tick, state);
     }
+  }
+
+  async function fillOrders(tx: Tx, account: AccountRow, fx: Effects, tick: PriceTick) {
+    await runOrders(tx, account, fx, tick);
     if (fx.filled || fx.changed) fx.valuation = await applyRules(tx, account.id, fx);
   }
 
@@ -743,22 +776,30 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
   // ---------- rules ----------
 
   /**
-   * One rules step for an account: liquidations, market-order expiry, then equity vs floor and target, near-limit,
-   * the evaluation's result once it is decided and flat, and the equity snapshot.
+   * One rules step for an account: liquidations, market-order expiry, the session guard, then equity vs floor and
+   * target, near-limit, the evaluation's result once it is decided and flat, and the equity snapshot. `prices`: the
+   * rules pass's one price per market (identical positions are decided at the same price whatever their place in the
+   * pass); the latest tick otherwise.
    *
    * Every position's collateral comes out of the available margin and a GMTrade position can lose no more than its
    * collateral, so equity reaches the floor only when every open position is worth nothing, and GMTrade liquidates
    * those in the same step: "close everything possible" on a breach is those liquidations plus cancelling every
-   * pending order. A position the model refuses to liquidate stays open and is retried every pass; the rest of the
-   * step goes ahead.
+   * pending order. A liquidatable position's own report goes first: what its market's pending orders can execute there
+   * (a stop loss, a close) runs before the liquidation, as that report's own fill step does, whichever step reached the
+   * account first (another market's fill step, the rules pass). A position the model refuses to liquidate stays open and
+   * is retried every pass; the rest of the step goes ahead.
    */
-  async function applyRules(tx: Tx, accountId: string, fx: Effects, now = Date.now()): Promise<Valuation> {
+  async function applyRules(tx: Tx, accountId: string, fx: Effects, now = Date.now(), prices?: ReadonlyMap<string, PriceTick>): Promise<Valuation> {
     const load = async () => {
       const account = (await loadAccount(tx, accountId))!;
       const book = await loadBook(tx, accountId);
-      return { account, book, marks: await markPositions(md, book.positions) };
+      return { account, book, marks: await markPositions(md, book.positions, prices) };
     };
     let { account, book, marks } = await load();
+    const ownReports = new Map(marks.filter((m) => m.status?.liquidatable && fresh(m, now)
+      && book.orders.some((o) => o.symbol === m.position.symbol && executable(o, m.tick!, m.state!))).map((m) => [m.position.symbol, m.tick!]));
+    for (const tick of ownReports.values()) await runOrders(tx, account, fx, tick);
+    if (ownReports.size) ({ account, book, marks } = await load());
     let dirty = false;
     for (const m of marks) {
       if (m.status?.liquidatable && fresh(m, now) && await liquidate(tx, account, fx, m as Required<Mark>)) dirty = true;
@@ -769,6 +810,9 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       fx.changed = dirty = true;
     }
     if (dirty) ({ account, book, marks } = await load());
+    const guarded = overCap(account, marks, now);
+    for (const m of guarded) await sessionClose(tx, account, fx, m);
+    if (guarded.length) ({ account, book, marks } = await load());
     let v = value(account, marks, book.orders, now);
 
     const status = decide(account, marks, v, now);
@@ -785,6 +829,42 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       fx.onCommit.push(() => lastSnapshot.set(accountId, now));
     }
     return v;
+  }
+
+  /**
+   * Evaluation positions the session guard closes now (funded parity; practice accounts are not guarded): in a market
+   * with a session calendar and a closed-session cap, open and freshly marked, not liquidatable, and above the cap on
+   * net value from GUARD_LEAD_MS before the close.
+   */
+  function overCap(account: AccountRow, marks: Mark[], now: number): (Required<Mark> & { capBps: number })[] {
+    if (account.stage !== 'evaluation') return [];
+    return marks.flatMap((m) => {
+      const market = md.market(m.position.symbol);
+      const schedule = market && SCHEDULES[market.category];
+      if (!schedule || market.closedMaxLeverage === null || !m.status || !m.state || m.state.isClosed || m.tick?.session !== 'open'
+        || !fresh(m, now) || m.status.liquidatable) return [];
+      const capBps = Math.round(market.closedMaxLeverage * 10_000);
+      const p = { size: usd(m.position.sizeUsd), collateral: micro(m.position.collateralUsd), netValue: m.status.netValue };
+      return sessionGuard(schedule, capBps, p, now) ? [{ ...(m as Required<Mark>), capBps }] : [];
+    });
+  }
+
+  /** The session guard's close: the whole position at any price, as the keeper's risk close (CLOSE_ALL, no acceptable price). */
+  async function sessionClose(tx: Tx, account: AccountRow, fx: Effects, m: Required<Mark> & { capBps: number }) {
+    const p = m.position;
+    const [order] = await tx.insert(simOrders).values({
+      ...stamped(), executableFrom: new Date(m.tick.ts), accountId: account.id, clientId: `session-guard:${p.id}:${m.tick.ts}`, positionId: p.id,
+      symbol: p.symbol, marketToken: p.marketToken, side: p.side, kind: 'Market', isIncrease: false, closeAll: true, sizeUsd: p.sizeUsd,
+      slippageBps: 0, status: 'awaiting_execution',
+    }).returning();
+    await execute(tx, account, fx, order!, m.tick, m.state);
+    const [done] = await tx.select({ status: simOrders.status }).from(simOrders).where(eq(simOrders.id, order!.id));
+    if (done?.status !== 'executed') return; // GMTrade would not execute it: the cancel says why
+    const leverage = m.status.netValue > 0n ? Number((usd(p.sizeUsd) * 100n) / m.status.netValue) / 100 : null;
+    const title = `${p.side} ${p.symbol} closed before the market closes`;
+    const body = `${leverage === null ? 'It had no margin left' : `At ${leverage}x leverage it was above the ${m.capBps / 10_000}x allowed`} to hold through the session close, so it was closed, as on a funded account`;
+    await event(tx, account.id, 'risk', title, body, { symbol: p.symbol });
+    fx.notices.push({ kind: 'risk', title, body: `${nameOf(account)}: ${body} (simulated)`, href: hrefOf(account) });
   }
 
   /** The status the account rules give: equity vs floor and target, near-limit; unchanged when the marks cannot decide. */
@@ -896,16 +976,22 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     for (const p of positions) bookOf(p.accountId).positions.push(p);
     for (const o of orders) bookOf(o.accountId).orders.push(o);
     const active = [...books].filter(([, b]) => b.positions.length || b.orders.some((o) => expired(o, now))).map(([id]) => id);
+    // One price per market for the whole pass: a report landing while the pass works decides nothing in it, so identical
+    // positions end the same way whatever their place in the pass (the next pass and the report's fill steps see it).
+    const prices = new Map(positions.flatMap((p) => {
+      const tick = md.price(p.symbol);
+      return tick ? [[p.symbol, tick] as const] : [];
+    }));
     for (const account of await loadAccounts(db, active)) {
       const book = books.get(account.id)!;
-      const marks = await markPositions(md, book.positions);
+      const marks = await markPositions(md, book.positions, prices);
       const v = value(account, marks, book.orders, now);
       const due = marks.some((m) => m.status?.liquidatable && fresh(m, now)) || book.orders.some((o) => expired(o, now))
-        || decide(account, marks, v, now) !== account.status || snapshotDue(account.id, marks, v, now);
+        || overCap(account, marks, now).length > 0 || decide(account, marks, v, now) !== account.status || snapshotDue(account.id, marks, v, now);
       if (due) {
         await inAccount(account.id, async (tx, _account, fx) => {
-          fx.valuation = await applyRules(tx, account.id, fx);
-        }).catch((err: unknown) => log.error({ err, account: account.id }, 'sim: rules step failed'));
+          fx.valuation = await applyRules(tx, account.id, fx, Date.now(), prices);
+        }, true).catch((err: unknown) => log.error({ err, account: account.id }, 'sim: rules step failed'));
       } else {
         // Behind anything queued for the account, and only if no committed change was published after this read.
         void track(serial(account.id, async () => {
@@ -927,7 +1013,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     const states = new Map<string, MarketState>();
     for (const token of new Set(orders.map((o) => o.marketToken))) states.set(token, await md.marketState(token));
     for (const accountId of new Set(orders.filter((o) => executable(o, tick, states.get(o.marketToken)!)).map((o) => o.accountId))) {
-      inAccount(accountId, (tx, account, fx) => fillOrders(tx, account, fx, tick))
+      inAccount(accountId, (tx, account, fx) => fillOrders(tx, account, fx, tick), true)
         .catch((err: unknown) => log.error({ err, account: accountId }, 'sim: fill step failed'));
     }
   }

@@ -247,6 +247,18 @@ test('funded valuation: equity = size − allowance + value, with the GMTrade mo
   assert.equal((await provider.positionsOf(v, funded))[0]!.closing, true);
 });
 
+test('a breached funded account still holding positions or orders reads closure_pending (a current account, "Closing"), breached once flat', async () => {
+  const { funded } = await fundedAccount();
+  const provider = createFundedProvider({ db: t.db, venue: venueWith({ trades: async () => [], signatures: async () => new Map(), removals: async () => [] }), program: {} as ProgramReader });
+  const [row] = await t.db.select().from(accounts).innerJoin(fundedAccounts, eq(fundedAccounts.address, accounts.id)).where(eq(accounts.id, funded));
+  const status = async (v: Pick<Valuation, 'status' | 'flat'>) => (await provider.summaryOf(row!.accounts, row!.funded_accounts, {
+    funded, at: Date.now(), ownerUsdc: 0n, pendingCollateral: 0n, positions: [], pendingOrders: 0, freshness: 'live', ...v,
+  })).status;
+  assert.equal(await status({ status: 'breached', flat: false }), 'closure_pending', 'its forced closes or GMTrade\'s liquidation are still to come');
+  assert.equal(await status({ status: 'breached', flat: true }), 'breached');
+  assert.equal(await status({ status: 'active', flat: false }), 'active');
+});
+
 test('lamports sent to a closed GMTrade address do not make it a GMTrade account: no position, the order is gone', async () => {
   const client = offlineClient();
   const [funded, position, order] = [Keypair.generate().publicKey, key(), key()];
