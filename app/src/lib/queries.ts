@@ -1,7 +1,7 @@
 import { QueryCache, QueryClient, queryOptions, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type {
-  AccountDetail, AccountSummary, CandleInterval, Market, Me, Notification, Order, Performance, Position, SimCloseRequest,
-  SimOrderRequest, SimOrderResponse, SimProtectionRequest, StreamEvent,
+  AccountDetail, AccountSummary, CandleInterval, Market, Me, Notification, Order, Performance, Position, ReferralSummary,
+  SimCloseRequest, SimOrderRequest, SimOrderResponse, SimProtectionRequest, StreamEvent,
 } from '@props/shared';
 import { api, ApiRequestError, isNotLive, isUnauthorized } from './api';
 import { readCandleSnapshot, writeCandleSnapshot } from './candles';
@@ -28,10 +28,13 @@ export const keys = {
   trader: (address: string) => ['trader', address] as const,
   vault: ['vault'] as const,
   notifications: ['notifications'] as const,
+  referrals: ['referrals'] as const,
+  referralProgram: ['referral-program'] as const,
+  referralCode: (code: string) => ['referral-code', code] as const,
 };
 
 /** Everything that belongs to the signed-in wallet; dropped on sign-out and account switch. */
-const USER_SCOPED = [keys.accounts, ['account'], keys.payouts, ['payout'], keys.notifications];
+const USER_SCOPED = [keys.accounts, ['account'], keys.payouts, ['payout'], keys.notifications, keys.referrals];
 
 export function clearUserData(client: QueryClient) {
   for (const queryKey of USER_SCOPED) client.removeQueries({ queryKey });
@@ -118,6 +121,12 @@ export const useVerify = (q: string) => useQuery({ queryKey: keys.verify(q), que
 export const useTrader = (address: string | null) => useQuery({ queryKey: keys.trader(address ?? ''), queryFn: () => api.trader(address!), enabled: address !== null });
 export const useVault = () => useQuery({ queryKey: keys.vault, queryFn: api.vault });
 
+export const useReferrals = (enabled: boolean) => useQuery({ queryKey: keys.referrals, queryFn: api.referrals, enabled });
+export const useReferralProgram = () => useQuery({ queryKey: keys.referralProgram, queryFn: api.referralProgram, staleTime: 60 * 60_000 });
+/** Whether a code exists, once it has the shape of one (null = nothing to check). Codes do not come and go. */
+export const useReferralCode = (code: string | null) =>
+  useQuery({ queryKey: keys.referralCode(code ?? ''), queryFn: () => api.referralCode(code!), enabled: code !== null, staleTime: 5 * 60_000 });
+
 /** The signed-in wallet's notifications; the stream prepends new ones. */
 export const useNotifications = (enabled: boolean) => useQuery({ queryKey: keys.notifications, queryFn: api.notifications, enabled });
 
@@ -169,6 +178,12 @@ export function useResetPractice() {
       void client.invalidateQueries({ queryKey: ['account', account.id] });
     },
   });
+}
+
+/** Binds the referrer by code; the answer is the trader's new referral summary. */
+export function useSetReferrer() {
+  const client = useQueryClient();
+  return useMutation({ mutationFn: api.setReferrer, onSuccess: summary => client.setQueryData<ReferralSummary>(keys.referrals, summary) });
 }
 
 export function useStartKyc() {

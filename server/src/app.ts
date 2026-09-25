@@ -14,6 +14,7 @@ import type { Services } from './modules/types.js';
 import { type BalanceRpc, registerAccountRoutes } from './routes/account.js';
 import { createSealer } from './lib/integrity.js';
 import { registerAdminRoutes } from './routes/admin.js';
+import { type PayoutRpc, registerReferralRoutes } from './routes/referrals.js';
 import { registerRpcRelay } from './routes/rpc.js';
 import { registerStream, type StreamHub } from './stream.js';
 
@@ -21,7 +22,7 @@ export interface AppDeps {
   config: Config;
   db: Db;
   sql: Sql;
-  rpc: BalanceRpc;
+  rpc: BalanceRpc & PayoutRpc;
   hub: StreamHub;
   modules: ModuleStatus;
   /** Module services, filled as modules register (health reads the keeper's status). */
@@ -69,6 +70,7 @@ export async function buildApp(deps: AppDeps) {
   registerStream(app, deps.hub, deps.services);
   registerAccountRoutes(app, { db, config, rpc: deps.rpc });
   registerAdminRoutes(app, { db, adminToken: config.ADMIN_API_TOKEN, sealer: createSealer(config.SESSION_SECRET) });
+  registerReferralRoutes(app, { db, config, rpc: deps.rpc });
   registerRpcRelay(app, { rpcUrl: config.RPC_URL });
 
   // How long the process was busy (p99 over the last minute): high means this server is overloaded, not its sources.

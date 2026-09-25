@@ -24,11 +24,11 @@ const outDir = join(tmpdir(), 'props-app-e2e');
 const DEVNET_GENESIS = 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG';
 const ROUTES = ['/trade/funded', '/trade/evaluation', '/trade/practice', '/markets', '/get-funded', '/program', '/connect', '/checkout',
   '/payment', '/accounts', '/account/funded', '/account/evaluation', '/result', '/activate', '/performance', '/activity', '/payouts',
-  '/payout/review', '/payout/receipt', '/search', '/vault', '/settings'];
+  '/payout/review', '/payout/receipt', '/search', '/vault', '/settings', '/referrals'];
 
 const stub = await startStub();
 const { state } = stub;
-const keys = testKeys(4); // keys[3] never signs in or trades: the Search page's unknown trader
+const keys = testKeys(7); // keys[3] never signs in or trades: the Search page's unknown trader; keys[4] to keys[6] sign up with referral codes
 const publicAccounts = list => list.map(({ address, publicKey }) => ({ address, publicKey }));
 const short = address => `${address.slice(0, 4)}…${address.slice(-4)}`;
 
@@ -40,11 +40,13 @@ const site = await preview({ root: appDir, logLevel: 'error', build: { outDir },
 const siteUrl = site.resolvedUrls.local[0].replace(/\/$/, '');
 
 // Expected console noise, all caused on purpose by the stub: anonymous /v1/me (401), the stream outage (503), the
-// candles of a saved market that is not in the catalog (404) and the exchange refusing a quoted order (422).
+// candles of a saved market that is not in the catalog (404), the exchange refusing a quoted order (422) and a
+// referral code the service refuses to bind (4xx).
 const expected = msg => /status of 401/.test(msg.text()) && msg.location().url.endsWith('/v1/me')
   || /503|ERR_INCOMPLETE_CHUNKED_ENCODING/.test(msg.text()) && (msg.location().url.endsWith('/v1/stream') || /EventSource/.test(msg.text()))
   || /status of 404/.test(msg.text()) && (msg.location().url.includes('/v1/candles?symbol=ZZZ') || msg.location().url.includes('/v1/traders/'))
-  || /status of 422/.test(msg.text()) && msg.location().url.includes('/v1/quote?');
+  || /status of 422/.test(msg.text()) && msg.location().url.includes('/v1/quote?')
+  || /status of 4\d\d/.test(msg.text()) && msg.location().url.endsWith('/v1/me/referrer');
 function watchConsole(page) {
   const errors = [];
   page.on('console', msg => { if (msg.type() === 'error' && !expected(msg)) errors.push(msg.text()); });
@@ -1471,6 +1473,187 @@ try {
       assert.equal(found.length, 0, `console errors: ${found.join(' | ')}`);
     });
     await context.close();
+  }
+
+  // ---------- 4. referrals: keys[2] refers, keys[4] and keys[5] sign up as new traders ----------
+  {
+    const referrer = stub.walletData(keys[2].address).referral.code;
+    /** A browser whose wallet holds `key`, a trader the stub treats as signed up just now (practice only, inside the 7-day window). */
+    async function newTrader(key, options = { viewport: { width: 1440, height: 900 } }) {
+      stub.newTrader(key.address);
+      const context = await browser.newContext(options);
+      await exposeSigner(context, keys, () => { state.signatures += 1; });
+      await context.addInitScript(installTestWallet, { accounts: publicAccounts([key]) });
+      const page = await context.newPage();
+      return { context, page, errors: watchConsole(page) };
+    }
+    const kept = page => page.evaluate(() => JSON.parse(localStorage.getItem('props.referral'))?.code ?? null);
+    const noErrors = errors => { const found = errors.splice(0); assert.equal(found.length, 0, `console errors: ${found.join(' | ')}`); };
+
+    await check('referral: a link keeps its code, the Connect page offers it, and the sign-in binds it once, with a toast', async () => {
+      const { context, page, errors } = await newTrader(keys[4]);
+      const before = state.referrerPosts;
+      await page.goto(`${siteUrl}/?ref=${referrer.toLowerCase()}`);
+      await page.locator('#main > *').first().waitFor();
+      assert.equal(new URL(page.url()).search, '', 'the ref parameter stays in the address, so a reload would bring it back');
+      await page.goto(`${siteUrl}/#/connect`);
+      assert.equal(await page.getByLabel('Referral code').inputValue(), referrer);
+      await page.getByText('Valid code').waitFor();
+      await page.getByRole('button', { name: /Props Test Wallet/ }).click();
+      await page.waitForURL('**/#/checkout');
+      await page.locator('.toast').getByText('Referral code applied').waitFor();
+      assert.equal(stub.walletData(keys[4].address).referral.by, keys[2].address);
+      assert.equal(state.referrerPosts - before, 1);
+      assert.equal(await kept(page), null, 'the bound code is still kept in the browser');
+      // The next sign-in binds nothing: the code went with the first.
+      const walletButton = page.locator('.wallet-button');
+      await walletButton.click();
+      await page.getByRole('dialog', { name: 'Your wallet' }).getByRole('button', { name: 'Disconnect' }).click();
+      await walletButton.getByText('Connect wallet').waitFor();
+      const signatures = state.signatures;
+      await walletButton.click();
+      const dialog = page.getByRole('dialog', { name: 'Connect a wallet' });
+      assert.equal(await dialog.getByLabel('Referral code').inputValue(), '');
+      await dialog.getByRole('button', { name: /Props Test Wallet/ }).click();
+      await walletButton.getByText(short(keys[4].address)).waitFor();
+      assert.equal(state.signatures - signatures, 1, 'no second sign-in happened');
+      await page.waitForTimeout(300);
+      assert.equal(state.referrerPosts - before, 1, 'the code was bound twice');
+      noErrors(errors);
+      await context.close();
+    });
+
+    await check('referral: the sign-in dialog checks a code as it is typed: "No such code" for an unknown one, valid in any case, kept upper-cased', async () => {
+      const page = await browser.newPage();
+      const errors = watchConsole(page);
+      await page.goto(`${siteUrl}/#/markets`);
+      await page.locator('.wallet-button').click();
+      const dialog = page.getByRole('dialog', { name: 'Connect a wallet' });
+      const field = dialog.getByLabel('Referral code');
+      assert.equal(await field.inputValue(), '');
+      await field.fill('zzzz9999');
+      await dialog.getByText('No such code').waitFor();
+      await field.fill(` ${referrer.toLowerCase()} `);
+      await dialog.getByText('Valid code').waitFor();
+      assert.equal(await kept(page), referrer);
+      await field.fill('ab');
+      await dialog.getByText('Codes are 4 to 16 letters and digits').waitFor();
+      assert.equal(await kept(page), null, 'a code that cannot be one is still kept for the sign-in');
+      noErrors(errors);
+      await page.close();
+    });
+
+    await check('referral: a kept code the field showed as "No such code" is dropped at sign-in, with no request and no refusal', async () => {
+      const { context, page, errors } = await newTrader(keys[6]);
+      const before = state.referrerPosts;
+      await page.goto(`${siteUrl}/?ref=zzzz9999#/markets`);
+      await page.locator('.wallet-button').click();
+      const dialog = page.getByRole('dialog', { name: 'Connect a wallet' });
+      assert.equal(await dialog.getByLabel('Referral code (optional)').inputValue(), 'ZZZZ9999');
+      await dialog.getByText('No such code').waitFor();
+      await dialog.getByRole('button', { name: /Props Test Wallet/ }).click();
+      await page.locator('.wallet-button').getByText(short(keys[6].address)).waitFor();
+      await page.waitForTimeout(300);
+      assert.equal(state.referrerPosts - before, 0, 'a code known not to exist was sent');
+      assert.equal(await page.locator('.toast').getByText('Referral code not applied').count(), 0);
+      assert.equal(await kept(page), null);
+      noErrors(errors);
+      await context.close();
+    });
+
+    // keys[5] stays signed in from here to the Referrals page check.
+    const own = await newTrader(keys[5]);
+    const ownCode = stub.walletData(keys[5].address).referral.code;
+    await check('referral: your own code is refused, with the reason in the wallet dialog, and nothing is bound', async () => {
+      const { page, errors } = own;
+      await page.goto(`${siteUrl}/?ref=${ownCode}#/accounts`);
+      await page.locator('.wallet-button').click();
+      const dialog = page.getByRole('dialog');
+      assert.equal(await dialog.getByLabel('Referral code').inputValue(), ownCode);
+      await dialog.getByRole('button', { name: /Props Test Wallet/ }).click();
+      await dialog.getByRole('status').getByText(`Referral code ${ownCode} was not applied: You cannot use your own referral code.`).waitFor();
+      await page.locator('.toast').getByText('Referral code not applied').waitFor();
+      assert.equal(stub.walletData(keys[5].address).referral.by, null);
+      assert.equal(await kept(page), null, 'a refused code is kept for the next sign-in');
+      await page.keyboard.press('Escape');
+      noErrors(errors);
+    });
+
+    await check('referrals page: the code, a link that copies, the stats and recent rewards; "Were you referred?" binds a code typed in any case', async () => {
+      const { context, page, errors } = own;
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      await page.goto(`${siteUrl}/#/referrals`);
+      const main = page.locator('#main');
+      await main.locator('.referral-share').getByText(ownCode, { exact: true }).waitFor();
+      await main.getByText('You earn 10% of the exchange fees on every funded trade of the traders who sign up with your code, paid in USDC.').waitFor();
+      const link = `${siteUrl}/?ref=${ownCode}`;
+      await main.getByText(link, { exact: true }).waitFor();
+      await main.getByRole('button', { name: 'Copy link' }).click();
+      assert.equal(await page.evaluate(() => navigator.clipboard.readText()), link);
+      const stat = label => main.locator('.referral-stats > div').filter({ has: page.getByText(label, { exact: true }) }).locator('strong');
+      assert.deepEqual(await Promise.all(['Referred', 'With an evaluation', 'Funded', 'Funded volume', 'Earned', 'Paid', 'Pending'].map(label => stat(label).innerText())),
+        ['3', '2', '1', '$118,060', '$7.08', '$5.00', '$2.08']);
+      const tops = await main.locator('.referral-stats strong').evaluateAll(values => values.map(v => Math.round(v.getBoundingClientRect().top)));
+      assert.equal(new Set(tops).size, 1, `stat values sit at different heights: ${tops}`);
+      const rows = main.locator('.card-table tbody tr');
+      assert.equal(await rows.count(), 4);
+      // A reward under a cent keeps its digits; the trader who paid it shows masked.
+      assert.deepEqual((await rows.last().locator('td').allInnerTexts()).slice(0, 4), [short(stub.walletData(keys[5].address).referral.rewards[3].referee), 'SOL', '$0.036', '$0.0036']);
+      const form = main.locator('form').filter({ hasText: 'Were you referred?' });
+      await form.getByLabel('Referral code').fill(referrer.toLowerCase());
+      await form.getByText('Valid code').waitFor();
+      await form.getByRole('button', { name: 'Apply code' }).click();
+      await main.getByText(`Referred by ${referrer}`).waitFor();
+      await page.locator('.toast').getByText('Referral code applied').waitFor();
+      assert.equal(await main.getByText('Were you referred?').count(), 0);
+      assert.equal(stub.walletData(keys[5].address).referral.by, keys[2].address);
+      noErrors(errors);
+      await context.close();
+    });
+
+    await check('referrals at 390x844 on a touch screen: no horizontal overflow, 40 px copy buttons, and a 16 px code field in the sign-in dialog', async () => {
+      const phone = { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true };
+      const overflow = page => page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      const context = await signedInContext(browser, keys[2], phone);
+      const page = await context.newPage();
+      const errors = watchConsole(page);
+      await page.goto(`${siteUrl}/#/referrals`);
+      await page.locator('.referral-share').waitFor();
+      await settle(page);
+      assert.ok(await overflow(page) <= 0, `horizontal overflow of ${await overflow(page)}px`);
+      for (const name of ['Copy code', 'Copy link']) assert.ok((await page.getByRole('button', { name }).boundingBox()).height >= 40, `${name} is under 40 px tall`);
+      for (const tip of await page.locator('.referral-stats .info-tip').all()) {
+        const box = await tip.boundingBox();
+        assert.ok(box.width >= 40 && box.height >= 40, `${await tip.getAttribute('aria-label')} is ${box.width}x${box.height}`);
+      }
+      const rows = await page.locator('.referral-stats > div').evaluateAll(cells => cells.map(c => [Math.round(c.getBoundingClientRect().top), Math.round(c.querySelector('strong').getBoundingClientRect().top)]));
+      for (const [top] of rows) assert.equal(new Set(rows.filter(r => r[0] === top).map(r => r[1])).size, 1, `stat values in one row sit at different heights: ${JSON.stringify(rows)}`);
+      await page.getByRole('button', { name: 'Toggle navigation' }).click();
+      const tabs = await page.locator('.main-nav > a:not(.nav-extra)').evaluateAll(links => links.map(a => Math.round(a.getBoundingClientRect().top)));
+      assert.equal(new Set(tabs).size, 1, 'the phone menu\'s five sections do not fit one row');
+      // At 320 px every tab's label fits its own box.
+      await page.setViewportSize({ width: 320, height: 700 });
+      const spill = await page.locator('.main-nav > a:not(.nav-extra)').evaluateAll(links => links.filter(a => a.scrollWidth > a.clientWidth || (() => {
+        const range = document.createRange(); range.selectNodeContents(a); const text = range.getBoundingClientRect(), box = a.getBoundingClientRect();
+        return text.left < box.left || text.right > box.right;
+      })()).map(a => a.textContent));
+      assert.deepEqual(spill, [], 'menu labels spill out of their tabs at 320 px');
+      // Signed in to a wallet that can no longer add a referrer, a link's code is not kept for a later sign-in.
+      await page.goto(`${siteUrl}/?ref=${referrer}#/markets`);
+      await page.waitForFunction(() => localStorage.getItem('props.referral') === null, null, { timeout: 5000 });
+      noErrors(errors);
+      await context.close();
+      const signedOut = await browser.newContext(phone);
+      const out = await signedOut.newPage();
+      await out.goto(`${siteUrl}/#/referrals`);
+      await out.getByText('You earn 10% of the exchange fees', { exact: false }).waitFor();
+      await out.getByRole('button', { name: 'Connect wallet' }).last().click();
+      const field = out.getByRole('dialog', { name: 'Connect a wallet' }).getByLabel('Referral code');
+      assert.equal(await field.evaluate(input => getComputedStyle(input).fontSize), '16px');
+      assert.ok((await field.boundingBox()).height >= 40);
+      assert.ok(await overflow(out) <= 0);
+      await signedOut.close();
+    });
   }
 } finally {
   await browser.close();

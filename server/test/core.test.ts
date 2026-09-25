@@ -33,8 +33,14 @@ describe('config', () => {
       DATABASE_URL: 'postgres://u@localhost/db', APP_ORIGIN: 'https://props.trade', SESSION_SECRET: 's'.repeat(32),
       ADMIN_API_TOKEN: 'a'.repeat(32), RPC_URL: 'https://rpc.example', SOLANA_CLUSTER: '', PORT: '', PROGRAM_ID: '',
     });
-    expect(config).toMatchObject({ SOLANA_CLUSTER: 'mainnet-beta', PORT: 8080 });
+    expect(config).toMatchObject({ SOLANA_CLUSTER: 'mainnet-beta', PORT: 8080, REFERRAL_REWARD_BPS: 1000 });
     expect(config.PROGRAM_ID).toBeUndefined();
+  });
+
+  it('takes a referral reward rate from 0 to 5000 bps', () => {
+    const env = { DATABASE_URL: 'postgres://u@localhost/db', APP_ORIGIN: 'https://props.trade', SESSION_SECRET: 's'.repeat(32), ADMIN_API_TOKEN: 'a'.repeat(32), RPC_URL: 'https://rpc.example' };
+    expect([loadConfig({ ...env, REFERRAL_REWARD_BPS: '0' }), loadConfig({ ...env, REFERRAL_REWARD_BPS: '5000' })].map((c) => c.REFERRAL_REWARD_BPS)).toEqual([0, 5000]);
+    for (const bad of ['5001', '-1', '12.5', 'ten']) expect(() => loadConfig({ ...env, REFERRAL_REWARD_BPS: bad })).toThrowError(/REFERRAL_REWARD_BPS/);
   });
 });
 
@@ -154,8 +160,8 @@ describe('migrations', () => {
       expect(tables.map((t) => t.table_name)).toEqual([
         'account_events', 'accounts', 'admin_audit_log', 'auth_nonces', 'candle_windows', 'chain_jobs', 'closed_trades',
         'equity_snapshots', 'evaluations', 'funded_accounts', 'gm_orders', 'gm_position_snapshots', 'gmtrade_deploys',
-        'indexer_cursors', 'kyc_requests', 'notifications', 'payouts', 'price_bars', 'program_events', 'sessions', 'sim_fills',
-        'sim_orders', 'sim_positions', 'sim_results', 'users', 'vault_ledger', 'venue_fills',
+        'indexer_cursors', 'kyc_requests', 'notifications', 'payouts', 'price_bars', 'program_events', 'referral_payouts',
+        'referral_rewards', 'sessions', 'sim_fills', 'sim_orders', 'sim_positions', 'sim_results', 'users', 'vault_ledger', 'venue_fills',
       ]);
       const committed = JSON.parse(readFileSync(`${migrationsFolder}/meta/_journal.json`, 'utf8')).entries.length;
       const [applied] = await sql`select count(*)::int as n from drizzle.__drizzle_migrations`;

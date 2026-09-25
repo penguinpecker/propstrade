@@ -5,7 +5,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import postgres from 'postgres';
 
 /** Advisory lock keys in use (one namespace for the whole app). */
-export const LOCK_KEYS = { keeper: 0x70726f70, sim: 0x73696d31, chain: 0x70726f71 } as const; // "prop", "sim1", "proq"
+export const LOCK_KEYS = { keeper: 0x70726f70, sim: 0x73696d31, chain: 0x70726f71, referralCodes: 0x72656631 } as const; // "prop", "sim1", "proq", "ref1"
 /** Longest wait for any of the lock queries below; a leader that cannot get an answer in time acts as if it lost the lock. */
 const QUERY_TIMEOUT_MS = 5_000;
 

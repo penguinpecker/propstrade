@@ -8,15 +8,15 @@ import { Keypair, PublicKey, SystemProgram } from '@solana/web3.js';
 import BN from 'bn.js';
 import { eq } from 'drizzle-orm';
 import { ORDER_DISCRIMINATOR, PROPS_VAULT_PROGRAM_ID, decodeGmPosition, ownerPda, ownerUsdcAddress } from '@props/sdk';
-import type { OrderRemoval, TradeEvent } from '@props/gmtrade';
+import { parseFixed, type OrderRemoval, type TradeEvent } from '@props/gmtrade';
 import { model, type ModelInput } from '@props/gmsol-wasm';
-import { accountEvents, accounts, closedTrades, evaluations, fundedAccounts, gmOrders, venueFills } from '../../../db/schema.ts';
+import { accountEvents, accounts, closedTrades, evaluations, fundedAccounts, gmOrders, referralRewards, users, venueFills } from '../../../db/schema.ts';
 import { gmUsd } from '../reader.ts';
 import { createFundedProvider, money } from '../funded.ts';
 import type { ProgramReader } from '../program.ts';
 import type { Notice } from '../projector.ts';
 import type { ChainReader } from '../reader.ts';
-import { createVenue, eventIndexOf, fillRow, readFundedState, roundTrip, valueFunded, type GmIndexer, type Valuation } from '../venue.ts';
+import { createVenue, eventIndexOf, fillRow, orderFeeUsd, readFundedState, roundTrip, valueFunded, type GmIndexer, type Valuation } from '../venue.ts';
 import { encodeAccount, freshDb, offlineClient, silentLog } from './support.ts';
 
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
@@ -135,6 +135,45 @@ test('fills sync: resumes where GMTrade\'s indexer stops, writes the round trip 
   assert.equal(activity.length, 6);
   assert.ok(activity.every((a) => a.type === 'fill' && a.signature && !a.simulated));
   assert.deepEqual(notices.map((n) => [n.wallet, n.kind, n.title]), [[trader, 'fill', `${trip[5]!.isLong ? 'Long' : 'Short'} SOL closed`]]);
+});
+
+test('referral rewards: each fill of a referred trader earns its referrer the rate of the fill\'s exchange fee, once', async () => {
+  const [referrer, referee, loner] = [key(), key(), key()];
+  await t.db.insert(users).values([{ wallet: referrer }, { wallet: loner }]);
+  await t.db.insert(users).values({ wallet: referee, referredBy: referrer, referredAt: new Date() });
+  // The recorded trip again under new event ids (the fills test above indexed the originals).
+  const replay = (tag: string): Trip => trip.map((e) => ({ ...e, id: e.id.replace(/-[^-]+-/, `-${tag}-`), signature: `${e.signature.slice(0, 80)}${tag}` }));
+  const gmOf = (fills: Trip): GmIndexer => ({
+    trades: async (_owner, afterId) => fills.filter((e) => !afterId || e.id > afterId),
+    signatures: async (ids) => new Map(ids.map((id) => [id, fills.find((e) => e.id === id)!.signature])),
+    removals: async () => [],
+  });
+  const sync = async (trader: string, fills: Trip) => {
+    const account = await fundedAccount(trader);
+    const venueOf = (gm: GmIndexer) => createVenue({ db: t.db, rpc: {} as never, client: offlineClient(), reader, gm, log: silentLog, notify: async () => {}, referralRewardBps: 1000 });
+    assert.equal(await venueOf(gmOf(fills)).syncFills(account.funded, account.owner, trader), trip.length);
+    assert.equal(await venueOf(gmOf(fills)).syncFills(account.funded, account.owner, trader), 0);
+    // An indexer that hands every fill over again adds no fill, so no reward either.
+    assert.equal(await venueOf({ ...gmOf(fills), trades: async () => fills }).syncFills(account.funded, account.owner, trader), 0);
+    return account;
+  };
+
+  // The last fill a liquidation: its liquidation fee is in fee_usd but earns nothing.
+  const liquidated = replay('REF1').map((e, i) => (i === trip.length - 1 ? { ...e, fees: { ...e.fees, liquidation: e.fees.order * 3n } } : e));
+  const { funded } = await sync(referee, liquidated);
+  const fills = await t.db.select().from(venueFills).where(eq(venueFills.fundedAccount, funded)).orderBy(venueFills.venueId);
+  const rewards = await t.db.select().from(referralRewards).where(eq(referralRewards.referee, referee)).orderBy(referralRewards.venueFillId);
+  assert.equal(rewards.length, trip.length);
+  assert.ok(fills.every((f) => Number(f.feeUsd) > 0));
+  assert.deepEqual(
+    rewards.map((r) => [r.referrer, r.venueFillId, r.symbol, parseFixed(r.feeUsd, 6), r.rateBps, parseFixed(r.rewardUsd, 6)]),
+    liquidated.map((e, i) => [referrer, fills[i]!.venueId, 'SOL', parseFixed(orderFeeUsd(e), 6), 1000, (parseFixed(orderFeeUsd(e), 6) * 1000n) / 10_000n]),
+  );
+  assert.equal(parseFixed(fills.at(-1)!.feeUsd, 6), parseFixed(orderFeeUsd(liquidated.at(-1)!), 6) * 4n);
+
+  // A funded account of a trader no one referred earns nothing.
+  await sync(loner, replay('REF2'));
+  assert.equal((await t.db.select().from(referralRewards).where(eq(referralRewards.referee, loner))).length, 0);
 });
 
 test('order sync: the order account, then GMTrade\'s removal record, decide executed or canceled; unknown until known', async () => {

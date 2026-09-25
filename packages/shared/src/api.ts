@@ -21,6 +21,10 @@
 //        the owner's, or anyone's once the evaluation result is onchain: see ./merkle.ts)
 //   GET  /payouts -> Payout[]                                 GET  /payouts/:id -> Payout
 //   GET  /verify?q -> VerifyResult                            GET  /vault -> VaultStats
+//   GET  /referrals -> ReferralProgram (public)   GET  /referrals/:code -> ReferralCodeCheck (public)
+//   GET  /me/referrals -> ReferralSummary
+//   POST /me/referrer SetReferrerRequest -> ReferralSummary (404 unknown_referral_code, 409 already_referred,
+//        422 own_referral_code, 403 referral_window_closed)
 // Wallet-signed transactions (evaluation purchase, funded activation/trading, payout requests) are built in the
 // browser with @props/sdk and sent by the wallet; the server only indexes their results.
 // Amounts: USD/USDC values are decimal strings with up to 6 dp (never JS floats on the wire for money).
@@ -293,6 +297,26 @@ export interface TraderLookup {
   positions: Position[];
   trades: ClosedTrade[];
   payouts: { id: string; status: PayoutStatus; amountUsd: Decimal; requestedAt: Millis; paidAt: Millis | null; signature: string | null }[];
+}
+
+// ---------- referrals ----------
+// A wallet's referral code is the first 8 characters of its address, upper-cased (9, 10, … when another wallet holds
+// those already); it is given at the first sign-in and never changes. Codes match case-insensitively. A referrer earns
+// `rewardBps` of the exchange fee on every funded-account fill of the traders who signed up with its code (practice and
+// evaluation fills are simulated and earn nothing), paid in USDC by Props.trade.
+export interface ReferralProgram { rewardBps: number }
+export interface ReferralCodeCheck { valid: boolean }
+export interface SetReferrerRequest { code: string }
+export interface ReferralSummary {
+  code: string;
+  referredBy: string | null;       // the referrer's code, never its wallet
+  canSetReferrer: boolean;         // no referrer yet, within 7 days of the first sign-in and before any evaluation
+  setReferrerUntil: Millis | null; // when that window closes, while canSetReferrer
+  rewardBps: number;
+  referees: number; refereesWithEvaluation: number; refereesFunded: number;
+  fundedVolumeUsd: Decimal;        // the referees' funded fills
+  earnedUsd: Decimal; paidUsd: Decimal; pendingUsd: Decimal;
+  recent: Array<{ at: Millis; referee: string /* masked: first 4 … last 4 */; symbol: string; feeUsd: Decimal; rewardUsd: Decimal }>; // latest 50
 }
 
 // ---------- verification ----------

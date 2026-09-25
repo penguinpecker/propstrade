@@ -14,6 +14,8 @@ export const EnvSchema = z.object({
   HOST: z.string().default('0.0.0.0'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).default(1),
+  /** Referrers' share of the exchange fee on each funded fill of the traders they referred, in bps (10% by default). */
+  REFERRAL_REWARD_BPS: z.coerce.number().int().min(0).max(5000).default(1000),
 });
 
 export type Config = z.infer<typeof EnvSchema>;

@@ -1,17 +1,22 @@
 // Migration 0006 backfills closed_trades' cost breakdown from the fills each trip was written from. The columns exist
 // already here (the test database is migrated), so the rows are written with the defaults and the migration's UPDATE
 // statements are run again over them: they must reproduce what the writers now record. Migration 0008 (white label)
-// rewrites the order notes that named the venue, run the same way.
-import { readFileSync } from 'node:fs';
+// rewrites the order notes that named the venue, run the same way. Migration 0009 (referrals) is applied for real, to a
+// database of its own holding users from before it.
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Keypair } from '@solana/web3.js';
 import { eq } from 'drizzle-orm';
+import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import { afterAll, beforeAll, expect, it } from 'vitest';
-import { accounts, closedTrades, evaluations, fundedAccounts, simFills, simOrders, simPositions, venueFills } from '../src/db/schema.js';
-import { migrationsFolder } from '../src/db/migrate.js';
+import { accounts, closedTrades, evaluations, fundedAccounts, simFills, simOrders, simPositions, users, venueFills } from '../src/db/schema.js';
+import { migrationsFolder, runMigrations } from '../src/db/migrate.js';
 import { createDb } from '../src/db/client.js';
 import { uuidOf } from '../src/modules/chain/venue.js';
-import { testDatabaseUrl } from './db.js';
+import { backfillReferralCodes } from '../src/routes/referrals.js';
+import { recreateDatabase, testDatabaseUrl } from './db.js';
 
 const { sql, db } = createDb(testDatabaseUrl());
 afterAll(async () => { await sql.end(); });
@@ -98,4 +103,37 @@ it('0008 rewrites the order notes earlier releases stored with the venue\'s name
     'Expired: the exchange drops market orders not executed within 30 minutes',
     'Cancelled by you',
   ]);
+});
+
+it('0009 applies over a database at 0008 with users in it, a second run applies nothing, and the boot backfill gives those users codes, oldest first', async () => {
+  const url = new URL(testDatabaseUrl());
+  url.pathname = `${url.pathname}_m0009`;
+  await recreateDatabase(url.toString());
+  // The committed migrations as they stood before 0009.
+  const before = mkdtempSync(join(tmpdir(), 'props-migrations-'));
+  cpSync(migrationsFolder, before, { recursive: true });
+  const journal = JSON.parse(readFileSync(join(before, 'meta/_journal.json'), 'utf8')) as { entries: { idx: number }[] };
+  const all = journal.entries.length;
+  writeFileSync(join(before, 'meta/_journal.json'), JSON.stringify({ ...journal, entries: journal.entries.filter((e) => e.idx <= 8) }));
+  const m = createDb(url.toString());
+  try {
+    await migrate(m.db, { migrationsFolder: before });
+    // Their first 8 characters are one code in upper case; the one who signed in first keeps it.
+    const [older, newer] = [`MigrAte9${key().slice(0, 30)}`, `mIGRATE9${key().slice(0, 30)}`];
+    await m.sql`insert into users (wallet, created_at) values (${newer}, now()), (${older}, now() - interval '1 day')`;
+    await runMigrations(url.toString());
+    await runMigrations(url.toString());
+    const [applied] = await m.sql<{ n: number }[]>`select count(*)::int as n from drizzle.__drizzle_migrations`;
+    expect(applied!.n).toBe(all);
+    const rows = await m.db.select().from(users).orderBy(users.createdAt);
+    expect(rows.map((r) => [r.wallet, r.referralCode, r.referredBy, r.referredAt])).toEqual([[older, null, null, null], [newer, null, null, null]]);
+
+    expect(await backfillReferralCodes(m.db)).toBe(2);
+    expect(await backfillReferralCodes(m.db)).toBe(0);
+    const codes = await m.db.select({ wallet: users.wallet, code: users.referralCode }).from(users).orderBy(users.createdAt);
+    expect(codes).toEqual([{ wallet: older, code: 'MIGRATE9' }, { wallet: newer, code: `MIGRATE9${newer[8]!.toUpperCase()}` }]);
+  } finally {
+    await m.sql.end();
+    rmSync(before, { recursive: true, force: true });
+  }
 });

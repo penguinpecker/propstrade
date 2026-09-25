@@ -11,7 +11,7 @@
 // Leader election uses Postgres advisory locks, which need no table (keys in src/lib/leader.ts).
 import { sql } from 'drizzle-orm';
 import {
-  bigint, bigserial, boolean, char, index, integer, jsonb, numeric, pgEnum, pgTable, primaryKey, text,
+  bigint, bigserial, boolean, char, check, index, integer, jsonb, numeric, pgEnum, pgTable, primaryKey, text,
   timestamp, uniqueIndex, uuid, varchar, type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
@@ -51,12 +51,22 @@ export const chainJobStatus = pgEnum('chain_job_status', ['queued', 'sent', 'con
 
 // ---------- identity + auth ----------
 
-/** Wallets that have signed in. */
+/** Wallets that have signed in. Referral fields: src/routes/referrals.ts. */
 export const users = pgTable('users', {
   wallet: pubkey('wallet').primaryKey(),
   createdAt: now('created_at'),
   lastLoginAt: now('last_login_at'),
-});
+  /** The shortest prefix of the wallet, 8 characters or more, upper-cased, that no other user held when it was given
+   *  (at the first sign-in; the boot backfill for older users). Never changes; upper case makes the unique constraint
+   *  case-insensitive. */
+  referralCode: text('referral_code').unique(),
+  /** The referrer's wallet, bound once and never changed. */
+  referredBy: pubkey('referred_by').references((): AnyPgColumn => users.wallet),
+  referredAt: at('referred_at'),
+}, (t) => [
+  check('users_referral_code_upper', sql`${t.referralCode} = upper(${t.referralCode})`),
+  index('users_referred_by_idx').on(t.referredBy),
+]);
 
 /** Sign-In With Solana nonces: single use, bound to one wallet and the exact message issued. */
 export const authNonces = pgTable('auth_nonces', {
@@ -547,3 +557,33 @@ export const adminAuditLog = pgTable('admin_audit_log', {
   requestId: text('request_id').notNull(),
   createdAt: now('created_at'),
 });
+
+// ---------- referrals (src/routes/referrals.ts) ----------
+
+/**
+ * A referrer's reward for one funded fill (venue_fills) of a trader it referred: rate_bps of the exchange fee the fill
+ * paid (venue_fills.fee_usd). Written in the fill's own transaction (modules/chain/venue.ts), once per fill.
+ */
+export const referralRewards = pgTable('referral_rewards', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  referrer: pubkey('referrer').notNull().references(() => users.wallet),
+  referee: pubkey('referee').notNull().references(() => users.wallet),
+  venueFillId: text('venue_fill_id').notNull().unique().references(() => venueFills.venueId),
+  symbol: text('symbol').notNull(),
+  feeUsd: usd('fee_usd').notNull(),
+  rateBps: integer('rate_bps').notNull(),
+  rewardUsd: usd('reward_usd').notNull(),
+  createdAt: now('created_at'),
+}, (t) => [index('referral_rewards_referrer_created_idx').on(t.referrer, t.createdAt.desc().nullsFirst())]); // = order by created_at desc
+
+/** USDC Props.trade sent a referrer, recorded by an operator after sending it (POST /v1/admin/referrals/payouts). */
+export const referralPayouts = pgTable('referral_payouts', {
+  id: bigserial('id', { mode: 'number' }).primaryKey(),
+  referrer: pubkey('referrer').notNull().references(() => users.wallet),
+  amountUsd: usd('amount_usd').notNull(),
+  signature: signature('signature').notNull(),
+  note: text('note'),
+  /** The operator's address (the admin token is shared; admin_audit_log has the request). */
+  createdBy: text('created_by').notNull(),
+  createdAt: now('created_at'),
+}, (t) => [uniqueIndex('referral_payouts_referrer_signature_uq').on(t.referrer, t.signature)]);
