@@ -32,6 +32,8 @@ import { chainJobs, evaluations, fundedAccounts, gmOrders as gmOrderRows, gmtrad
 import { encodeAccount, freshDb, offlineClient, sealer } from '../../chain/test/support.ts';
 import { createAlerts, type Alerts } from '../alerts.ts';
 import { createKeeper } from '../keeper.ts';
+import { GUARD_LEAD_MS } from '../rules.ts';
+import { nextSessionClose } from '../sessions.ts';
 
 const USD = 10n ** 20n;
 const USDC = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
@@ -791,18 +793,21 @@ test('3d: a breached account\'s positions worth nothing get no forced close (GMT
 
 test('4: a stock market closed during the gap: mark_breached goes out alone, a close waits for the session, and at the reopen only a position worth something is closed', async () => {
   await c.reset();
+  // The session guard closes over-levered stock positions in the 15 min before the NYSE close, whatever they are worth;
+  // this test is about the gap, so the keeper's clock stays out of that window (it failed 15:45-16:00 New York time).
+  const now = () => { const t = Date.now(); const close = nextSessionClose('nyse', t); return close !== null && t >= close - GUARD_LEAD_MS ? close - GUARD_LEAD_MS - 60_000 : t; };
   c.gap(-30);
   const stock = c.market('XAU');
   Object.assign(stock, { sessionRestricted: true, category: 'Stocks', open: false, gmClosed: true });
   const a = await c.addAccount({ slots: [{ symbol: 'XAU', sizeUsd: 4_000n * USD, collateral: 500_000_000n }], usdc: 0n });
-  await c.keeper().run(2);
+  await c.keeper({ now }).run(2);
   assert.equal(c.account(a).status, 'breached');
   assert.equal(c.closes.length, 0, 'no decrease is created while GMTrade would refuse it');
   Object.assign(stock, { open: true, gmClosed: false });
-  await c.keeper().run(1);
+  await c.keeper({ now }).run(1);
   assert.equal(c.closes.length, 0, 'at -30 % the position is worth nothing: GMTrade liquidates it, a close would be refused');
   c.gap(0); // it reopened where it closed
-  await c.keeper().run(1);
+  await c.keeper({ now }).run(1);
   assert.equal(c.closes.length, 1, 'the forced close follows the reopening');
 });
 
