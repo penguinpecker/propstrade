@@ -195,7 +195,7 @@ pub fn activate_funded(accounts: &[AccountView], _data: &[u8]) -> Result {
 }
 
 /// Requests the trader's share of realized profit (owner USDC above principal). Requires a flat account as of the last
-/// sync; blocks new positions until resolved.
+/// sync with its order fees settled, so the profit is net of every fee; blocks new positions until resolved.
 pub fn request_payout(accounts: &[AccountView], _data: &[u8]) -> Result {
     let [trader, config, funded, owner, owner_usdc, usdc_mint, payout, system_program, event_authority, _program] =
         take::<10>(accounts)?;
@@ -223,6 +223,7 @@ pub fn request_payout(accounts: &[AccountView], _data: &[u8]) -> Result {
     require(!c.paused.payouts.get(), E::Paused)?;
     require(f.status == funded_status::ACTIVE, E::InvalidAccountStatus)?;
     require(f.is_flat(), E::NotFlat)?;
+    require(f.order_fees_due.get() == 0, E::FeesDue)?;
     let balance = usdc.amount.get();
     let profit = balance.saturating_sub(f.principal.get());
     require(profit > 0, E::NoProfit)?;

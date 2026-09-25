@@ -54,6 +54,8 @@ pub mod layout {
     pub const ORDER_FINAL_OUTPUT_ESCROW: usize = 656;
     /// `ActionState::Pending`.
     pub const ACTION_STATE_PENDING: u8 = 0;
+    /// `ActionState::Cancelled`: the order never executed.
+    pub const ACTION_STATE_CANCELLED: u8 = 2;
 
     pub const MARKET_MIN_LEN: usize = 248;
     pub const MARKET_TOKEN: usize = 88;
@@ -195,6 +197,20 @@ pub fn is_pending_order(ai: &AccountInfo, gm_program: &Pubkey) -> Result<bool> {
         VaultError::InvalidOrderAccount
     );
     Ok(data[ORDER_ACTION_STATE] == ACTION_STATE_PENDING)
+}
+
+/// True when GMTrade holds the order as cancelled (it never executed). A closed order account (no longer owned by
+/// GMTrade) is not known to be cancelled; a GMTrade-owned account that is not an Order is refused.
+pub fn is_cancelled_order(ai: &AccountInfo, gm_program: &Pubkey) -> Result<bool> {
+    if ai.owner != gm_program {
+        return Ok(false);
+    }
+    let data = ai.try_borrow_data()?;
+    require!(
+        data.len() > ORDER_ACTION_STATE && data[..8] == *Order::DISCRIMINATOR,
+        VaultError::InvalidOrderAccount
+    );
+    Ok(data[ORDER_ACTION_STATE] == ACTION_STATE_CANCELLED)
 }
 
 /// Checks that `ai` is a GMTrade Market of `store` for `market_token` with USDC as both pool tokens.

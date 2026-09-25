@@ -12,6 +12,7 @@ pub enum ConfigChange {
     Pauses,
     Tier,
     Market,
+    OrderFee,
 }
 
 #[event]
@@ -103,6 +104,10 @@ pub struct OrderRequested {
     pub acceptable_price: u128,
     pub by: Pubkey,
     pub ts: i64,
+    /// The order's Props fee (USDC base units) and the `Config` rate that produced it (0 for a risk authority's order).
+    pub fee: u64,
+    pub order_fee_usdc: u64,
+    pub order_fee_bps: u16,
 }
 
 #[event]
@@ -115,6 +120,10 @@ pub struct ProtectionSet {
     pub size_delta_usd: u128,
     pub trigger_price: u128,
     pub ts: i64,
+    /// As in `OrderRequested`.
+    pub fee: u64,
+    pub order_fee_usdc: u64,
+    pub order_fee_bps: u16,
 }
 
 #[event]
@@ -125,6 +134,10 @@ pub struct OrderUpdated {
     pub trigger_price: Option<u128>,
     pub acceptable_price: Option<u128>,
     pub ts: i64,
+    /// The order's fee after the update (re-assessed at the current rate) and that rate.
+    pub fee: u64,
+    pub order_fee_usdc: u64,
+    pub order_fee_bps: u16,
 }
 
 #[event]
@@ -136,10 +149,26 @@ pub struct OrderCancelled {
 }
 
 #[event]
+pub struct OrderFeesSettled {
+    pub funded: Pubkey,
+    /// Moved from the account's USDC to the fee vault.
+    pub charged: u64,
+    /// Forgiven: nothing moves.
+    pub waived: u64,
+    /// The account's totals after the settlement.
+    pub order_fees_due: u64,
+    pub order_fees_paid: u64,
+    pub by: Pubkey,
+    pub ts: i64,
+}
+
+#[event]
 pub struct CompletedOrderClosed {
     pub funded: Pubkey,
     pub order: Pubkey,
     pub ts: i64,
+    /// GMTrade cancelled the order (it never executed): its fee was released. Otherwise it executed and its fee is due.
+    pub cancelled: bool,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]

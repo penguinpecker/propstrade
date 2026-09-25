@@ -125,6 +125,7 @@ pub fn open_position(accounts: &[AccountView], data: &[u8]) -> Result {
     let size = args.u128()?;
     let trigger_price = args.u128()?;
     let acceptable_price = args.u128()?;
+    let max_fee = args.u64()?;
     #[rustfmt::skip]
     let [
         trader, config, funded, owner, owner_usdc, market_config, usdc_mint, gm_store, gm_market, gm_user, gm_position,
@@ -187,6 +188,15 @@ pub fn open_position(accounts: &[AccountView], data: &[u8]) -> Result {
     };
     require(f.tracked_orders() < MAX_ORDERS, E::TooManyOrders)?;
     check_increase(f, &f.slots[slot_idx], m, is_long, size, collateral, 0)?;
+    // The order's fee must stay in the account's USDC with every fee already due or held for pending increases (a
+    // collateral-only increase is free and adds margin whatever is held).
+    let fee = c.order_fee(size, u128::MAX)?;
+    require(fee <= max_fee, E::OrderFeeChanged)?;
+    if size > 0 {
+        let held = f.reserved_fees()?;
+        let needed = collateral.checked_add(fee).and_then(|v| v.checked_add(held)).ok_or(E::MathOverflow)?;
+        require(needed <= usdc.amount.get(), E::CollateralExceedsBalance)?;
+    }
 
     let bump = [f.owner_bump];
     let owner_signer: &[&[u8]] = &[OWNER_SEED, funded.address().as_ref(), &bump];
@@ -213,7 +223,7 @@ pub fn open_position(accounts: &[AccountView], data: &[u8]) -> Result {
     }
     let s = &mut f.slots[slot_idx];
     s.pending_usd.set(s.pending_usd.get().checked_add(size).ok_or(E::MathOverflow)?);
-    f.track_order(tracked(gm_order.address(), slot_idx, kind, size, collateral, false))?;
+    f.track_order(tracked(gm_order.address(), slot_idx, kind, size, collateral, false), fee)?;
     m.apply_oi_change(is_long, 0, size)?;
     let mut e = event::<EV>(disc::ORDER_REQUESTED);
     e.key(funded.address())
@@ -226,7 +236,10 @@ pub fn open_position(accounts: &[AccountView], data: &[u8]) -> Result {
         .u128(trigger_price)
         .u128(acceptable_price)
         .key(trader.address())
-        .i64(ts);
+        .i64(ts)
+        .u64(fee)
+        .u64(c.order_fee_usdc.get())
+        .u16(c.order_fee_bps.get());
     emit(event_authority, &e)
 }
 
@@ -284,7 +297,12 @@ fn decrease_order(accounts: &[AccountView]) -> Result<Decrease<'_>> {
 }
 
 impl Decrease<'_> {
-    /// Creates a decrease order on the (market, side) slot and tracks it.
+    /// Creates a decrease order on the (market, side) slot and tracks it. Returns its fee, at most `max_fee`: the rate on
+    /// its size up to the account's exposure cap (the position can grow before it executes, never past that cap; the
+    /// charge is capped at the size it closes); 0 for a risk authority's order on a breached account, whose USDC all
+    /// returns to the capital vault. A risk authority's order on any other account (the session guard) is assessed like
+    /// the trader's own close.
+    #[allow(clippy::too_many_arguments)]
     fn place(
         &mut self,
         is_long: bool,
@@ -293,19 +311,24 @@ impl Decrease<'_> {
         trigger: Option<u128>,
         acceptable: Option<u128>,
         placed_by_risk: bool,
-    ) -> Result {
+        max_fee: u64,
+    ) -> Result<u64> {
         let f = &mut *self.f;
         require(f.is_open(), E::InvalidAccountStatus)?;
         require(size >= gmtrade::MIN_DECREASE_USD, E::InvalidAmount)?;
         let slot_idx = f.find_slot(&self.m.market_token, is_long).ok_or(E::NoPosition)?;
         keys_eq(self.order.position.address(), &f.slots[slot_idx].gm_position, E::InvalidPositionAccount)?;
         require(f.tracked_orders() < MAX_ORDERS, E::TooManyOrders)?;
+        let free = placed_by_risk && f.status == funded_status::BREACHED;
+        let fee = if free { 0 } else { self.c.order_fee(size, f.terms.max_exposure_gm()?)? };
+        require(fee <= max_fee, E::OrderFeeChanged)?;
 
         let bump = [f.owner_bump];
         let owner_signer: &[&[u8]] = &[OWNER_SEED, self.funded.address().as_ref(), &bump];
         let params = order_params(kind, is_long, 0, size, trigger, acceptable);
         self.order.invoke(&[owner_signer], f.next_order_nonce(), &params, None)?;
-        f.track_order(tracked(self.order.order.address(), slot_idx, kind, size, 0, placed_by_risk))
+        f.track_order(tracked(self.order.order.address(), slot_idx, kind, size, 0, placed_by_risk), fee)?;
+        Ok(fee)
     }
 }
 
@@ -315,13 +338,14 @@ pub fn close_position(accounts: &[AccountView], data: &[u8]) -> Result {
     let is_long = args.bool()?;
     let size = args.u128()?;
     let acceptable_price = args.u128()?;
+    let max_fee = args.u64()?;
     let mut d = decrease_order(accounts)?;
     let by = d.authority.address();
     let is_trader = by == &d.f.trader;
     let is_risk = d.c.is_risk_authority(by);
     require(is_trader || is_risk, E::Unauthorized)?;
     require(acceptable_price != 0, E::ZeroAcceptablePrice)?;
-    d.place(is_long, order_type::CLOSE, size, None, Some(acceptable_price), !is_trader)?;
+    let fee = d.place(is_long, order_type::CLOSE, size, None, Some(acceptable_price), !is_trader, max_fee)?;
     let mut e = event::<EV>(disc::ORDER_REQUESTED);
     e.key(d.funded.address())
         .key(d.order.order.address())
@@ -333,7 +357,10 @@ pub fn close_position(accounts: &[AccountView], data: &[u8]) -> Result {
         .u128(0)
         .u128(acceptable_price)
         .key(by)
-        .i64(now()?);
+        .i64(now()?)
+        .u64(fee)
+        .u64(d.c.order_fee_usdc.get())
+        .u16(d.c.order_fee_bps.get());
     emit(d.event_authority, &e)
 }
 
@@ -344,12 +371,13 @@ pub fn set_protection(accounts: &[AccountView], data: &[u8]) -> Result {
     let kind = args.variant(order_type::COUNT)?;
     let trigger_price = args.u128()?;
     let size = args.u128()?;
+    let max_fee = args.u64()?;
     let mut d = decrease_order(accounts)?;
     keys_eq(d.authority.address(), &d.f.trader, E::Unauthorized)?;
     require(d.f.status != funded_status::PAYOUT_PENDING, E::InvalidAccountStatus)?;
     require(kind == order_type::TAKE_PROFIT || kind == order_type::STOP_LOSS, E::InvalidOrderType)?;
     require(trigger_price != 0, E::InvalidTriggerPrice)?;
-    d.place(is_long, kind, size, Some(trigger_price), None, false)?;
+    let fee = d.place(is_long, kind, size, Some(trigger_price), None, false, max_fee)?;
     let mut e = event::<EV>(disc::PROTECTION_SET);
     e.key(d.funded.address())
         .key(d.order.order.address())
@@ -358,29 +386,35 @@ pub fn set_protection(accounts: &[AccountView], data: &[u8]) -> Result {
         .u8(kind)
         .u128(size)
         .u128(trigger_price)
-        .i64(now()?);
+        .i64(now()?)
+        .u64(fee)
+        .u64(d.c.order_fee_usdc.get())
+        .u16(d.c.order_fee_bps.get());
     emit(d.event_authority, &e)
 }
 
 /// Updates a pending limit, take-profit or stop-loss order. A limit increase can be changed only while trading is live,
 /// the account is active and its market enabled, and only within the market's current limits (any change can make it
-/// fill at once).
+/// fill at once). Every update re-assesses the order's fee at the current rate, as placing it again would (at most
+/// `max_fee`); a limit increase's higher fee must fit in the account's USDC.
 pub fn update_order(accounts: &[AccountView], data: &[u8]) -> Result {
     let mut args = Args(data);
     let trigger_price = args.option_u128()?;
     let acceptable_price = args.option_u128()?;
     let size_delta = args.option_u128()?;
+    let max_fee = args.u64()?;
     #[rustfmt::skip]
     let [
         trader, config, funded, owner, market_config, gm_store, gm_market, gm_order, gm_event_authority,
-        gmtrade_program, event_authority, _program,
-    ] = take::<12>(accounts)?;
+        gmtrade_program, owner_usdc, event_authority, _program,
+    ] = take::<13>(accounts)?;
     signer(trader)?;
     let c = Config::load(config)?;
     let f = load::<FundedAccount>(funded)?;
     system_account(owner)?;
     let m = load::<MarketConfig>(market_config)?;
     program_account(gmtrade_program, &GMTRADE_PROGRAM_ID)?;
+    let usdc = token_account(owner_usdc)?;
 
     singleton(config, c.bump, &CONFIG_PDA)?;
     funded_seeds(funded, f)?;
@@ -394,6 +428,7 @@ pub fn update_order(accounts: &[AccountView], data: &[u8]) -> Result {
     keys_eq(gm_market.address(), &m.gm_market, E::MarketMismatch)?;
     mutable(gm_order)?;
     keys_eq(gmtrade_program.address(), &c.gmtrade_program, E::ConstraintAddress)?;
+    keys_eq(owner_usdc.address(), &ata_address(owner.address(), &c.usdc_mint), E::ConstraintAddress)?;
     check_event_authority(event_authority)?;
 
     let idx = f.find_order(gm_order.address()).ok_or(E::OrderNotTracked)?;
@@ -407,14 +442,22 @@ pub fn update_order(accounts: &[AccountView], data: &[u8]) -> Result {
     let slot = f.slots[t.slot as usize];
     keys_eq(&m.market_token, &slot.market_token, E::MarketMismatch)?;
     let increase = order_type::is_increase(t.order_type);
+    let size = size_delta.unwrap_or(t.size_usd.get());
     if increase {
         require(!c.paused.trading.get(), E::Paused)?;
         require(f.status == funded_status::ACTIVE, E::InvalidAccountStatus)?;
         require(m.enabled.get(), E::MarketDisabled)?;
-        let size = size_delta.unwrap_or(t.size_usd.get());
         check_increase(f, &slot, m, slot.is_long.get(), size, t.collateral.get(), t.size_usd.get())?;
     } else if let Some(size) = size_delta {
         require(size >= gmtrade::MIN_DECREASE_USD, E::InvalidAmount)?;
+    }
+    let cap = if increase { u128::MAX } else { f.terms.max_exposure_gm()? };
+    let fee = c.order_fee(size, cap)?;
+    require(fee <= max_fee, E::OrderFeeChanged)?;
+    let old = f.order_fees[idx].get();
+    if increase && fee > old {
+        let held = f.reserved_fees()?.checked_sub(old).and_then(|v| v.checked_add(fee)).ok_or(E::MathOverflow)?;
+        require(held <= usdc.amount.get(), E::CollateralExceedsBalance)?;
     }
 
     let bump = [f.owner_bump];
@@ -441,18 +484,22 @@ pub fn update_order(accounts: &[AccountView], data: &[u8]) -> Result {
         }
         f.orders[idx].size_usd.set(size);
     }
+    f.order_fees[idx].set(fee);
     let mut e = event::<EV>(disc::ORDER_UPDATED);
     e.key(funded.address())
         .key(gm_order.address())
         .option_u128(size_delta)
         .option_u128(trigger_price)
         .option_u128(acceptable_price)
-        .i64(now()?);
+        .i64(now()?)
+        .u64(fee)
+        .u64(c.order_fee_usdc.get())
+        .u16(c.order_fee_bps.get());
     emit(event_authority, &e)
 }
 
-/// Cancels a pending tracked order; its collateral and rent return to the owner PDA. The trader cannot cancel orders a
-/// risk authority placed. Never blocked by pauses. Orders GMTrade already executed or cancelled go through sync and
+/// Cancels a pending tracked order; its collateral and rent return to the owner PDA and its fee is released (never
+/// charged). The trader cannot cancel orders a risk authority placed. Never blocked by pauses. Orders GMTrade already executed or cancelled go through sync and
 /// close_completed_order instead, and only sync, which reads the position, frees slots.
 pub fn cancel_order(accounts: &[AccountView], _data: &[u8]) -> Result {
     #[rustfmt::skip]
@@ -510,6 +557,7 @@ pub fn cancel_order(accounts: &[AccountView], _data: &[u8]) -> Result {
     order.invoke(&[owner_signer], "cancel")?;
 
     f.orders[idx] = TrackedOrder::default();
+    f.order_fees[idx].set(0);
     if order_type::is_increase(t.order_type) {
         let s = &mut f.slots[t.slot as usize];
         s.pending_usd.set(s.pending_usd.get().checked_sub(t.size_usd.get()).ok_or(E::MathOverflow)?);

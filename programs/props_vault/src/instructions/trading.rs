@@ -25,6 +25,9 @@ pub struct OpenPositionArgs {
     /// GMTrade unit price; required for `Limit`, zero for `Market`.
     pub trigger_price: u128,
     pub acceptable_price: u128,
+    /// The most the trader agrees to pay as this order's Props fee (USDC base units): the fee they reviewed. The order
+    /// fails with `OrderFeeChanged` if the rate changed so that its fee is higher.
+    pub max_fee: u64,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -33,6 +36,10 @@ pub struct ClosePositionArgs {
     /// `u128::MAX` closes the whole position (GMTrade caps it to the position size).
     pub size_delta_usd: u128,
     pub acceptable_price: u128,
+    /// The most the trader agrees to pay as this order's Props fee (USDC base units): the fee they reviewed, which for a
+    /// decrease is its maximum (the rate on its size up to the account's exposure cap), not the fee expected on what it
+    /// will close. The order fails with `OrderFeeChanged` if the rate changed so that its fee is higher.
+    pub max_fee: u64,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -42,6 +49,10 @@ pub struct SetProtectionArgs {
     pub order_type: OrderType,
     pub trigger_price: u128,
     pub size_delta_usd: u128,
+    /// The most the trader agrees to pay as this order's Props fee (USDC base units): the fee they reviewed, which for a
+    /// decrease is its maximum (the rate on its size up to the account's exposure cap), not the fee expected on what it
+    /// will close. The order fails with `OrderFeeChanged` if the rate changed so that its fee is higher.
+    pub max_fee: u64,
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -49,6 +60,10 @@ pub struct UpdateOrderArgs {
     pub trigger_price: Option<u128>,
     pub acceptable_price: Option<u128>,
     pub size_delta_usd: Option<u128>,
+    /// The most the trader agrees to pay as this order's Props fee (USDC base units): the fee they reviewed, which for a
+    /// decrease is its maximum (the rate on its size up to the account's exposure cap), not the fee expected on what it
+    /// will close. The order fails with `OrderFeeChanged` if the rate changed so that its fee is higher.
+    pub max_fee: u64,
 }
 
 /// Account and market limits for adding `size` (GMTrade USD, backed by `collateral` USDC) to `slot`,
@@ -154,6 +169,15 @@ pub(crate) fn open_position(ctx: Context<OpenPosition>, args: OpenPositionArgs) 
         args.collateral,
         0,
     )?;
+    // The order's fee must stay in the account's USDC with every fee already due or held for pending increases
+    // (a collateral-only increase is free and adds margin whatever is held).
+    let fee = a.config.order_fee(args.size_delta_usd, u128::MAX)?;
+    require!(fee <= args.max_fee, VaultError::OrderFeeChanged);
+    if args.size_delta_usd > 0 {
+        let held = a.funded.reserved_fees()?;
+        let needed = args.collateral.checked_add(fee).and_then(|v| v.checked_add(held)).ok_or(VaultError::MathOverflow)?;
+        require!(needed <= a.owner_usdc.amount, VaultError::CollateralExceedsBalance);
+    }
 
     let funded_key = a.funded.key();
     let owner_seeds: &[&[u8]] = &[OWNER_SEED, funded_key.as_ref(), &[a.funded.owner_bump]];
@@ -179,6 +203,7 @@ pub(crate) fn open_position(ctx: Context<OpenPosition>, args: OpenPositionArgs) 
     let order = a.gm_order.key();
     let position = a.gm_position.key();
     let trader = a.trader.key();
+    let (order_fee_usdc, order_fee_bps) = (a.config.order_fee_usdc, a.config.order_fee_bps);
     let ts = now()?;
     let f = &mut ctx.accounts.funded;
     if is_new_slot {
@@ -193,7 +218,7 @@ pub(crate) fn open_position(ctx: Context<OpenPosition>, args: OpenPositionArgs) 
         size_usd: args.size_delta_usd,
         collateral: args.collateral,
         placed_by_risk: false,
-    })?;
+    }, fee)?;
     ctx.accounts.market_config.apply_oi_change(args.is_long, 0, args.size_delta_usd)?;
     emit_cpi!(OrderRequested {
         funded: funded_key,
@@ -207,6 +232,9 @@ pub(crate) fn open_position(ctx: Context<OpenPosition>, args: OpenPositionArgs) 
         acceptable_price: args.acceptable_price,
         by: trader,
         ts,
+        fee,
+        order_fee_usdc,
+        order_fee_bps,
     });
     Ok(())
 }
@@ -254,14 +282,21 @@ pub struct DecreaseOrder<'info> {
 }
 
 impl<'info> DecreaseOrder<'info> {
-    /// Creates a decrease order on the (market, side) slot and tracks it.
+    /// Creates a decrease order on the (market, side) slot and tracks it. Returns its fee, at most `max_fee`: the rate on
+    /// its size up to the account's exposure cap (the position can grow before it executes, never past that cap; the
+    /// charge is capped at the size it closes); 0 for a risk authority's order on a breached account, whose USDC all
+    /// returns to the capital vault. A risk authority's order on any other account (the session guard) is assessed like
+    /// the trader's own close.
     #[allow(clippy::too_many_arguments)]
-    fn place(&mut self, is_long: bool, order_type: OrderType, size: u128, trigger: Option<u128>, acceptable: Option<u128>, placed_by_risk: bool) -> Result<()> {
+    fn place(&mut self, is_long: bool, order_type: OrderType, size: u128, trigger: Option<u128>, acceptable: Option<u128>, placed_by_risk: bool, max_fee: u64) -> Result<u64> {
         require!(self.funded.is_open(), VaultError::InvalidAccountStatus);
         require!(size >= gmtrade::MIN_DECREASE_USD, VaultError::InvalidAmount);
         let slot_idx = self.funded.find_slot(&self.market_config.market_token, is_long).ok_or(VaultError::NoPosition)?;
         require_keys_eq!(self.gm_position.key(), self.funded.slots[slot_idx].gm_position, VaultError::InvalidPositionAccount);
         require!(self.funded.tracked_orders() < MAX_ORDERS, VaultError::TooManyOrders);
+        let free = placed_by_risk && self.funded.status == FundedStatus::Breached;
+        let fee = if free { 0 } else { self.config.order_fee(size, self.funded.terms.max_exposure_gm()?)? };
+        require!(fee <= max_fee, VaultError::OrderFeeChanged);
 
         let funded_key = self.funded.key();
         let owner_seeds: &[&[u8]] = &[OWNER_SEED, funded_key.as_ref(), &[self.funded.owner_bump]];
@@ -273,7 +308,8 @@ impl<'info> DecreaseOrder<'info> {
         )?;
 
         let order = self.gm_order.key();
-        self.funded.track_order(TrackedOrder { order, slot: slot_idx as u8, order_type, size_usd: size, collateral: 0, placed_by_risk })
+        self.funded.track_order(TrackedOrder { order, slot: slot_idx as u8, order_type, size_usd: size, collateral: 0, placed_by_risk }, fee)?;
+        Ok(fee)
     }
 }
 
@@ -286,7 +322,7 @@ pub(crate) fn close_position(ctx: Context<DecreaseOrder>, args: ClosePositionArg
     let is_risk = a.config.is_risk_authority(&by);
     require!(is_trader || is_risk, VaultError::Unauthorized);
     require!(args.acceptable_price != 0, VaultError::ZeroAcceptablePrice);
-    a.place(args.is_long, OrderType::Close, args.size_delta_usd, None, Some(args.acceptable_price), !is_trader)?;
+    let fee = a.place(args.is_long, OrderType::Close, args.size_delta_usd, None, Some(args.acceptable_price), !is_trader, args.max_fee)?;
     let event = OrderRequested {
         funded: a.funded.key(),
         order: a.gm_order.key(),
@@ -299,6 +335,9 @@ pub(crate) fn close_position(ctx: Context<DecreaseOrder>, args: ClosePositionArg
         acceptable_price: args.acceptable_price,
         by,
         ts: now()?,
+        fee,
+        order_fee_usdc: a.config.order_fee_usdc,
+        order_fee_bps: a.config.order_fee_bps,
     };
     emit_cpi!(event);
     Ok(())
@@ -311,7 +350,7 @@ pub(crate) fn set_protection(ctx: Context<DecreaseOrder>, args: SetProtectionArg
     require!(a.funded.status != FundedStatus::PayoutPending, VaultError::InvalidAccountStatus);
     require!(matches!(args.order_type, OrderType::TakeProfit | OrderType::StopLoss), VaultError::InvalidOrderType);
     require!(args.trigger_price != 0, VaultError::InvalidTriggerPrice);
-    a.place(args.is_long, args.order_type, args.size_delta_usd, Some(args.trigger_price), None, false)?;
+    let fee = a.place(args.is_long, args.order_type, args.size_delta_usd, Some(args.trigger_price), None, false, args.max_fee)?;
     let event = ProtectionSet {
         funded: a.funded.key(),
         order: a.gm_order.key(),
@@ -321,6 +360,9 @@ pub(crate) fn set_protection(ctx: Context<DecreaseOrder>, args: SetProtectionArg
         size_delta_usd: args.size_delta_usd,
         trigger_price: args.trigger_price,
         ts: now()?,
+        fee,
+        order_fee_usdc: a.config.order_fee_usdc,
+        order_fee_bps: a.config.order_fee_bps,
     };
     emit_cpi!(event);
     Ok(())
@@ -356,11 +398,15 @@ pub struct UpdateOrder<'info> {
     pub gm_event_authority: UncheckedAccount<'info>,
     #[account(address = config.gmtrade_program)]
     pub gmtrade_program: Program<'info, GmsolStore>,
+    /// Read only: the account's USDC, which a limit increase's re-assessed fee must fit in.
+    #[account(address = get_associated_token_address(&owner.key(), &config.usdc_mint))]
+    pub owner_usdc: Box<Account<'info, TokenAccount>>,
 }
 
 /// Updates a pending limit, take-profit or stop-loss order. A limit increase can be changed only while
 /// trading is live, the account is active and its market enabled, and only within the market's current
-/// limits (any change can make it fill at once).
+/// limits (any change can make it fill at once). Every update re-assesses the order's fee at the current rate, as
+/// placing it again would (at most `max_fee`); a limit increase's higher fee must fit in the account's USDC.
 pub(crate) fn update_order(ctx: Context<UpdateOrder>, args: UpdateOrderArgs) -> Result<()> {
     let a = &ctx.accounts;
     let idx = a.funded.find_order(&a.gm_order.key()).ok_or(VaultError::OrderNotTracked)?;
@@ -376,14 +422,23 @@ pub(crate) fn update_order(ctx: Context<UpdateOrder>, args: UpdateOrderArgs) -> 
     require!(args.trigger_price != Some(0), VaultError::InvalidTriggerPrice);
     let slot = a.funded.slots[tracked.slot as usize];
     require_keys_eq!(a.market_config.market_token, slot.market_token, VaultError::MarketMismatch);
-    if tracked.order_type.is_increase() {
+    let increase = tracked.order_type.is_increase();
+    let size = args.size_delta_usd.unwrap_or(tracked.size_usd);
+    if increase {
         require!(!a.config.paused.trading, VaultError::Paused);
         require!(a.funded.status == FundedStatus::Active, VaultError::InvalidAccountStatus);
         require!(a.market_config.enabled, VaultError::MarketDisabled);
-        let size = args.size_delta_usd.unwrap_or(tracked.size_usd);
         check_increase(&a.funded, &slot, &a.market_config, slot.is_long, size, tracked.collateral, tracked.size_usd)?;
     } else if let Some(size) = args.size_delta_usd {
         require!(size >= gmtrade::MIN_DECREASE_USD, VaultError::InvalidAmount);
+    }
+    let cap = if increase { u128::MAX } else { a.funded.terms.max_exposure_gm()? };
+    let fee = a.config.order_fee(size, cap)?;
+    require!(fee <= args.max_fee, VaultError::OrderFeeChanged);
+    let old = a.funded.order_fees[idx];
+    if increase && fee > old {
+        let held = a.funded.reserved_fees()?.checked_sub(old).and_then(|v| v.checked_add(fee)).ok_or(VaultError::MathOverflow)?;
+        require!(held <= a.owner_usdc.amount, VaultError::CollateralExceedsBalance);
     }
 
     let funded_key = a.funded.key();
@@ -419,6 +474,8 @@ pub(crate) fn update_order(ctx: Context<UpdateOrder>, args: UpdateOrderArgs) -> 
         }
         ctx.accounts.funded.orders[idx].size_usd = size;
     }
+    ctx.accounts.funded.order_fees[idx] = fee;
+    let (order_fee_usdc, order_fee_bps) = (ctx.accounts.config.order_fee_usdc, ctx.accounts.config.order_fee_bps);
     emit_cpi!(OrderUpdated {
         funded: funded_key,
         order,
@@ -426,6 +483,9 @@ pub(crate) fn update_order(ctx: Context<UpdateOrder>, args: UpdateOrderArgs) -> 
         trigger_price: args.trigger_price,
         acceptable_price: args.acceptable_price,
         ts: now()?,
+        fee,
+        order_fee_usdc,
+        order_fee_bps,
     });
     Ok(())
 }
@@ -471,8 +531,8 @@ pub struct CancelOrder<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/// Cancels a pending tracked order; its collateral and rent return to the owner PDA. The trader cannot
-/// cancel orders a risk authority placed. Never blocked by pauses. Orders GMTrade already executed or
+/// Cancels a pending tracked order; its collateral and rent return to the owner PDA and its fee is released (never
+/// charged). The trader cannot cancel orders a risk authority placed. Never blocked by pauses. Orders GMTrade already executed or
 /// cancelled go through sync and close_completed_order instead, and only sync, which reads the
 /// position, frees slots.
 pub(crate) fn cancel_order(ctx: Context<CancelOrder>) -> Result<()> {
@@ -493,6 +553,7 @@ pub(crate) fn cancel_order(ctx: Context<CancelOrder>) -> Result<()> {
     let order = a.gm_order.key();
     let f = &mut ctx.accounts.funded;
     f.orders[idx] = TrackedOrder::default();
+    f.order_fees[idx] = 0;
     if tracked.order_type.is_increase() {
         let s = &mut f.slots[tracked.slot as usize];
         s.pending_usd = s.pending_usd.checked_sub(tracked.size_usd).ok_or(VaultError::MathOverflow)?;

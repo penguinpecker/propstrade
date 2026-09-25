@@ -3847,6 +3847,89 @@ export type PropsVault = {
       ]
     },
     {
+      "name": "setOrderFee",
+      "discriminator": [
+        26,
+        144,
+        67,
+        211,
+        12,
+        199,
+        105,
+        228
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true,
+          "relations": [
+            "config"
+          ]
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "eventAuthority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  95,
+                  95,
+                  101,
+                  118,
+                  101,
+                  110,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "feeUsdc",
+          "type": "u64"
+        },
+        {
+          "name": "feeBps",
+          "type": "u16"
+        }
+      ]
+    },
+    {
       "name": "setParams",
       "discriminator": [
         27,
@@ -4205,6 +4288,263 @@ export type PropsVault = {
               "name": "setProtectionArgs"
             }
           }
+        }
+      ]
+    },
+    {
+      "name": "settleOrderFees",
+      "discriminator": [
+        57,
+        79,
+        11,
+        47,
+        59,
+        182,
+        94,
+        104
+      ],
+      "accounts": [
+        {
+          "name": "riskAuthority",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "docs": [
+            "Not writable: every order instruction reads it, and settlements must not contend with trading."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "funded",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  117,
+                  110,
+                  100,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded.evaluation",
+                "account": "fundedAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "owner",
+          "docs": [
+            "Signs the transfer out of its USDC account; loses nothing itself."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  111,
+                  119,
+                  110,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "funded"
+              }
+            ]
+          }
+        },
+        {
+          "name": "ownerUsdc",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "owner"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "usdcMint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "feeVault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  101,
+                  101,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdcMint"
+        },
+        {
+          "name": "tokenProgram",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "eventAuthority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  95,
+                  95,
+                  101,
+                  118,
+                  101,
+                  110,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "charge",
+          "type": "u64"
+        },
+        {
+          "name": "waive",
+          "type": "u64"
+        },
+        {
+          "name": "expectedDue",
+          "type": "u64"
+        },
+        {
+          "name": "expectedSettlements",
+          "type": "u64"
         }
       ]
     },
@@ -4685,6 +5025,12 @@ export type PropsVault = {
         {
           "name": "gmtradeProgram",
           "address": "Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo"
+        },
+        {
+          "name": "ownerUsdc",
+          "docs": [
+            "Read only: the account's USDC, which a limit increase's re-assessed fee must fit in."
+          ]
         },
         {
           "name": "eventAuthority",
@@ -5481,6 +5827,19 @@ export type PropsVault = {
       ]
     },
     {
+      "name": "orderFeesSettled",
+      "discriminator": [
+        57,
+        230,
+        88,
+        28,
+        118,
+        63,
+        61,
+        145
+      ]
+    },
+    {
       "name": "orderRequested",
       "discriminator": [
         233,
@@ -5831,6 +6190,21 @@ export type PropsVault = {
       "code": 6043,
       "name": "notClaimable",
       "msg": "Not a GMTrade claimable account delegated to this account's owner"
+    },
+    {
+      "code": 6044,
+      "name": "feesDue",
+      "msg": "Order fees are still being settled"
+    },
+    {
+      "code": 6045,
+      "name": "invalidFeeSettlement",
+      "msg": "Fee settlement does not match the account's fees due, settlement count or USDC"
+    },
+    {
+      "code": 6046,
+      "name": "orderFeeChanged",
+      "msg": "The order fee changed since it was reviewed"
     }
   ],
   "types": [
@@ -5995,6 +6369,15 @@ export type PropsVault = {
           {
             "name": "acceptablePrice",
             "type": "u128"
+          },
+          {
+            "name": "maxFee",
+            "docs": [
+              "The most the trader agrees to pay as this order's Props fee (USDC base units): the fee they reviewed, which for a",
+              "decrease is its maximum (the rate on its size up to the account's exposure cap), not the fee expected on what it",
+              "will close. The order fails with `OrderFeeChanged` if the rate changed so that its fee is higher."
+            ],
+            "type": "u64"
           }
         ]
       }
@@ -6015,6 +6398,13 @@ export type PropsVault = {
           {
             "name": "ts",
             "type": "i64"
+          },
+          {
+            "name": "cancelled",
+            "docs": [
+              "GMTrade cancelled the order (it never executed): its fee was released. Otherwise it executed and its fee is due."
+            ],
+            "type": "bool"
           }
         ]
       }
@@ -6152,6 +6542,18 @@ export type PropsVault = {
           {
             "name": "solTreasuryBump",
             "type": "u8"
+          },
+          {
+            "name": "orderFeeUsdc",
+            "docs": [
+              "Props.trade's fee per trader-placed order, set by `set_order_fee`: `order_fee_usdc` (USDC base units) plus",
+              "`order_fee_bps` of the order's USD size. 0 = off."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "orderFeeBps",
+            "type": "u16"
           }
         ]
       }
@@ -6184,6 +6586,9 @@ export type PropsVault = {
           },
           {
             "name": "market"
+          },
+          {
+            "name": "orderFee"
           }
         ]
       }
@@ -6553,6 +6958,41 @@ export type PropsVault = {
           {
             "name": "ownerBump",
             "type": "u8"
+          },
+          {
+            "name": "orderFees",
+            "docs": [
+              "The fee assessed on `orders[j]` (USDC base units); 0 while `orders[j]` is free or was placed by a risk authority."
+            ],
+            "type": {
+              "array": [
+                "u64",
+                8
+              ]
+            }
+          },
+          {
+            "name": "orderFeesDue",
+            "docs": [
+              "Assessed fees of orders that left the book other than through `cancel_order` (executed, or cancelled by the",
+              "exchange), not settled yet."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "orderFeesPaid",
+            "docs": [
+              "Order fees charged to the fee vault so far."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "orderFeeSettlements",
+            "docs": [
+              "Settlements so far. `settle_order_fees` names the count it was computed from and advances it, so a settlement",
+              "lands once even when `order_fees_due` returns to the value it was computed from."
+            ],
+            "type": "u64"
           }
         ]
       }
@@ -6825,6 +7265,14 @@ export type PropsVault = {
           {
             "name": "acceptablePrice",
             "type": "u128"
+          },
+          {
+            "name": "maxFee",
+            "docs": [
+              "The most the trader agrees to pay as this order's Props fee (USDC base units): the fee they reviewed. The order",
+              "fails with `OrderFeeChanged` if the rate changed so that its fee is higher."
+            ],
+            "type": "u64"
           }
         ]
       }
@@ -6841,6 +7289,51 @@ export type PropsVault = {
           {
             "name": "order",
             "type": "pubkey"
+          },
+          {
+            "name": "by",
+            "type": "pubkey"
+          },
+          {
+            "name": "ts",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "orderFeesSettled",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "funded",
+            "type": "pubkey"
+          },
+          {
+            "name": "charged",
+            "docs": [
+              "Moved from the account's USDC to the fee vault."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "waived",
+            "docs": [
+              "Forgiven: nothing moves."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "orderFeesDue",
+            "docs": [
+              "The account's totals after the settlement."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "orderFeesPaid",
+            "type": "u64"
           },
           {
             "name": "by",
@@ -6905,6 +7398,21 @@ export type PropsVault = {
           {
             "name": "ts",
             "type": "i64"
+          },
+          {
+            "name": "fee",
+            "docs": [
+              "The order's Props fee (USDC base units) and the `Config` rate that produced it (0 for a risk authority's order)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "orderFeeUsdc",
+            "type": "u64"
+          },
+          {
+            "name": "orderFeeBps",
+            "type": "u16"
           }
         ]
       }
@@ -6966,6 +7474,21 @@ export type PropsVault = {
           {
             "name": "ts",
             "type": "i64"
+          },
+          {
+            "name": "fee",
+            "docs": [
+              "The order's fee after the update (re-assessed at the current rate) and that rate."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "orderFeeUsdc",
+            "type": "u64"
+          },
+          {
+            "name": "orderFeeBps",
+            "type": "u16"
           }
         ]
       }
@@ -7249,6 +7772,21 @@ export type PropsVault = {
           {
             "name": "ts",
             "type": "i64"
+          },
+          {
+            "name": "fee",
+            "docs": [
+              "As in `OrderRequested`."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "orderFeeUsdc",
+            "type": "u64"
+          },
+          {
+            "name": "orderFeeBps",
+            "type": "u16"
           }
         ]
       }
@@ -7280,6 +7818,15 @@ export type PropsVault = {
           {
             "name": "sizeDeltaUsd",
             "type": "u128"
+          },
+          {
+            "name": "maxFee",
+            "docs": [
+              "The most the trader agrees to pay as this order's Props fee (USDC base units): the fee they reviewed, which for a",
+              "decrease is its maximum (the rate on its size up to the account's exposure cap), not the fee expected on what it",
+              "will close. The order fails with `OrderFeeChanged` if the rate changed so that its fee is higher."
+            ],
+            "type": "u64"
           }
         ]
       }
@@ -7660,6 +8207,15 @@ export type PropsVault = {
             "type": {
               "option": "u128"
             }
+          },
+          {
+            "name": "maxFee",
+            "docs": [
+              "The most the trader agrees to pay as this order's Props fee (USDC base units): the fee they reviewed, which for a",
+              "decrease is its maximum (the rate on its size up to the account's exposure cap), not the fee expected on what it",
+              "will close. The order fails with `OrderFeeChanged` if the rate changed so that its fee is higher."
+            ],
+            "type": "u64"
           }
         ]
       }

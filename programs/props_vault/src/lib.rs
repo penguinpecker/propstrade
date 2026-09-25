@@ -1,7 +1,7 @@
 //! Props.trade vault. Holds evaluation fees and seed capital, posts each funded account's loss allowance
 //! to a data-less owner PDA, and trades on GMTrade (gmsol-store v0.10.0) only through that PDA, with the
 //! PDA as the receiver of every order. The only USDC paths out of an owner PDA are GMTrade order escrows,
-//! approved payouts (trader wallet + capital vault) and account closure (capital vault).
+//! settled order fees (fee vault), approved payouts (trader wallet + capital vault) and account closure (capital vault).
 #![allow(unexpected_cfgs)]
 
 use anchor_lang::prelude::*;
@@ -45,6 +45,10 @@ pub mod props_vault {
 
     pub fn set_pauses(ctx: Context<AdminOnly>, paused: Pauses) -> Result<()> {
         instructions::set_pauses(ctx, paused)
+    }
+
+    pub fn set_order_fee(ctx: Context<AdminOnly>, fee_usdc: u64, fee_bps: u16) -> Result<()> {
+        instructions::set_order_fee(ctx, fee_usdc, fee_bps)
     }
 
     pub fn upsert_tier(ctx: Context<UpsertTier>, id: u16, params: TierParams) -> Result<()> {
@@ -148,6 +152,16 @@ pub mod props_vault {
 
     pub fn close_funded<'info>(ctx: Context<'_, '_, 'info, 'info, CloseFunded<'info>>) -> Result<()> {
         instructions::close_funded(ctx)
+    }
+
+    pub fn settle_order_fees(
+        ctx: Context<SettleOrderFees>,
+        charge: u64,
+        waive: u64,
+        expected_due: u64,
+        expected_settlements: u64,
+    ) -> Result<()> {
+        instructions::settle_order_fees(ctx, charge, waive, expected_due, expected_settlements)
     }
 
     // ----- permissionless cranks -----

@@ -1,7 +1,7 @@
 //! Port of programs/props_vault/src/instructions/risk.rs (see PORTING.md). Each handler validates in Anchor's order:
 //! account types in field order, then `init` fields, then the remaining constraints in field order, then the handler
-//! body. The only USDC paths out of an owner PDA here are an approved payout (the trader's own USDC ATA + the capital
-//! vault) and closure (the capital vault), both signed by the owner PDA's seeds.
+//! body. The only USDC paths out of an owner PDA here are settled order fees (the fee vault), an approved payout (the
+//! trader's own USDC ATA + the capital vault) and closure (the capital vault), all signed by the owner PDA's seeds.
 use pinocchio::{AccountView, Address};
 
 use super::{
@@ -12,7 +12,7 @@ use crate::{
     accounts::{
         associated_token_constraint, ata_address, check_event_authority, keys_eq, mint_account, mutable, now,
         program_account, seeds, signer, singleton, system_account, take, token_account, Args, Rent, ATA_PROGRAM_ID,
-        CONFIG_PDA, SOL_TREASURY_PDA, SYSTEM_PROGRAM_ID, TOKEN_PROGRAM_ID,
+        CONFIG_PDA, FEE_VAULT_PDA, SOL_TREASURY_PDA, SYSTEM_PROGRAM_ID, TOKEN_PROGRAM_ID,
     },
     cpi::{close_account, create_ata, init_pda, transfer, transfer_checked},
     error::{require, Result, E},
@@ -258,8 +258,8 @@ pub fn mark_breached(accounts: &[AccountView], _data: &[u8]) -> Result {
     emit(event_authority, &e)
 }
 
-/// Closes a flat funded account: its USDC returns to the capital vault, its SOL and ATA rent to the SOL treasury, and its
-/// principal is released. Remaining accounts: owner positions to re-check.
+/// Closes a flat funded account with its order fees settled: its USDC returns to the capital vault, its SOL and ATA rent
+/// to the SOL treasury, and its principal is released. Remaining accounts: owner positions to re-check.
 pub fn close_funded(accounts: &[AccountView], _data: &[u8]) -> Result {
     #[rustfmt::skip]
     let [
@@ -302,6 +302,7 @@ pub fn close_funded(accounts: &[AccountView], _data: &[u8]) -> Result {
         E::InvalidAccountStatus,
     )?;
     require_flat(f, &accounts[13..], &c, owner)?;
+    require(f.order_fees_due.get() == 0, E::FeesDue)?;
 
     let bump = [f.owner_bump];
     let owner_signer: &[&[u8]] = &[OWNER_SEED, funded.address().as_ref(), &bump];
@@ -322,5 +323,76 @@ pub fn close_funded(accounts: &[AccountView], _data: &[u8]) -> Result {
     c.funded_active.set(c.funded_active.get().checked_sub(1).ok_or(E::MathOverflow)?);
     let mut e = event::<129>(disc::ACCOUNT_CLOSED);
     e.key(funded.address()).u64(principal).u64(usdc_returned).u64(lamports_returned).i64(now()?);
+    emit(event_authority, &e)
+}
+
+/// Settles order fees due: `charge` moves from the account's USDC to the fee vault, `waive` is forgiven. The program
+/// bounds the total by the fees due and the charge by the account's USDC; which orders executed (charged, at most on the
+/// size they filled) is the keeper's call, checkable against the exchange's order records. `expected_due` and
+/// `expected_settlements` are the `order_fees_due` and `order_fee_settlements` the settlement was computed from: a stale
+/// settlement fails, and so does a replayed one, since every settlement advances the count. Allowed in every open status
+/// and never paused: fees due come from orders already placed. Config is not writable: every order instruction reads
+/// it, and settlements must not contend with trading.
+pub fn settle_order_fees(accounts: &[AccountView], data: &[u8]) -> Result {
+    let mut args = Args(data);
+    let charge = args.u64()?;
+    let waive = args.u64()?;
+    let expected_due = args.u64()?;
+    let expected_settlements = args.u64()?;
+    #[rustfmt::skip]
+    let [
+        risk_authority, config, funded, owner, owner_usdc, fee_vault, usdc_mint, token_program, event_authority, _program,
+    ] = take::<10>(accounts)?;
+    signer(risk_authority)?;
+    let c = Config::load(config)?;
+    let f = load::<FundedAccount>(funded)?;
+    system_account(owner)?;
+    let usdc = token_account(owner_usdc)?;
+    token_account(fee_vault)?;
+    let decimals = mint_account(usdc_mint)?.decimals;
+    program_account(token_program, &TOKEN_PROGRAM_ID)?;
+
+    singleton(config, c.bump, &CONFIG_PDA)?;
+    require(c.is_risk_authority(risk_authority.address()), E::Unauthorized)?;
+    funded_seeds(funded, f)?;
+    mutable(funded)?;
+    owner_seeds(owner, funded, f)?;
+    associated_token_constraint(owner_usdc, usdc, owner.address(), usdc_mint.address())?;
+    mutable(owner_usdc)?;
+    singleton(fee_vault, c.fee_vault_bump, &FEE_VAULT_PDA)?;
+    mutable(fee_vault)?;
+    keys_eq(usdc_mint.address(), &c.usdc_mint, E::ConstraintAddress)?;
+    check_event_authority(event_authority)?;
+
+    require(f.is_open(), E::InvalidAccountStatus)?;
+    let total = charge.checked_add(waive).ok_or(E::MathOverflow)?;
+    require(total > 0, E::InvalidAmount)?;
+    let due = f.order_fees_due.get();
+    let settlements = f.order_fee_settlements.get();
+    // The balance as loaded: the transfer below moves it.
+    require(
+        due == expected_due
+            && settlements == expected_settlements
+            && total <= expected_due
+            && charge <= usdc.amount.get(),
+        E::InvalidFeeSettlement,
+    )?;
+
+    let bump = [f.owner_bump];
+    let owner_signer: &[&[u8]] = &[OWNER_SEED, funded.address().as_ref(), &bump];
+    transfer_from_owner(owner_usdc, usdc_mint, fee_vault, owner, decimals, owner_signer, charge)?;
+
+    f.order_fees_due.set(due.checked_sub(total).ok_or(E::MathOverflow)?);
+    f.order_fees_paid.set(f.order_fees_paid.get().checked_add(charge).ok_or(E::MathOverflow)?);
+    f.order_fee_settlements.set(settlements.checked_add(1).ok_or(E::MathOverflow)?);
+    // 120 (= 16 + 104): set_identity's `N`.
+    let mut e = event::<120>(disc::ORDER_FEES_SETTLED);
+    e.key(funded.address())
+        .u64(charge)
+        .u64(waive)
+        .u64(f.order_fees_due.get())
+        .u64(f.order_fees_paid.get())
+        .key(risk_authority.address())
+        .i64(now()?);
     emit(event_authority, &e)
 }
