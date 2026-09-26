@@ -134,7 +134,7 @@ export async function feeLedger(q: Q, funded: string): Promise<{ rows: FeeRow[];
       .where(and(eq(orderFees.fundedAccount, funded), ne(orderFees.state, 'released'))),
     q.select().from(orderFeeSettlements).where(and(eq(orderFeeSettlements.fundedAccount, funded), eq(orderFeeSettlements.status, 'sent')))
       .orderBy(asc(orderFeeSettlements.createdAt)).limit(1),
-    q.select({ count: sql<string>`count(*)`, charged: sql<string | null>`sum(${orderFeeSettlements.chargeUsd})` }).from(orderFeeSettlements)
+    q.select({ count: sql<string | null>`sum(${orderFeeSettlements.settlements})`, charged: sql<string | null>`sum(${orderFeeSettlements.chargeUsd})` }).from(orderFeeSettlements)
       .where(and(eq(orderFeeSettlements.fundedAccount, funded), eq(orderFeeSettlements.status, 'confirmed'))),
   ]);
   return {
@@ -143,7 +143,7 @@ export async function feeLedger(q: Q, funded: string): Promise<{ rows: FeeRow[];
       charged: toMicro6(r.charged), waived: toMicro6(r.waived), dueAt: r.dueAt, status: r.status, executed: r.executed === null ? null : toMicro6(r.executed) * 10n ** 14n,
     })),
     pending,
-    settled: { count: BigInt(settled?.count ?? 0), charged: toMicro6(settled?.charged ?? '0') },
+    settled: { count: BigInt(settled?.count ?? 0n), charged: toMicro6(settled?.charged ?? '0') },
   };
 }
 
@@ -223,40 +223,50 @@ export async function failSettlement(q: Q, signature: string) {
 }
 
 /**
- * Applies an indexed OrderFeesSettled to the ledger, once: the shares its sender recorded, or, for a settlement this
- * server did not send (e.g. the risk-key fallback script), its amounts over the account's due rows oldest first (charges
- * to what executed orders owe first). Other settlements sent against the same count can no longer land: failed.
+ * Applies an indexed OrderFeesSettled (event `eventIndex` of its transaction) to the ledger, once: the shares its sender
+ * recorded, or, for a settlement this server did not send (e.g. the risk-key fallback script), its amounts over the
+ * account's due rows oldest first (charges to what executed orders owe first). Other settlements sent against the same
+ * count can no longer land: failed. Returns the per-order shares it applied (none when this event was applied already):
+ * what referrals earn on.
  */
-export async function confirmSettlement(tx: Tx, e: { signature: string; funded: string; charged: bigint; waived: bigint; by: string; at: Date }) {
-  // One row per (transaction, account): an operators' transaction can settle several accounts.
-  // ponytail: two settlements of the same account in one transaction (only a hand-built one) count as one here.
+export async function confirmSettlement(tx: Tx, e: { signature: string; eventIndex: number; funded: string; charged: bigint; waived: bigint; by: string; at: Date }): Promise<Allocation[]> {
+  // One row per (transaction, account): an operators' transaction can settle several accounts, and a hand-built one the
+  // same account more than once (each later settlement counted on the row, spread like one this server did not send).
   const mine = and(eq(orderFeeSettlements.signature, e.signature), eq(orderFeeSettlements.fundedAccount, e.funded));
-  const [sent] = await tx.select().from(orderFeeSettlements).where(mine).for('update');
-  if (sent?.status === 'confirmed') return;
+  const [row] = await tx.select().from(orderFeeSettlements).where(mine).for('update');
+  const confirmed = row?.status === 'confirmed';
+  if (confirmed && (row.eventIndex === null || e.eventIndex <= row.eventIndex)) return [];
   let allocations: Allocation[];
-  if (sent) {
-    allocations = (sent.allocations as Share[])
+  if (row && !confirmed) {
+    allocations = (row.allocations as Share[])
       .map((a) => ({ order: a.order, charge: toMicro6(a.chargeUsd), waive: toMicro6(a.waiveUsd) }));
-    await tx.update(orderFeeSettlements).set({ status: 'confirmed', resolvedAt: sql`now()`, settledAt: e.at }).where(mine);
+    await tx.update(orderFeeSettlements).set({ status: 'confirmed', resolvedAt: sql`now()`, settledAt: e.at, eventIndex: e.eventIndex }).where(mine);
     await tx.update(orderFeeSettlements).set({ status: 'failed', resolvedAt: sql`now()` }).where(and(
       eq(orderFeeSettlements.fundedAccount, e.funded), eq(orderFeeSettlements.status, 'sent'),
-      eq(orderFeeSettlements.expectedSettlements, sent.expectedSettlements),
+      eq(orderFeeSettlements.expectedSettlements, row.expectedSettlements),
     ));
   } else {
     const { rows } = await feeLedger(tx, e.funded);
     allocations = spread(rows, e.charged, e.waived);
-    const expectedDue = dueInLedger(rows);
-    await tx.insert(orderFeeSettlements).values({
-      signature: e.signature, fundedAccount: e.funded, chargeUsd: fromMicro(e.charged), waiveUsd: fromMicro(e.waived), expectedDueUsd: fromMicro(expectedDue),
-      expectedSettlements: -1, allocations: allocationsJson({ charge: e.charged, waive: e.waived, allocations }), status: 'confirmed', sentBy: e.by,
-      resolvedAt: sql`now()`, settledAt: e.at,
-    });
+    const shares = allocationsJson({ charge: e.charged, waive: e.waived, allocations });
+    if (confirmed) {
+      await tx.update(orderFeeSettlements).set({
+        chargeUsd: sql`${orderFeeSettlements.chargeUsd} + ${fromMicro(e.charged)}`, waiveUsd: sql`${orderFeeSettlements.waiveUsd} + ${fromMicro(e.waived)}`,
+        allocations: [...(row.allocations as Share[]), ...shares], settlements: sql`${orderFeeSettlements.settlements} + 1`, eventIndex: e.eventIndex,
+      }).where(mine);
+    } else {
+      await tx.insert(orderFeeSettlements).values({
+        signature: e.signature, fundedAccount: e.funded, chargeUsd: fromMicro(e.charged), waiveUsd: fromMicro(e.waived), expectedDueUsd: fromMicro(dueInLedger(rows)),
+        expectedSettlements: -1, allocations: shares, status: 'confirmed', sentBy: e.by, resolvedAt: sql`now()`, settledAt: e.at, eventIndex: e.eventIndex,
+      });
+    }
   }
   for (const a of allocations) {
     await tx.update(orderFees).set({
       chargedUsd: sql`${orderFees.chargedUsd} + ${fromMicro(a.charge)}`, waivedUsd: sql`${orderFees.waivedUsd} + ${fromMicro(a.waive)}`,
     }).where(eq(orderFees.order, a.order));
   }
+  return allocations;
 }
 
 /** A settlement's amounts over due rows, oldest first: each charge to what an executed order owes first, then the rest. */

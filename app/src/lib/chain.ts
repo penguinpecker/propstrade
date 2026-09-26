@@ -19,6 +19,12 @@ export interface Prepared {
   feeLamports: number;
   /** Rent the trader deposits for accounts the transaction creates, lamports. */
   rentLamports: number;
+  /**
+   * Every order in it only reduces or protects a position (a close, take profit or stop loss, a trigger edit, a cancel):
+   * refused because the Props fee rose since it was built, it is signed again at once at the new fee. Anything else (an
+   * open) waits for the trader to review the new fee (docs/design/order-fee.md §10 Q8).
+   */
+  reducing?: true;
 }
 
 /**
@@ -211,6 +217,8 @@ export interface OpenInput {
    * program's formula), and the program refuses the order (OrderFeeChanged) when the rate now gives more.
    */
   rate: OrderFeeRate;
+  /** The open's Props fee as the ticket's quote showed it (its maxFeeMicro): the open signs the lower of this and the rate's. */
+  quotedFee?: bigint;
 }
 
 /** Opens (or adds to) a position, with optional take-profit and stop-loss orders for the whole position, in one transaction. */
@@ -220,12 +228,13 @@ export async function prepareOpen(connection: Connection, trader: PublicKey, inp
   const { marketToken, decimals } = await onchainMarket(connection, input.market);
   const reference = unitPrice(input.price, decimals);
   const sizeDeltaUsd = usdToGm(usd6(input.sizeUsd));
+  const fee = orderFee(input.rate, sizeDeltaUsd);
   const open = await c.openPosition({
     trader, funded, marketToken, isLong: input.isLong, orderType: input.kind === 'Market' ? 'market' : 'limit',
     collateral: collateralMicro(input.collateralUsd), sizeDeltaUsd,
     triggerPrice: input.kind === 'Limit' ? reference : undefined,
     acceptablePrice: acceptablePrice(reference, input.isLong, true, input.slippageBps),
-    maxFee: orderFee(input.rate, sizeDeltaUsd),
+    maxFee: input.quotedFee !== undefined && input.quotedFee < fee ? input.quotedFee : fee,
   });
   const instructions = [open.instruction];
   for (const [orderType, price] of [['takeProfit', input.takeProfit], ['stopLoss', input.stopLoss]] as const) {
@@ -270,7 +279,7 @@ export async function prepareClose(connection: Connection, trader: PublicKey, in
   if (!closes.length) throw new TxError('There is no position to close.');
   const follows = await Promise.all(closes.map(async ({ order, position }): Promise<OrderFollow> =>
     ({ order: order.toBase58(), position: position.toBase58(), sizeBefore: await positionSize(connection, position), increase: false })));
-  return { ...(await prepare(connection, trader, instructions)), follows };
+  return { ...(await prepare(connection, trader, instructions)), follows, reducing: true as const };
 }
 
 export interface ProtectionInput {
@@ -303,7 +312,7 @@ export async function prepareProtection(connection: Connection, trader: PublicKe
     }
   }
   if (!instructions.length) throw new TxError('Nothing changed.');
-  return prepare(connection, trader, instructions);
+  return { ...(await prepare(connection, trader, instructions)), reducing: true as const };
 }
 
 export async function prepareCancel(connection: Connection, trader: PublicKey, funded: string, order: string) {

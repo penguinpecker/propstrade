@@ -1,16 +1,25 @@
-// Referral program (src/routes/referrals.ts): codes, the binding rules, rewards per funded fill, the summary and the
-// operator routes. Rewards are written by the venue loop in the fill's transaction; its own test drives that path with a
-// real fill list (src/modules/chain/test/venue.test.ts), these call the same function directly.
+// Referral program (src/routes/referrals.ts): codes, the binding rules, rewards per Props fee charged on a funded order,
+// the summary and the operator routes. Rewards are written when the indexer applies a settlement's OrderFeesSettled
+// (src/modules/chain/projector.ts): these tests record settlements as the keeper sends them and project their events
+// as the indexer does, or run the indexer itself over one.
 import { randomBytes } from 'node:crypto';
-import { Keypair } from '@solana/web3.js';
+import { Keypair, PublicKey } from '@solana/web3.js';
+import BN from 'bn.js';
 import bs58 from 'bs58';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, count, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { parseFixed } from '@props/gmtrade';
+import { PROPS_VAULT_PROGRAM_ID } from '@props/sdk';
 import type { ReferralSummary } from '@props/shared';
 import {
-  accounts, adminAuditLog, evaluations, fundedAccounts, kycRequests, referralPayouts, referralRewards, simFills, users, venueFills,
+  accounts, adminAuditLog, evaluations, fundedAccounts, gmOrders, kycRequests, orderFees, orderFeeSettlements, referralPayouts, referralRewards,
+  simFills, users, venueFills,
 } from '../src/db/schema.js';
-import { accrueReferralReward, assignReferralCode, backfillReferralCodes } from '../src/routes/referrals.js';
+import { recordSettlement } from '../src/modules/chain/fees.js';
+import { createIndexer } from '../src/modules/chain/indexer.js';
+import { project, type ProjectDeps } from '../src/modules/chain/projector.js';
+import { offlineClient, programTx, silentLog } from '../src/modules/chain/test/support.js';
+import { accrueReferralRewards, assignReferralCode, backfillReferralCodes } from '../src/routes/referrals.js';
 import { LOCK_KEYS } from '../src/lib/leader.js';
 import { USDC_MINT } from '../src/lib/solana.js';
 import { APP_ORIGIN, fixtureRpc, makeApp, signIn as signInFrom } from './helpers.js';
@@ -65,24 +74,74 @@ async function evaluation(trader: string, status: 'active' | 'funded' = 'active'
   });
   return address;
 }
-/** A funded account of `trader` with fills [size, exchange fee] in USD, as the venue loop indexes them. */
-async function fundedWith(trader: string, fills: [sizeUsd: string, feeUsd: string][]) {
-  const address = key();
+/** A funded account of `trader`, as the indexer records it at activation. */
+async function fundedAccount(trader: string) {
+  const [address, from] = [key(), await evaluation(trader, 'funded')];
   await t.db.insert(fundedAccounts).values({
-    address, evaluation: await evaluation(trader, 'funded'), trader, ownerPda: key(), principal: '500', traderShareBps: 8000, status: 'active',
+    address, evaluation: from, trader, ownerPda: key(), principal: '500', traderShareBps: 8000, status: 'active',
     activationSignature: 'activation', createdAt: new Date(), updatedSlot: 2,
   });
-  const rows = fills.map(([sizeUsd, feeUsd]) => ({
-    signature: key(), eventIndex: 0, venueId: `${String(++seq).padStart(12, '0')}-${key().slice(0, 8)}-000001-000001-000000`, slot: seq,
-    fundedAccount: address, position: key(), order: key(), symbol: 'SOL', side: 'Long' as const, isIncrease: true, sizeUsd, sizeAfterUsd: sizeUsd,
-    price: '150', feeUsd, priceImpactUsd: '0', fundingUsd: '0', borrowUsd: '0', realizedPnl: null, ts: new Date(),
-  }));
-  if (rows.length) await t.db.insert(venueFills).values(rows);
-  return rows;
+  await t.db.insert(accounts).values({
+    id: address, wallet: trader, stage: 'funded', status: 'active', label: 'Funded 10K', evaluation: from, funded: address, sizeUsd: '10000',
+    lossAllowanceUsd: '500', maxExposureBps: 10_000, traderShareBps: 8000,
+  });
+  return address;
 }
-const accrue = async (fills: { venueId: string; symbol: string; feeUsd: string }[], trader: string, bps = 1000) => {
-  for (const f of fills) await t.db.transaction((tx) => accrueReferralReward(tx, f, trader, bps));
-};
+/** Fills of a funded account, [size] in USD each, as the venue loop indexes them: the referees' funded volume. */
+async function filled(funded: string, sizes: string[]) {
+  await t.db.insert(venueFills).values(sizes.map((sizeUsd) => ({
+    signature: key(), eventIndex: 0, venueId: `${String(++seq).padStart(12, '0')}-${key().slice(0, 8)}-000001-000001-000000`, slot: seq,
+    fundedAccount: funded, position: key(), order: key(), symbol: 'SOL', side: 'Long' as const, isIncrease: true, sizeUsd, sizeAfterUsd: sizeUsd,
+    price: '150', feeUsd: '1', priceImpactUsd: '0', fundingUsd: '0', borrowUsd: '0', realizedPnl: null, ts: new Date(),
+  })));
+}
+/** Executed orders of a funded account whose Props fees are due, [symbol, assessed USD] each, as the indexer leaves them. */
+async function dueOrders(funded: string, fees: [symbol: string, assessedUsd: string][]) {
+  const orders = fees.map(() => key());
+  await t.db.insert(gmOrders).values(fees.map(([symbol], i) => ({
+    address: orders[i]!, fundedAccount: funded, marketToken: key(), symbol, side: 'Long' as const, kind: 'Market' as const, isIncrease: true,
+    sizeUsd: '1000', status: 'executed' as const, createSignature: 'create', createdAt: new Date(),
+  })));
+  await t.db.insert(orderFees).values(fees.map(([, assessedUsd], i) => ({
+    order: orders[i]!, fundedAccount: funded, isIncrease: true, assessedUsd, rateUsd: '2', rateBps: 10, state: 'due' as const,
+    dueAt: new Date(Date.now() - 60_000 + i), updatedSlot: 3,
+  })));
+  return orders;
+}
+const micro = (usd: string) => parseFixed(usd, 6);
+const noReader = {} as ProjectDeps['reader']; // a settlement's projection reads nothing onchain
+/**
+ * The account's OrderFeesSettled projected as the indexer does, in its own transaction, at REFERRAL_REWARD_BPS `bps`
+ * (`eventIndex`: its place among its transaction's events).
+ */
+const indexed = (funded: string, sig: string, charged: bigint, waived: bigint, bps = 1000, eventIndex = 0) => t.db.transaction((tx) => project(tx, {
+  name: 'orderFeesSettled',
+  data: { funded, charged: String(charged), waived: String(waived), orderFeesDue: '0', orderFeesPaid: String(charged), by: key(), ts: String(Math.floor(Date.now() / 1000)) },
+}, eventIndex, { signature: sig, slot: ++seq, fee: 5_000n }, { reader: noReader, referralRewardBps: bps }));
+/**
+ * The keeper's settlement of a funded account, [order, charge, waive] in USD per order: recorded with its signature as it
+ * is sent (against the settlements the account has had), then confirmed by its indexed event, unless it never lands.
+ */
+async function settle(funded: string, shares: [order: string, chargeUsd: string, waiveUsd?: string][], o: { bps?: number; lands?: boolean } = {}) {
+  const allocations = shares.map(([order, charge, waive = '0']) => ({ order, charge: micro(charge), waive: micro(waive) }));
+  const plan = { charge: allocations.reduce((s, a) => s + a.charge, 0n), waive: allocations.reduce((s, a) => s + a.waive, 0n), allocations };
+  const [landed] = await t.db.select({ n: count() }).from(orderFeeSettlements)
+    .where(and(eq(orderFeeSettlements.fundedAccount, funded), eq(orderFeeSettlements.status, 'confirmed')));
+  const sig = signature();
+  await recordSettlement(t.db, {
+    signature: sig, funded, plan, expectedDue: plan.charge + plan.waive, expectedSettlements: BigInt(landed!.n), sentBy: 'keeper', lastValidBlockHeight: 1,
+  });
+  if (o.lands !== false) await indexed(funded, sig, plan.charge, plan.waive, o.bps);
+  return sig;
+}
+/** A funded account of `trader` whose executed orders one settlement charged these Props fees (USD); its address. */
+async function charged(trader: string, fees: string[]) {
+  const funded = await fundedAccount(trader);
+  const orders = await dueOrders(funded, fees.map((fee) => ['SOL', fee]));
+  await settle(funded, orders.map((order, i) => [order, fees[i]!]));
+  return funded;
+}
+const rewardsOf = (referee: string) => t.db.select().from(referralRewards).where(eq(referralRewards.referee, referee)).orderBy(referralRewards.id);
 
 describe('referral codes', () => {
   it('a first sign-in gives the first 8 characters of the wallet, upper-cased; later sign-ins keep it', async () => {
@@ -221,29 +280,151 @@ describe('binding a referrer', () => {
 });
 
 describe('rewards', () => {
-  it('a referred trader\'s funded fill earns the referrer the rate of its exchange fee, rounded down, once per fill', async () => {
+  it('each funded order a settlement charges earns the referrer the rate of the Props fee charged, rounded down, once the chain confirms it', async () => {
     const referrer = await signIn(t.app);
     const trader = await referredBy(referrer.wallet.slice(0, 8));
-    const fills = await fundedWith(trader.wallet, [['10000', '1.234567'], ['500', '0.000009']]);
-    await accrue(fills, trader.wallet);
-    await accrue(fills, trader.wallet); // the venue loop never repeats a fill; if it did, nothing changes
-    const rows = await t.db.select().from(referralRewards).where(eq(referralRewards.referee, trader.wallet)).orderBy(referralRewards.id);
-    expect(rows.map((r) => [r.referrer, r.venueFillId, r.symbol, r.feeUsd, r.rateBps, r.rewardUsd])).toEqual([
-      [referrer.wallet, fills[0]!.venueId, 'SOL', '1.234567', 1000, '0.123456'],
-      [referrer.wallet, fills[1]!.venueId, 'SOL', '0.000009', 1000, '0.000000'],
+    const funded = await fundedAccount(trader.wallet);
+    const [sol, btc] = await dueOrders(funded, [['SOL', '12.2'], ['BTC', '2.000009']]);
+    // The keeper's first attempt never lands (its blockhash expires); the retry, against the same count, does.
+    await settle(funded, [[sol!, '12.2'], [btc!, '2.000009']], { lands: false });
+    expect(await rewardsOf(trader.wallet)).toEqual([]);
+    const sig = await settle(funded, [[sol!, '12.2'], [btc!, '2.000009']]);
+    const rows = await rewardsOf(trader.wallet);
+    expect(rows.map((r) => [r.referrer, r.order, r.fundedAccount, r.settlementSignature, r.symbol, r.feeUsd, r.rateBps, r.rewardUsd])).toEqual([
+      [referrer.wallet, sol, funded, sig, 'SOL', '12.200000', 1000, '1.220000'],
+      [referrer.wallet, btc, funded, sig, 'BTC', '2.000009', 1000, '0.200000'],
     ]);
+    // The same shares accrued again (a settlement applied twice) add nothing: one reward per order and settlement.
+    await t.db.transaction((tx) => accrueReferralRewards(tx, { signature: sig, eventIndex: 0, funded, shares: [{ order: sol!, charge: 12_200_000n }] }, 1000));
+    expect(await rewardsOf(trader.wallet)).toHaveLength(2);
   });
 
-  it('a trader no one referred, a fill without a fee and a zero rate earn nothing', async () => {
-    const loner = await signIn(t.app);
-    await accrue(await fundedWith(loner.wallet, [['10000', '5']]), loner.wallet);
+  it('an order charged in parts earns on each part its settlement charged', async () => {
     const referrer = await signIn(t.app);
     const trader = await referredBy(referrer.wallet.slice(0, 8));
-    await accrue(await fundedWith(trader.wallet, [['10000', '0']]), trader.wallet);
-    await accrue(await fundedWith(trader.wallet, [['10000', '5']]), trader.wallet, 0);
-    const rows = await t.db.select().from(referralRewards)
-      .where(sql`${referralRewards.referee} in (${loner.wallet}, ${trader.wallet})`);
-    expect(rows).toEqual([]);
+    const funded = await fundedAccount(trader.wallet);
+    const [order] = await dueOrders(funded, [['SOL', '10.5']]);
+    // The account's USDC covered 4 USDC of the fee; the rest stayed due until a later settlement charged it.
+    const [first, second] = [await settle(funded, [[order!, '4']]), await settle(funded, [[order!, '6.5']])];
+    expect((await rewardsOf(trader.wallet)).map((r) => [r.settlementSignature, r.feeUsd, r.rewardUsd])).toEqual([[first, '4.000000', '0.400000'], [second, '6.500000', '0.650000']]);
+  });
+
+  it('waived fees earn nothing: the waived part of a charge, or a fee only waived', async () => {
+    const referrer = await signIn(t.app);
+    const trader = await referredBy(referrer.wallet.slice(0, 8));
+    const funded = await fundedAccount(trader.wallet);
+    // A take profit charged 1.7 of its 2.5 assessment (the rest waived) and a stop loss the exchange cancelled (waived).
+    const [tp, sl] = await dueOrders(funded, [['SOL', '2.5'], ['SOL', '2.5']]);
+    await settle(funded, [[tp!, '1.7', '0.8'], [sl!, '0', '2.5']]);
+    expect((await rewardsOf(trader.wallet)).map((r) => [r.order, r.feeUsd, r.rewardUsd])).toEqual([[tp, '1.700000', '0.170000']]);
+    await settle(funded, [[(await dueOrders(funded, [['ETH', '3']]))[0]!, '0', '3']]);
+    expect(await rewardsOf(trader.wallet)).toHaveLength(1);
+  });
+
+  it('a trader no one referred and a zero rate earn nothing', async () => {
+    const loner = await signIn(t.app);
+    await charged(loner.wallet, ['5']);
+    const referrer = await signIn(t.app);
+    const trader = await referredBy(referrer.wallet.slice(0, 8));
+    const funded = await fundedAccount(trader.wallet);
+    const [order] = await dueOrders(funded, [['SOL', '5']]);
+    await settle(funded, [[order!, '5']], { bps: 0 });
+    expect(await t.db.select().from(referralRewards).where(sql`${referralRewards.referee} in (${loner.wallet}, ${trader.wallet})`)).toEqual([]);
+  });
+
+  it('a settlement this server did not send (the risk-key fallback script) earns on the charges it is spread over', async () => {
+    const referrer = await signIn(t.app);
+    const trader = await referredBy(referrer.wallet.slice(0, 8));
+    const funded = await fundedAccount(trader.wallet);
+    const [older, newer] = await dueOrders(funded, [['SOL', '2.5'], ['ETH', '1.5']]);
+    // 3 charged and 1 waived over the due orders oldest first: the older one's 2.5, then 0.5 of the newer one.
+    await indexed(funded, signature(), 3_000_000n, 1_000_000n);
+    expect((await rewardsOf(trader.wallet)).map((r) => [r.order, r.feeUsd, r.rewardUsd])).toEqual([[older, '2.500000', '0.250000'], [newer, '0.500000', '0.050000']]);
+  });
+
+  it('a charge settled once the account breached earns nothing: its USDC all returns to the capital vault, so the charge only moved Props\' own capital', async () => {
+    const referrer = await signIn(t.app);
+    const trader = await referredBy(referrer.wallet.slice(0, 8));
+    const funded = await fundedAccount(trader.wallet);
+    // The trader's close executed; the account then breached, and the keeper settled the close's fee afterwards.
+    const [close] = await dueOrders(funded, [['SOL', '2.5']]);
+    await t.db.transaction((tx) => project(tx, { name: 'accountBreached', data: { funded, ts: String(Math.floor(Date.now() / 1000)) } }, 0,
+      { signature: signature(), slot: ++seq, fee: 5_000n }, { reader: noReader, referralRewardBps: 1000 }));
+    await settle(funded, [[close!, '2.5']]);
+    expect(await rewardsOf(trader.wallet)).toEqual([]);
+    const [fee] = await t.db.select().from(orderFees).where(eq(orderFees.order, close!));
+    expect(fee!.chargedUsd).toBe('2.500000'); // charged and in the ledger all the same: only the reward is withheld
+  });
+
+  it('a charge in the transaction that closes the account earns nothing, whatever its status was: its USDC returns to Props with it', async () => {
+    const referrer = await signIn(t.app);
+    const trader = await referredBy(referrer.wallet.slice(0, 8));
+    const funded = await fundedAccount(trader.wallet);
+    const [order] = await dueOrders(funded, [['SOL', '2.5']]);
+    // The operators' close job on an active account: [settle_order_fees, close_funded] in one transaction.
+    const [sig, now] = [signature(), Math.floor(Date.now() / 1000)];
+    await recordSettlement(t.db, {
+      signature: sig, funded, plan: { charge: 2_500_000n, waive: 0n, allocations: [{ order: order!, charge: 2_500_000n, waive: 0n }] },
+      expectedDue: 2_500_000n, expectedSettlements: 0n, sentBy: 'close_funded job', lastValidBlockHeight: 1,
+    });
+    const tx = programTx(offlineClient(), [
+      ['orderFeesSettled', {
+        funded: new PublicKey(funded), charged: new BN(2_500_000), waived: new BN(0), orderFeesDue: new BN(0), orderFeesPaid: new BN(2_500_000),
+        by: Keypair.generate().publicKey, ts: new BN(now),
+      }],
+      ['accountClosed', { funded: new PublicKey(funded), principal: new BN(500_000_000), usdcReturned: new BN(497_500_000), lamportsReturned: new BN(0), ts: new BN(now) }],
+    ]);
+    const rpc = {
+      getSignaturesForAddress: async () => [{ signature: sig, slot: ++seq, err: null, memo: null, blockTime: now }],
+      getTransaction: async () => ({ slot: seq, blockTime: now, transaction: tx.transaction, meta: { ...tx.meta, err: null, fee: 5_000 } }),
+      onLogs: () => 0, removeOnLogsListener: async () => {},
+    };
+    await createIndexer({
+      db: t.db, rpc: rpc as never, client: offlineClient(), programId: PROPS_VAULT_PROGRAM_ID, log: silentLog, reader: noReader,
+      notify: async () => {}, onApplied() {}, referralRewardBps: 1000,
+    }).catchUp();
+    expect(await rewardsOf(trader.wallet)).toEqual([]);
+    const [settlement] = await t.db.select().from(orderFeeSettlements).where(eq(orderFeeSettlements.signature, sig));
+    const [fee] = await t.db.select().from(orderFees).where(eq(orderFees.order, order!));
+    expect([settlement!.status, fee!.chargedUsd]).toEqual(['confirmed', '2.500000']);
+  });
+
+  it('an account settled twice in one hand-built transaction earns on both charges, and on neither twice', async () => {
+    const referrer = await signIn(t.app);
+    const trader = await referredBy(referrer.wallet.slice(0, 8));
+    const funded = await fundedAccount(trader.wallet);
+    await dueOrders(funded, [['SOL', '3']]);
+    const sig = signature();
+    await indexed(funded, sig, 1_000_000n, 0n, 1000, 0);
+    await indexed(funded, sig, 2_000_000n, 0n, 1000, 1);
+    // Projected again past program_events (a bug): refused whole (its vault ledger entry exists), so nothing is earned twice.
+    await expect(indexed(funded, sig, 2_000_000n, 0n, 1000, 1)).rejects.toThrow();
+    expect((await rewardsOf(trader.wallet)).map((r) => [r.feeUsd, r.rewardUsd])).toEqual([['1.000000', '0.100000'], ['2.000000', '0.200000']]);
+  });
+
+  it('the indexer reading a settlement\'s transaction again (a duplicate delivery, a restart) adds no second reward', async () => {
+    const referrer = await signIn(t.app);
+    const trader = await referredBy(referrer.wallet.slice(0, 8));
+    const funded = await fundedAccount(trader.wallet);
+    const [order] = await dueOrders(funded, [['ETH', '2.5']]);
+    const [sig, now] = [signature(), Math.floor(Date.now() / 1000)];
+    const tx = programTx(offlineClient(), [['orderFeesSettled', {
+      funded: new PublicKey(funded), charged: new BN(2_500_000), waived: new BN(0), orderFeesDue: new BN(0), orderFeesPaid: new BN(2_500_000),
+      by: Keypair.generate().publicKey, ts: new BN(now),
+    }]]);
+    // A node that lists the settlement's transaction on every read.
+    const rpc = {
+      getSignaturesForAddress: async () => [{ signature: sig, slot: ++seq, err: null, memo: null, blockTime: now }],
+      getTransaction: async () => ({ slot: seq, blockTime: now, transaction: tx.transaction, meta: { ...tx.meta, err: null, fee: 5_000 } }),
+      onLogs: () => 0, removeOnLogsListener: async () => {},
+    };
+    const indexer = () => createIndexer({
+      db: t.db, rpc: rpc as never, client: offlineClient(), programId: PROPS_VAULT_PROGRAM_ID, log: silentLog, reader: noReader,
+      notify: async () => {}, onApplied() {}, referralRewardBps: 1000,
+    });
+    expect(await indexer().catchUp()).toBe(1);
+    expect(await indexer().catchUp()).toBe(1); // read again after a restart: its events are stored already, nothing is applied twice
+    expect((await rewardsOf(trader.wallet)).map((r) => [r.order, r.settlementSignature, r.feeUsd, r.rewardUsd])).toEqual([[order, sig, '2.500000', '0.250000']]);
   });
 });
 
@@ -252,7 +433,7 @@ describe('summary', () => {
     const referrer = await signIn(t.app);
     const code = referrer.wallet.slice(0, 8);
     const [idle, evaluating, trading] = [await referredBy(code), await referredBy(code), await referredBy(code)];
-    // A simulated evaluation earns nothing, whatever its fills paid.
+    // A simulated evaluation earns nothing, whatever its fills paid (the exchange's fee and the simulated Props fee).
     const simulated = await evaluation(evaluating.wallet);
     await t.db.insert(accounts).values({
       id: simulated, wallet: evaluating.wallet, stage: 'evaluation', status: 'active', label: 'Evaluation 10K', evaluation: simulated, sizeUsd: '10000',
@@ -260,11 +441,11 @@ describe('summary', () => {
     });
     await t.db.insert(simFills).values({
       accountId: simulated, symbol: 'SOL', side: 'Long', isIncrease: true, sizeUsd: '50000', price: '150', feeUsd: '25', priceImpactUsd: '0',
-      fundingUsd: '0', borrowUsd: '0', tickTs: new Date(),
+      fundingUsd: '0', borrowUsd: '0', platformFeeUsd: '52', tickTs: new Date(),
     });
-    const fills = await fundedWith(trading.wallet, Array.from({ length: 51 }, (_, i) => [String(100 + i), '0.05'] as [string, string]));
-    await accrue(fills, trading.wallet);
-    await fundedWith((await signIn(t.app)).wallet, [['99999', '50']]); // someone else's trader
+    const funded = await charged(trading.wallet, Array.from({ length: 51 }, () => '2.05')); // $2 + 0.1 % of $50, 51 times
+    await filled(funded, Array.from({ length: 51 }, (_, i) => String(100 + i)));
+    await filled(await fundedAccount((await signIn(t.app)).wallet), ['99999']); // someone else's trader
     await verified(referrer.wallet);
     const paid = await admin('POST', '/v1/admin/referrals/payouts', { referrer: referrer.wallet, amountUsd: '0.1', signature: sent([referrer.wallet, '0.1']) });
     expect(paid.statusCode).toBe(200);
@@ -272,11 +453,11 @@ describe('summary', () => {
     const s = await summary(referrer.cookie);
     expect(s).toMatchObject({
       code: code.toUpperCase(), referredBy: null, rewardBps: 1000, referees: 3, refereesWithEvaluation: 2, refereesFunded: 1,
-      fundedVolumeUsd: String(51 * 100 + (50 * 51) / 2), earnedUsd: '0.255', paidUsd: '0.1', pendingUsd: '0.155',
+      fundedVolumeUsd: String(51 * 100 + (50 * 51) / 2), earnedUsd: '10.455', paidUsd: '0.1', pendingUsd: '10.355',
     });
     expect(s.recent).toHaveLength(50);
     // The referee's wallet is masked: enough to tell referees apart, not to follow one onchain.
-    expect(s.recent[0]).toEqual({ at: expect.any(Number), referee: `${trading.wallet.slice(0, 4)}…${trading.wallet.slice(-4)}`, symbol: 'SOL', feeUsd: '0.05', rewardUsd: '0.005' });
+    expect(s.recent[0]).toEqual({ at: expect.any(Number), referee: `${trading.wallet.slice(0, 4)}…${trading.wallet.slice(-4)}`, symbol: 'SOL', feeUsd: '2.05', rewardUsd: '0.205' });
     expect(JSON.stringify(s)).not.toContain(trading.wallet);
     expect(s.recent.map((r) => r.at)).toEqual([...s.recent.map((r) => r.at)].sort((a, b) => b - a));
     expect(JSON.stringify(s)).not.toContain(idle.wallet); // a referee without rewards appears only in the counts
@@ -289,10 +470,10 @@ describe('operator routes', () => {
   it('list every referrer with its code, referees, earned, paid and owed, most owed first', async () => {
     const [small, large] = [await signIn(t.app), await signIn(t.app)];
     const a = await referredBy(small.wallet.slice(0, 8));
-    await accrue(await fundedWith(a.wallet, [['1000', '1']]), a.wallet);
+    await charged(a.wallet, ['3']); // $2 + 0.1 % of $1,000
     const [b, c] = [await referredBy(large.wallet.slice(0, 8)), await referredBy(large.wallet.slice(0, 8))];
-    await accrue(await fundedWith(b.wallet, [['1000', '40']]), b.wallet);
-    await accrue(await fundedWith(c.wallet, [['1000', '10']]), c.wallet);
+    await charged(b.wallet, ['12', '12']); // $2 + 0.1 % of $10,000, twice
+    await charged(c.wallet, ['12']);
     await verified(large.wallet);
     expect((await admin('POST', '/v1/admin/referrals/payouts', { referrer: large.wallet, amountUsd: '1', signature: sent([large.wallet, '1']) })).statusCode).toBe(200);
 
@@ -300,8 +481,8 @@ describe('operator routes', () => {
     expect(res.statusCode).toBe(200);
     const rows = (res.json() as { referrer: string }[]).filter((r) => [small.wallet, large.wallet].includes(r.referrer));
     expect(rows).toEqual([
-      { referrer: large.wallet, code: large.wallet.slice(0, 8).toUpperCase(), referees: 2, earnedUsd: '5', paidUsd: '1', pendingUsd: '4' },
-      { referrer: small.wallet, code: small.wallet.slice(0, 8).toUpperCase(), referees: 1, earnedUsd: '0.1', paidUsd: '0', pendingUsd: '0.1' },
+      { referrer: large.wallet, code: large.wallet.slice(0, 8).toUpperCase(), referees: 2, earnedUsd: '3.6', paidUsd: '1', pendingUsd: '2.6' },
+      { referrer: small.wallet, code: small.wallet.slice(0, 8).toUpperCase(), referees: 1, earnedUsd: '0.3', paidUsd: '0', pendingUsd: '0.3' },
     ]);
     expect((await admin('GET', '/v1/admin/referrals', undefined, 'x'.repeat(64))).statusCode).toBe(401);
   });
@@ -309,7 +490,7 @@ describe('operator routes', () => {
   it('record a payout up to what is owed, in the audit log; refuse more, a bad amount or signature, an unknown referrer and a repeat', async () => {
     const referrer = await signIn(t.app);
     const trader = await referredBy(referrer.wallet.slice(0, 8));
-    await accrue(await fundedWith(trader.wallet, [['10000', '20']]), trader.wallet); // earns 2
+    await charged(trader.wallet, ['20']); // earns 2
     await verified(referrer.wallet);
     const pay = (body: { amountUsd?: string; [field: string]: unknown }) =>
       admin('POST', '/v1/admin/referrals/payouts', { referrer: referrer.wallet, amountUsd: '1.5', signature: sent([referrer.wallet, body.amountUsd ?? '1.5']), ...body });
@@ -341,7 +522,7 @@ describe('operator routes', () => {
     const alt = await signIn(t.app);
     const trader = await referredBy(alt.wallet.slice(0, 8));
     await verified(trader.wallet); // the person, verified once for the funded account
-    await accrue(await fundedWith(trader.wallet, [['10000', '20']]), trader.wallet);
+    await charged(trader.wallet, ['20']);
     const pay = () => admin('POST', '/v1/admin/referrals/payouts', { referrer: alt.wallet, amountUsd: '1', signature: sent([alt.wallet, '1']) });
     const refused = await pay();
     expect([refused.statusCode, refused.json().error.code]).toEqual([409, 'referrer_unverified']);
@@ -360,7 +541,7 @@ describe('operator routes', () => {
     for (const referrer of [a, b]) {
       await verified(referrer.wallet);
       const trader = await referredBy(referrer.wallet.slice(0, 8));
-      await accrue(await fundedWith(trader.wallet, [['10000', '20']]), trader.wallet); // earns 2
+      await charged(trader.wallet, ['20']); // earns 2
     }
     const pay = (referrer: string, amountUsd: string, sig: string) => admin('POST', '/v1/admin/referrals/payouts', { referrer, amountUsd, signature: sig });
     const code = async (res: Awaited<ReturnType<typeof pay>>) => [res.statusCode, res.json().error?.code];

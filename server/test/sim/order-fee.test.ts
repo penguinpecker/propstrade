@@ -9,7 +9,7 @@ import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { ClosedTrade, Fill, Order, Performance, PriceTick, SimOrderRequest, SimOrderResponse } from '@props/shared';
 import { CLOSE_ALL, orderFee } from '@props/sdk';
-import { simFills } from '../../src/db/schema.js';
+import { referralRewards, simFills } from '../../src/db/schema.js';
 import type { OrderFeeRateInfo } from '../../src/lib/order-fee.js';
 import { nextSessionClose } from '../../src/modules/keeper/sessions.js';
 import { startSim, type Sim } from './harness.js';
@@ -128,6 +128,19 @@ describe('practice: the program\'s fee rule, simulated', () => {
     expect(second.json().error.message).toBe('Margin $2.00 and the $0.50 Props fee are more than the $0.00 available');
   });
 
+  it('is simulated: a referred trader\'s Props fee earns its referrer nothing', async () => {
+    rate = RATE_A;
+    const referrer = await t.user();
+    const u = await t.user();
+    expect((await u.post('/v1/me/referrer', { code: referrer.wallet.slice(0, 8) })).statusCode).toBe(200);
+    const id = practiceOf(u);
+    await base();
+    await placed(u, id);
+    await t.tick(at(1));
+    expect((await fills(u, id)).map((f) => f.platformFeeUsd)).toEqual(['2.5']);
+    expect(await t.db.select().from(referralRewards).where(eq(referralRewards.referee, u.wallet))).toEqual([]);
+  });
+
   it('a liquidation pays no Props fee', async () => {
     rate = RATE_A;
     const u = await t.user();
@@ -143,6 +156,53 @@ describe('practice: the program\'s fee rule, simulated', () => {
     const rows = await t.db.select().from(simFills).where(eq(simFills.accountId, id));
     expect(rows.find((f) => !f.isIncrease)!.orderId, 'no order of the account: GMTrade\'s liquidation').toBeNull();
     expect((await summary(u, id)).platformFees.paidUsd).toBe('4.5');
+  });
+
+  it('at the owner\'s rate ($2 + 10 bps) the same orders cost exactly their Props fees more than at 0: $3.00 a $1,000 fill, a close-all assessed on the $25,000 cap and charged on the $1,000 it closed', async () => {
+    const OWNER: OrderFeeRateInfo = { feeUsdc: 2_000_000n, feeBps: 10, source: 'program' };
+    const ZERO: OrderFeeRateInfo = { feeUsdc: 0n, feeBps: 0, source: 'program' };
+    expect([fee(OWNER, 1_000), fee(OWNER, 2_000, 25_000), fee(OWNER, Infinity, 25_000)]).toEqual(['3', '4', '27']);
+    // Two practice accounts trade the same orders at the same prices, a (referred) at the owner's rate, b at 0.
+    const referrer = await t.user();
+    const [a, b] = [await t.user(), await t.user()];
+    expect((await a.post('/v1/me/referrer', { code: referrer.wallet.slice(0, 8) })).statusCode).toBe(200);
+    const [idA, idB] = [practiceOf(a), practiceOf(b)];
+    const open = async (u: User, id: string, r: OrderFeeRateInfo) => { rate = r; return placed(u, id, { sizeUsd: '1000', collateralUsd: '100' }); };
+    const close = async (u: User, id: string, percent: number, r: OrderFeeRateInfo) => {
+      rate = r;
+      const [p] = await positions(u, id);
+      const res = await u.post(`${path(id)}/positions/${p!.id}/close`, { clientId: clientId(), percent, slippageBps: 50 });
+      expect(res.statusCode, res.body).toBe(200);
+      return res.json() as SimOrderResponse;
+    };
+    await base();
+    // $1,000 opened: a's is assessed $3.00 and held beside its $100 margin until the fill.
+    const [openA, openB] = [await open(a, idA, OWNER), await open(b, idB, ZERO)];
+    expect([openA.order.platformFeeUsd, openB.order.platformFeeUsd, openA.account.platformFees.heldUsd]).toEqual(['3', '0', '3']);
+    expect(micro(openB.account.availableMargin) - micro(openA.account.availableMargin)).toBe(3_000_000n);
+    await t.tick(at(1));
+    // $1,000 more, a $1,000 close, then a close of the rest (assessed its maximum: the rate on the $25,000 cap).
+    await open(a, idA, OWNER);
+    await open(b, idB, ZERO);
+    await t.tick(at(1));
+    expect((await close(a, idA, 50, OWNER)).order.platformFeeUsd).toBe('3');
+    await close(b, idB, 50, ZERO);
+    await t.tick(at(1));
+    expect((await close(a, idA, 100, OWNER)).order.platformFeeUsd).toBe('27');
+    await close(b, idB, 100, ZERO);
+    await t.tick(at(1));
+    expect([await positions(a, idA), await positions(b, idB)]).toEqual([[], []]);
+    const [fillsA, fillsB] = [await fills(a, idA), await fills(b, idB)];
+    expect(fillsA.map((f) => [f.isIncrease, f.sizeUsd, f.platformFeeUsd])).toEqual([[true, '1000', '3'], [true, '1000', '3'], [false, '1000', '3'], [false, '1000', '3']]);
+    expect(fillsB.map((f) => f.platformFeeUsd)).toEqual(['0', '0', '0', '0']);
+    // The exchange's side is identical, so each fill's realized P&L differs by exactly its Props fee, the account by $12.
+    expect(fillsA.map((f) => [f.price, f.feeUsd])).toEqual(fillsB.map((f) => [f.price, f.feeUsd]));
+    expect(fillsA.map((f, i) => micro(f.realizedPnl ?? '0') - micro(fillsB[i]!.realizedPnl ?? '0'))).toEqual(Array(4).fill(-3_000_000n));
+    const [sa, sb] = [await summary(a, idA), await summary(b, idB)];
+    for (const k of ['equity', 'realizedPnl', 'allowanceRemaining', 'availableMargin'] as const) expect(micro(sa[k]) - micro(sb[k]), k).toBe(-12_000_000n);
+    expect([sa.platformFees, sb.platformFees]).toEqual([{ dueUsd: '0', paidUsd: '12', heldUsd: '0' }, { dueUsd: '0', paidUsd: '0', heldUsd: '0' }]);
+    expect(await t.db.select().from(referralRewards).where(eq(referralRewards.referee, a.wallet))).toEqual([]); // simulated: nothing earned
+    rate = RATE_A;
   });
 });
 

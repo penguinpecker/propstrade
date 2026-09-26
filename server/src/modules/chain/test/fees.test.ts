@@ -11,7 +11,7 @@ import { CLOSE_ALL, PROPS_VAULT_PROGRAM_ID, gmOrderPda, orderFee, orderNonce } f
 import type { TradeEvent } from '@props/gmtrade';
 import { accountEvents, accounts, evaluations, fundedAccounts, gmOrders, orderFeeSettlements, orderFees, vaultLedger, venueFills } from '../../../db/schema.ts';
 import { toJson, type VaultEvent } from '../events.ts';
-import { asOnchain, chargedSince, dueInLedger, feeLedger, feesOwed, fillFee, inStep, owedOf, planSettlement, recordSettlement, unknownSince, UNKNOWN_WAIVE_MS, type FeeRow } from '../fees.ts';
+import { asOnchain, chargedSince, confirmSettlement, dueInLedger, feeLedger, feesOwed, fillFee, inStep, owedOf, planSettlement, recordSettlement, unknownSince, UNKNOWN_WAIVE_MS, type FeeRow } from '../fees.ts';
 import { createFundedProvider, money } from '../funded.ts';
 import { createProgramReader, type ProgramReader } from '../program.ts';
 import { project } from '../projector.ts';
@@ -333,6 +333,31 @@ test('two accounts settled in one transaction (an operators\' batch): each settl
     const ledger = await feeLedger(t.db, f.funded);
     assert.deepEqual([dueInLedger(ledger.rows), feesOwed(ledger.rows), ledger.settled], [0n, 0n, { count: 1n, charged: 2_500_000n }]);
   }
+});
+
+test('one account settled twice in one transaction (a hand-built batch): both settlements reach its ledger, which stays in step; neither applies twice', async () => {
+  const { trader, funded } = await fundedAccount();
+  const order = key();
+  await apply('orderRequested', placed(funded, trader, order, 10_000n * USD, 2_500_000n));
+  await apply('synced', { funded: pk(funded), slots: [], ordersDropped: [pk(order)], ts: ts(1) });
+  await t.db.update(gmOrders).set({ status: 'executed' }).where(eq(gmOrders.address, order));
+  // [settle(charge 1, expected due 2.5, count 0), settle(charge 1, waive 0.5, expected due 1.5, count 1)]: events 0 and 1 of
+  // one transaction.
+  const signature = key();
+  await apply('orderFeesSettled', { ...settledEvent(funded, 1_000_000n, 1_000_000n), orderFeesDue: new BN(1_500_000) }, signature, 0);
+  await apply('orderFeesSettled', { ...settledEvent(funded, 1_000_000n, 2_000_000n), waived: new BN(500_000) }, signature, 1);
+  const chain = { due: 0n, paid: 2_000_000n, settlements: 2n };
+  const check = async () => {
+    const ledger = await feeLedger(t.db, funded);
+    const [row] = await t.db.select().from(orderFees).where(eq(orderFees.order, order));
+    assert.deepEqual([dueInLedger(ledger.rows), ledger.settled, inStep(ledger, chain), row!.chargedUsd, row!.waivedUsd], [0n, { count: 2n, charged: 2_000_000n }, true, '2.000000', '0.500000']);
+    assert.equal(await chargedSince(t.db, funded, null), 2_000_000n, 'the payout review counts both charges');
+  };
+  await check();
+  // The second event applied again (a bug past program_events) applies nothing.
+  const again = await t.db.transaction((tx) => confirmSettlement(tx, { signature, funded, charged: 1_000_000n, waived: 500_000n, by: key(), at: new Date(), eventIndex: 1 }));
+  assert.deepEqual(again, []);
+  await check();
 });
 
 test('a decrease is charged the rate of its latest assessment on what it executed, even when its fill was indexed before that assessment', async () => {

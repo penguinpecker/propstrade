@@ -35,12 +35,10 @@ export async function createChain(ctx: ModuleContext, opts: ChainOptions = {}) {
   const reader = createReader(client, rpc);
   const notify = (n: Notice) => ctx.notify(n.wallet, n);
   const program = createProgramReader({ db, rpc, client, programId, cluster: ctx.config.SOLANA_CLUSTER, serverRate: serverOrderFeeRate(ctx.config) });
-  const venue = createVenue({
-    db, rpc, client, reader, marketdata: services.marketdata, gm: opts.gm ?? subsquid, log, notify, referralRewardBps: ctx.config.REFERRAL_REWARD_BPS,
-  });
+  const venue = createVenue({ db, rpc, client, reader, marketdata: services.marketdata, gm: opts.gm ?? subsquid, log, notify });
   const funded = createFundedProvider({ db, venue, program });
   const indexer = createIndexer({
-    db, rpc, client, programId, log, reader, sim: services.sim, notify,
+    db, rpc, client, programId, log, reader, sim: services.sim, notify, referralRewardBps: ctx.config.REFERRAL_REWARD_BPS,
     onApplied(events) {
       venue.changed([...new Set(events.flatMap((e) => ('funded' in e.data ? [e.data.funded] : [])))]);
       program.changed(events);

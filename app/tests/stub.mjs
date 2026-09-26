@@ -200,12 +200,13 @@ function createWallet(state, wallet) {
   w.history[funded].push({ id: 'funded-trade-0', symbol: 'BTC', side: 'Long', openedAt: now - 3 * DAY, closedAt: now - 2 * DAY, sizeUsd: '8200', entryPrice: '63842.5', exitPrice: '64412.8', ...costs('7.06', '4.10', '2.14', '0.50', '0.32', '0.18'), netPnl: '312.50', venue: 'exchange', signatures: [fakeSignature('funded-open'), fakeSignature('funded-close')] });
   w.payouts.push(payout(w, 0, 'paid', now - 2 * DAY));
   w.payoutSeq = 1;
-  // Referrals: three traders signed up with this wallet's code; the funded one's fills paid these rewards (10% of each fee).
+  // Referrals: three traders signed up with this wallet's code; the Props fees charged on the funded one's orders paid these
+  // rewards (10% of each: $2 + 0.1% of $8,200, $3,000 and $4,500, and the part of a fee its account's USDC covered).
   const referees = [0, 1, 2].map(i => fakeKey(`referee:${wallet}:${i}`));
   w.referral = {
-    code: referralCode(state, wallet), by: null, createdAt: now - 30 * DAY, paidUsd: '5',
+    code: referralCode(state, wallet), by: null, createdAt: now - 30 * DAY, paidUsd: '1',
     referees: referees.map((referee, i) => ({ wallet: referee, evaluation: i < 2, funded: i === 0, volumeUsd: i === 0 ? '118060' : '0' })),
-    rewards: [['BTC', '49.2', 2 * HOUR], ['ETH', '18', 6 * HOUR], ['SOL', '3.6', 2 * DAY], ['SOL', '0.036', 3 * DAY]]
+    rewards: [['BTC', '10.2', 2 * HOUR], ['ETH', '5', 6 * HOUR], ['SOL', '6.5', 2 * DAY], ['SOL', '0.036', 3 * DAY]]
       .map(([symbol, feeUsd, ago]) => ({ at: now - ago, referee: referees[0], symbol, feeUsd, rewardUsd: String(Number(feeUsd) / 10) })),
   };
   state.wallets.set(wallet, w);

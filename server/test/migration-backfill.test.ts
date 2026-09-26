@@ -1,8 +1,9 @@
 // Migration 0006 backfills closed_trades' cost breakdown from the fills each trip was written from. The columns exist
 // already here (the test database is migrated), so the rows are written with the defaults and the migration's UPDATE
 // statements are run again over them: they must reproduce what the writers now record. Migration 0008 (white label)
-// rewrites the order notes that named the venue, run the same way. Migration 0009 (referrals) is applied for real, to a
-// database of its own holding users from before it.
+// rewrites the order notes that named the venue, run the same way. Migrations 0009 (referrals), 0011 (rewards from the
+// Props fee) and 0012 (settlement event indexes) are applied for real, each to a database of its own holding rows from
+// before it.
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
@@ -132,6 +133,85 @@ it('0009 applies over a database at 0008 with users in it, a second run applies 
     expect(await backfillReferralCodes(m.db)).toBe(0);
     const codes = await m.db.select({ wallet: users.wallet, code: users.referralCode }).from(users).orderBy(users.createdAt);
     expect(codes).toEqual([{ wallet: older, code: 'MIGRATE9' }, { wallet: newer, code: `MIGRATE9${newer[8]!.toUpperCase()}` }]);
+  } finally {
+    await m.sql.end();
+    rmSync(before, { recursive: true, force: true });
+  }
+});
+
+it('0011 refuses, changing nothing, while a reward of the exchange fee exists, and reshapes the emptied table over a database at 0010', async () => {
+  const url = new URL(testDatabaseUrl());
+  url.pathname = `${url.pathname}_m0011`;
+  await recreateDatabase(url.toString());
+  const before = mkdtempSync(join(tmpdir(), 'props-migrations-'));
+  cpSync(migrationsFolder, before, { recursive: true });
+  const journal = JSON.parse(readFileSync(join(before, 'meta/_journal.json'), 'utf8')) as { entries: { idx: number }[] };
+  writeFileSync(join(before, 'meta/_journal.json'), JSON.stringify({ ...journal, entries: journal.entries.filter((e) => e.idx <= 10) }));
+  const m = createDb(url.toString());
+  const columns = async () => (await m.sql<{ name: string }[]>`select column_name as name from information_schema.columns
+    where table_name = 'referral_rewards' order by ordinal_position`).map((c) => c.name);
+  try {
+    await migrate(m.db, { migrationsFolder: before });
+    // A referred trader's funded fill and the reward it earned before 0011 (a share of the exchange fee).
+    const [referrer, trader, evaluation, funded, venueId] = [key(), key(), key(), key(), '000000000001-a-000001-000001-000000'];
+    await m.db.insert(users).values([{ wallet: referrer }, { wallet: trader, referredBy: referrer }]);
+    await m.db.insert(evaluations).values({
+      address: evaluation, trader, evalIndex: 0, tierId: 1, sizeUsd: '10000', profitTargetBps: 800, maxDrawdownBps: 500, maxExposureBps: 10_000, traderShareBps: 8000,
+      termsHash: 'ab'.repeat(32), feePaid: '79', status: 'funded', purchaseSignature: 'p', createdAt: new Date(), updatedSlot: 1,
+    });
+    await m.db.insert(fundedAccounts).values({ address: funded, evaluation, trader, ownerPda: key(), principal: '500', traderShareBps: 8000, status: 'active', activationSignature: 'a', createdAt: new Date(), updatedSlot: 2 });
+    await m.db.insert(venueFills).values({
+      signature: 'fill', eventIndex: 0, venueId, slot: 1, fundedAccount: funded, position: key(), order: key(), symbol: 'SOL', side: 'Long', isIncrease: true,
+      sizeUsd: '10000', sizeAfterUsd: '10000', price: '150', feeUsd: '5', priceImpactUsd: '0', fundingUsd: '0', borrowUsd: '0', ts: new Date(),
+    });
+    await m.sql`insert into referral_rewards (referrer, referee, venue_fill_id, symbol, fee_usd, rate_bps, reward_usd) values (${referrer}, ${trader}, ${venueId}, 'SOL', 5, 1000, 0.5)`;
+    const shape = await columns();
+    await expect(runMigrations(url.toString())).rejects.toMatchObject({ cause: { message: 'column "order" of relation "referral_rewards" contains null values' } });
+    expect(await columns()).toEqual(shape);
+    expect(await m.sql`select venue_fill_id, reward_usd from referral_rewards`).toEqual([{ venue_fill_id: venueId, reward_usd: '0.500000' }]);
+
+    await m.sql`delete from referral_rewards`;
+    await runMigrations(url.toString());
+    await runMigrations(url.toString());
+    const [applied] = await m.sql<{ n: number }[]>`select count(*)::int as n from drizzle.__drizzle_migrations`;
+    expect(applied!.n).toBe(journal.entries.length);
+    expect(await columns()).toEqual(['id', 'referrer', 'referee', 'symbol', 'fee_usd', 'rate_bps', 'reward_usd', 'created_at', 'order', 'funded_account', 'settlement_signature', 'settlement_event_index']);
+  } finally {
+    await m.sql.end();
+    rmSync(before, { recursive: true, force: true });
+  }
+});
+
+it('0012 gives the rewards from before it their settlement\'s event index 0 and each settlement row a count of 1, over a database at 0011 holding one', async () => {
+  const url = new URL(testDatabaseUrl());
+  url.pathname = `${url.pathname}_m0012`;
+  await recreateDatabase(url.toString());
+  const before = mkdtempSync(join(tmpdir(), 'props-migrations-'));
+  cpSync(migrationsFolder, before, { recursive: true });
+  const journal = JSON.parse(readFileSync(join(before, 'meta/_journal.json'), 'utf8')) as { entries: { idx: number }[] };
+  writeFileSync(join(before, 'meta/_journal.json'), JSON.stringify({ ...journal, entries: journal.entries.filter((e) => e.idx <= 11) }));
+  const m = createDb(url.toString());
+  try {
+    await migrate(m.db, { migrationsFolder: before });
+    // A referred trader's executed order, the settlement that charged it and the reward it earned, as 0011 left them.
+    const [referrer, trader, evaluation, funded, order, signature] = [key(), key(), key(), key(), key(), 'settled'];
+    await m.db.insert(users).values([{ wallet: referrer }, { wallet: trader, referredBy: referrer }]);
+    await m.db.insert(evaluations).values({
+      address: evaluation, trader, evalIndex: 0, tierId: 1, sizeUsd: '10000', profitTargetBps: 800, maxDrawdownBps: 500, maxExposureBps: 10_000, traderShareBps: 8000,
+      termsHash: 'ab'.repeat(32), feePaid: '79', status: 'funded', purchaseSignature: 'p', createdAt: new Date(), updatedSlot: 1,
+    });
+    await m.db.insert(fundedAccounts).values({ address: funded, evaluation, trader, ownerPda: key(), principal: '500', traderShareBps: 8000, status: 'active', activationSignature: 'a', createdAt: new Date(), updatedSlot: 2 });
+    await m.sql`insert into gm_orders (address, funded_account, market_token, symbol, side, kind, is_increase, size_usd, status, create_signature, created_at)
+      values (${order}, ${funded}, ${key()}, 'SOL', 'Long', 'Market', true, 1000, 'executed', 'c', now())`;
+    await m.sql`insert into order_fees ("order", funded_account, is_increase, assessed_usd, rate_usd, rate_bps, state, charged_usd, updated_slot)
+      values (${order}, ${funded}, true, 3, 2, 10, 'due', 3, 3)`;
+    await m.sql`insert into order_fee_settlements (signature, funded_account, charge_usd, waive_usd, expected_due_usd, expected_settlements, allocations, status, sent_by)
+      values (${signature}, ${funded}, 3, 0, 3, 0, '[]', 'confirmed', 'keeper')`;
+    await m.sql`insert into referral_rewards (referrer, referee, "order", funded_account, settlement_signature, symbol, fee_usd, rate_bps, reward_usd)
+      values (${referrer}, ${trader}, ${order}, ${funded}, ${signature}, 'SOL', 3, 1000, 0.3)`;
+    await runMigrations(url.toString());
+    expect(await m.sql`select settlement_event_index, reward_usd from referral_rewards`).toEqual([{ settlement_event_index: 0, reward_usd: '0.300000' }]);
+    expect(await m.sql`select settlements, event_index from order_fee_settlements`).toEqual([{ settlements: 1, event_index: null }]);
   } finally {
     await m.sql.end();
     rmSync(before, { recursive: true, force: true });

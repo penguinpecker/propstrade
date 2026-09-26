@@ -2,18 +2,18 @@
 
 Status: implemented in both program builds on 2026-09-26 (`programs/props_vault` and `programs-p/props_vault_p`,
 identical behaviour), with `tests/program` and `packages/sdk`; not deployed. Two design reviews and two independent
-audits were applied (listed in §11). What the server, app, shared contract and `docs/ARCHITECTURE.md` need is in §9, for
-the team that owns them; nothing there is built yet. The rate must stay 0 until every prerequisite in §9 "Before the
-first nonzero rate" is in place.
+audits were applied (listed in §11). What the server, app, shared contract and `docs/ARCHITECTURE.md` need (§9) was
+built the same day (`docs/ARCHITECTURE.md` §8 "Props order fee"). The program's rate stays 0 until every prerequisite
+in §9 "Before the first nonzero rate" is in place (`docs/runbooks/launch.md` §10.1 sets it at go-live).
 
 The owner's decision (2026-09-25): Props.trade charges its own fee on every order, on demo accounts (practice and
-evaluation, simulated by the server) and on funded accounts (this program). The rate is not decided: a flat USDC amount
-per order and/or basis points of the order's size, both set by the admin, both 0 (off) by default. Revenue on funded
-accounts goes to the program's fee vault, where evaluation fees go.
+evaluation, simulated by the server) and on funded accounts (this program). The rate (the owner, 2026-09-26): $2 + 0.1 %
+(10 bps) of the order's size per order, on demo and funded, which is the program's caps (§10 Q1, Q2). The operator sets
+it at deploy (the server's settings, then `set_order_fee`); the code's defaults stay 0 (off). Revenue on funded accounts
+goes to the program's fee vault, where evaluation fees go.
 
 On practice and evaluation accounts the fee is simulated: it lowers the virtual balance and P&L exactly as it would on a
-funded account, but no USDC moves, it is not revenue, and it earns no referral reward (§9 Referrals; §10 Q3 asks the
-owner to confirm).
+funded account, but no USDC moves, it is not revenue, and it earns no referral reward (§9 Referrals; confirmed, §10 Q3).
 
 ## 1. Decision: assessed when placed, charged only if executed
 
@@ -384,7 +384,7 @@ evaluation fees only.
 | Payout | at request: flat and `order_fees_due == 0`; profit is net of all fees charged |
 | Closure | the keeper settles (charge up to the balance, waive the rest) and closes in one transaction |
 | Rate change | applies to orders placed or updated afterwards, on every account (§10 Q5) |
-| Rate raised between quote and signature | the order fails with `OrderFeeChanged`, a risk-reducing one too (a stop loss, its trigger edit, a close); the app re-quotes and resends (§10 Q8) |
+| Rate raised between quote and signature | the order fails with `OrderFeeChanged`, a risk-reducing one too (a stop loss, its trigger edit, a close); the app re-quotes, resends a risk-reducing one at once and leaves an open for the trader to place again at the new fee (§10 Q8) |
 | Rate set back to 0 | no new fees; fees already due still block payouts and closure until settled (§6.6) |
 | Settlement re-sent (timeout, retry) | refused: the settlement count moved on, even if the fees due are back at the same value |
 | SOL | no new account or rent per order; the risk authority pays settlement transaction fees; owner PDA floats untouched |
@@ -581,7 +581,9 @@ App:
   `orderFee` from the rate read (for a close, take profit or stop loss: with the account's exposure cap as `capUsd`,
   the server's `maxExposureUsd`, i.e. its maximum, not the expected fee, which the program would refuse as too low),
   including the trigger-only `updateOrder` of a TP/SL edit; re-quote on `OrderFeeChanged`, and resend a risk-reducing
-  order (close, stop loss, TP/SL edit) at once (§10 Q8).
+  order (close, stop loss, TP/SL edit) at once (§10 Q8). Built: an open signs at most the fee its quote showed and is
+  never resent (the trader sees the new fee and places it again), since an order that adds exposure must fail rather
+  than cost more than the trader saw (§1).
 - The fallback in `Trading.jsx` (`sizeNum * propsFeeBps / 10_000`) ignores the flat part: call the SDK `orderFee` with
   `usdToGm(size)` instead.
 - Copy sweep: the ticket's "charges no fee per order" note, the "No Props.trade fee per order" tooltip, the rules modal
@@ -597,14 +599,17 @@ instructions and invariant 5 of §6, the events list, §4.5 the keeper settlemen
 
 Referrals: rewards from Props' order fee accrue only from USDC actually charged on funded accounts (`OrderFeesSettled`,
 attributed per order by the keeper's ledger); never from simulated demo fees, and never from assessed, released or
-waived amounts. Demo fills pay no referral reward. Today's accrual (the exchange's fee on funded fills,
-`accrueReferralReward` from `modules/chain/venue.ts`) is unaffected.
+waived amounts. Demo fills pay no referral reward. Built 2026-09-26 (§10 Q4): 10 % of each charge, in place of the
+exchange's fee on funded fills, whose accrual is removed (`docs/ARCHITECTURE.md` §8 "Referrals"). A charge that only
+moves Props' own capital earns nothing: one settled once the account breached (its USDC all returns to the capital
+vault, as §10 Q6 says of breach closes) or in the transaction that closes the account. §10 Q9 and Q10 ask the owner
+about the rest.
 
 Before the first nonzero rate (not for deploying at rate 0). Once any fee is due, the program refuses every payout
 request and every closure until a risk authority settles it, and setting the rate back to 0 does not clear fees already
 due (§6.6, audit 1). So `set_order_fee` above 0 waits for all of these:
 1. Keeper settlement live (the keeper part above), including the closure bundle `[settle_order_fees, close_funded]` and
-   a settlement before payout requests; today nothing in `server/` or `scripts/` sends `settle_order_fees`.
+   a settlement before payout requests.
 2. A risk-key fallback for when the keeper is down: `scripts/admin/settle-order-fees.ts` (reads the account, names both
    expectations, `--print-for`), and a runbook entry for it.
 3. The app passing `maxFee` on every order builder (§9 App); until then the trader promise in §1 does not hold (the SDK
@@ -619,16 +624,24 @@ due (§6.6, audit 1). So `set_order_fee` above 0 waits for all of these:
    `scripts/admin/status.ts` (and `fees_collected` labelled evaluation fees), a runbook step for setting the rate, and
    `fees` added to the runbook §3.3 compare loop (`for s in admin trader risk trading crank audit`).
 
+Status (2026-09-26): items 1–5 and 7 are built (`docs/ARCHITECTURE.md` §8 "Props order fee"; item 5: the rules
+`upsert-tiers.ts` hashes name $2 + 10 bps, new terms hashes in `docs/runbooks/launch.md` §5.3); item 6 is §10 Q5, open.
+
 ## 10. Open questions for the owner
 
-1. The rate: flat per order, bps of size, or both (0 until `set_order_fee`).
+1. The rate: flat per order, bps of size, or both (0 until `set_order_fee`). Answered 2026-09-26: both, $2 + 10 bps per
+   order, on demo and funded, set by the operator at deploy (not in the code's defaults). It equals the caps (Q2), so any
+   higher rate needs a program upgrade.
 2. The caps, now $2 per order and 10 bps (0.1 %). At the draft's $5 + 50 bps a full-size round trip on the 10K tier
    ($10,000 exposure, $500 principal) cost $110, 22 % of the loss allowance; at $2 + 10 bps it costs $24, 4.8 %. A
    mistyped rate or a compromised admin key can reach at most the caps, and raising them needs a program upgrade.
 3. Demo accounts: the fee is simulated only (no USDC, no revenue, no referral reward); confirm. Charge it from a server
-   setting before the program is live, or start when the onchain rate is set?
+   setting before the program is live, or start when the onchain rate is set? Answered 2026-09-26: simulated only, from
+   the server's settings ($2 + 10 bps) before the program is live. From `initialize` (rate 0) until the operator sets the
+   program's rate at go-live, every stage reads the program's 0: only practice and the operators' smoke test run then,
+   and the smoke test needs it (`docs/runbooks/launch.md` §9, §10.1).
 4. Referrals: pay referrers a share of Props' charged order fees (exact per executed order here) instead of, or as well
-   as, the exchange's fee?
+   as, the exchange's fee? Answered 2026-09-26: instead of it, 10 % of the Props fee charged on funded orders (built).
 5. Before the first nonzero rate: a rate change applies to every account's next orders, including evaluations already
    bought and funded accounts already active (it makes a running evaluation's target harder), and nothing onchain ties
    the rate to the terms a trader bought. Keep it global (as built), or pin the rate per account at purchase (a `Terms`
@@ -643,6 +656,15 @@ due (§6.6, audit 1). So `set_order_fee` above 0 waits for all of these:
 8. Risk-reducing orders under a raised rate: a stop loss, its trigger edit or a close signed with the old quote fails
    (`OrderFeeChanged`) until the app re-quotes. Keep (the app resends at once), or let decreases accept the higher fee
    (a program change: `max_fee` would then bind increases only)?
+9. Referral rewards on session-guard closes: the risk service places them, but they are charged like the trader's own
+   close (Q6), so they earn the referrer 10 % like any charge (at the caps, $0.30 on a $1,000 close). Keep, or exclude
+   risk-placed orders from rewards?
+10. Referral rewards on accounts that end without a payout: a charged fee comes off the profit a payout splits 80/20, so
+    the trader bears 80 % of it only when the account pays out; on an account that breaches, every earlier charge was
+    Props' capital too, yet it earned its reward when it was charged (only charges settled after the breach earn nothing,
+    §9 Referrals). A referred 10K account churned to its breach can pay up to its $500 principal in Props fees: up to $50
+    of rewards funded by Props. Keep, accrue rewards only at a payout (on the fees charged since the last one), or claw
+    them back at a breach?
 
 ## 11. Reviews applied (2026-09-26)
 

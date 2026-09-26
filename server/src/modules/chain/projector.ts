@@ -1,13 +1,14 @@
 // Projects props_vault events into the chain tables (evaluations, funded_accounts + their accounts rows, gm_orders and
-// their Props fees (order_fees, order_fee_settlements), payouts, vault_ledger, account_events). Runs inside the indexer's
-// per-transaction database transaction, exactly once per (signature, event index), so every write here is applied once
-// and in chain order.
+// their Props fees (order_fees, order_fee_settlements, and the referral_rewards charged fees earn), payouts, vault_ledger,
+// account_events). Runs inside the indexer's per-transaction database transaction, exactly once per (signature, event
+// index), so every write here is applied once and in chain order.
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Notification } from '@props/shared';
 import { CLOSE_ALL } from '@props/sdk';
 import { formatFixed } from '@props/gmtrade';
 import type { Db } from '../../db/client.ts';
+import { accrueReferralRewards } from '../../routes/referrals.ts';
 import type { SimService } from '../types.ts';
 import {
   accountEvents, accounts, equitySnapshots, evaluations, fundedAccounts, gmOrders, gmPositionSnapshots, orderFees, payouts, vaultLedger,
@@ -18,12 +19,18 @@ import { gmUsd, micro, orderPrice, sizeName, toMicro6, type ChainReader } from '
 
 export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
 
-export interface TxInfo { signature: string; slot: number; /** lamports */ fee: bigint }
+export interface TxInfo {
+  signature: string; slot: number; /** lamports */ fee: bigint;
+  /** Every props_vault event of the transaction, in order (the indexer passes them: what later events it holds). */
+  events?: VaultEvent[];
+}
 export interface ProjectDeps {
   reader: ChainReader;
   /** Absent when the sim module is not deployed: evaluations are then indexed but not tradable. */
   sim?: Pick<SimService, 'createEvaluation'>;
   log?: Pick<FastifyBaseLogger, 'error'>;
+  /** Referrers' share of each Props fee charged on a referred trader's funded order, bps (REFERRAL_REWARD_BPS); none when absent. */
+  referralRewardBps?: number;
 }
 export type Notice = { wallet: string } & Pick<Notification, 'title' | 'body' | 'href' | 'kind'>;
 
@@ -231,7 +238,11 @@ export async function project(tx: Tx, ev: VaultEvent, eventIndex: number, info: 
     }
     case 'orderFeesSettled': {
       const e = ev.data;
-      await confirmSettlement(tx, { signature, funded: e.funded, charged: BigInt(e.charged), waived: BigInt(e.waived), by: e.by, at: at(e.ts) });
+      const shares = await confirmSettlement(tx, { signature, eventIndex, funded: e.funded, charged: BigInt(e.charged), waived: BigInt(e.waived), by: e.by, at: at(e.ts) });
+      // The transaction also closes the account (the closure [settle_order_fees, close_funded]): what it charged returns to
+      // the capital vault with the rest of the account's USDC.
+      const closing = info.events?.some((x) => x.name === 'accountClosed' && x.data.funded === e.funded) ?? false;
+      await accrueReferralRewards(tx, { signature, eventIndex, funded: e.funded, shares, closing }, deps.referralRewardBps ?? 0);
       if (BigInt(e.charged) > 0n) await ledger(LEDGER.orderFees, e.charged, e.ts, e.funded);
       await activity(e.funded, {
         type: 'charge', ts: at(e.ts), amountUsd: BigInt(e.charged) > 0n ? micro(e.charged) : null,
