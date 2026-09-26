@@ -1110,3 +1110,18 @@ Pinocchio evaluated (2026-09-23; measured in a scratch copy, 59/59 LiteSVM tests
   DROP the pointer:coarse/hover:none emulation: judge touch rules from viewport shots only.
 - Left for the owner: phone landscape still starts the chart ~280 px down (folding the account strip/watchlist in
   landscape would hide content); the TradingView logo is a 35x19 target at 768 (attribution, untouched).
+
+2026-09-26 DEPLOYED 407c4d6 (server dc4ef575…, app index-BG4O1S-N.js): Props order fee $2 + 0.1% per order (owner),
+           demo live now (ORDER_FEE_USDC=2, ORDER_FEE_BPS=10 on Railway; /v1/order-fee source 'server'), funded via the
+           vault program's set_order_fee right after the mainnet deploy (then both stages read the program's rate).
+           Referral rewards = 10% of the Props fee a confirmed settlement charges on a referred trader's funded order
+           (migrations 0010-0012). Live: $1,000 quote -> Props fee 3 + close 3, round trip 6.22; $5,000 -> 7 + 7.
+- The fee is assessed at placement and charged only if the order executes (the program cannot see executions: the
+  keeper settles from the indexed fills, waives cancelled/unknown, bundles [settle, close_funded]); payouts and closure
+  need nothing due. Caps = the rate ($2 + 10 bps): raising it needs a program upgrade.
+- Work order that kept main green: program on its own branch (the SDK's new max_fee args pushed the funded
+  open+TP+SL transaction past the app's old 1,132-byte margin: now pinned to measured sizes, 1,165 of 1,232 worst case),
+  integration on the branch, fast-forward only after the gate.
+- Program tests need litesvm 1.4.1 but node_modules has 0.8.0 (the lock pins 1.4.1): agents used the scratch hook
+  order-fee/build/hook.mjs; an `npm install` in the repo would fix it for good.
+- Full fuzz campaign on the fee binaries: 338,550 tx, 0 differences, 0 violations (PORTING.md).
