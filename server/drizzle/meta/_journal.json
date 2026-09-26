@@ -78,6 +78,20 @@
       "when": 1790377775502,
       "tag": "0010_order_fees",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1790382066673,
+      "tag": "0011_referral_props_fee",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1790388244226,
+      "tag": "0012_settlement_events",
+      "breakpoints": true
     }
   ]
 }

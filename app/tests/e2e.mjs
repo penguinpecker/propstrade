@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { orderFee } from '@props/sdk';
 import { build, preview } from 'vite';
 import { contentSecurityPolicy } from '../middleware.js';
 import { MAINNET_GENESIS, PROGRAM_ID, startStub } from './stub.mjs';
@@ -1571,7 +1572,7 @@ try {
       }
     });
 
-    await check('Props fee: a funded order signs it as its max_fee (the open its fee, a take profit or stop loss its maximum); raised since the quote, the order is re-quoted and sent once more, with a notice', async () => {
+    await check('Props fee: a funded order signs it as its max_fee (the open its fee, a take profit or stop loss its maximum); raised since the quote, an open stops until the trader places it again at the new fee, a close is sent again at once, with a notice', async () => {
       const ticket = page.locator('.order-panel');
       const maxFees = s => s.data.args.maxFee.toString();
       try {
@@ -1589,26 +1590,77 @@ try {
         await ticket.getByText('BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
         assert.equal(maxFees(sent('openPosition')[opens]), '700000'); // $0.50 + 2 bps of $1,000
         assert.deepEqual(sent('setProtection').slice(protections).map(maxFees), ['5500000', '5500000']); // $0.50 + 2 bps of the $25,000 cap
-        // The rate goes up after the page read it: the program refuses the open, the app reads the rate again and resends.
+        // The rate goes up after the page read it: the program refuses the open before the wallet is asked, and the order
+        // waits for the trader, who sees the new fee (the ticket re-quotes) and places it again.
         await clearLegs(ticket);
         setFee('0.6', 3);
         const signatures = state.signatures;
         await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
-        await ticket.getByText('The Props fee changed to $0.60 + 0.03% since your quote: the order was sent again at the new fee. BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
-        assert.equal(state.signatures, signatures + 1, 'the refused order was signed, or the resend was not');
-        assert.deepEqual(sent('openPosition').slice(opens + 1).map(maxFees), ['900000']); // $0.60 + 3 bps of $1,000
+        await ticket.getByRole('alert').getByText('The Props fee changed to $0.60 + 0.03%: review the new fee and place the order again.').waitFor({ timeout: 10_000 });
+        assert.equal(state.signatures, signatures, 'the wallet was asked to sign an order the trader has not seen the fee of');
+        assert.equal(sent('openPosition').length, opens + 1, 'the open was sent again at the new fee without a review');
         await openDetails();
         await ticket.locator('.order-details .data-row').filter({ hasText: /^Props fee · \$0\.60 \+ 0\.03%/ }).getByText('$0.90').waitFor(); // re-quoted
-        // The server still serves the old rate (its copy lags the program's): the resend takes the program's own rate.
-        await clearLegs(ticket);
+        await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
+        await ticket.getByText('BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
+        assert.equal(state.signatures, signatures + 1);
+        assert.deepEqual(sent('openPosition').slice(opens + 1).map(maxFees), ['900000']); // $0.60 + 3 bps of $1,000
+        // The server still serves the old rate (its copy lags the program's): the refusal names the program's own rate,
+        // which the ticket shows and the next order signs.
         const stale = route => route.fulfill({ json: { orderFeeUsd: '0.6', orderFeeBps: 3, orderFeeSource: 'program' } });
         await page.route('**/v1/order-fee', stale);
         setFee('0.7', 4);
         await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
-        await ticket.getByText('The Props fee changed to $0.70 + 0.04% since your quote: the order was sent again at the new fee. BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
+        await ticket.getByRole('alert').getByText('The Props fee changed to $0.70 + 0.04%: review the new fee and place the order again.').waitFor({ timeout: 10_000 });
+        await ticket.locator('.order-details .data-row').filter({ hasText: /^Props fee · \$0\.70 \+ 0\.04%/ }).getByText('$1.10').waitFor();
+        await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
+        await ticket.getByText('BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
         assert.deepEqual(sent('openPosition').slice(opens + 2).map(maxFees), ['1100000']); // $0.70 + 4 bps of $1,000
         await page.unroute('**/v1/order-fee', stale);
+        // A close only reduces risk: refused at a raised rate, it is signed again at once at the new fee, with a notice.
+        setFee('0.8', 5);
+        const closes = sent('closePosition').length;
+        const row = page.locator('.position-table tbody tr').filter({ hasText: 'BTC / USD' });
+        await row.getByRole('button', { name: /Close/ }).click();
+        await page.getByRole('dialog').getByRole('slider').fill('50');
+        await page.getByRole('dialog').getByRole('button', { name: 'Send close order' }).click();
+        await page.getByText('The Props fee changed to $0.80 + 0.05% since your quote: the order was sent again at the new fee. Close executed by the exchange.').waitFor({ timeout: 10_000 });
+        const [close] = sent('closePosition').slice(closes);
+        assert.equal(sent('closePosition').length, closes + 1);
+        assert.equal(close.data.args.maxFee.toString(), String(orderFee({ feeUsdc: 800_000n, feeBps: 5 }, BigInt(close.data.args.sizeDeltaUsd.toString()))), '$0.80 + 5 bps of the half it closes');
       } finally {
+        setFee('0', 0);
+      }
+    });
+
+    await check('Props fee: a funded open signs at most the fee its quote showed, so a quote older than the rate is refused rather than charge more than the ticket showed', async () => {
+      const ticket = page.locator('.order-panel');
+      const quotes = /\/v1\/quote\?/;
+      const older = async route => { const response = await route.fetch(); await route.fulfill({ response, json: { ...(await response.json()), platformFeeUsd: '1.1', maxFeeMicro: '1100000' } }); };
+      try {
+        setFee('0.8', 5);
+        await page.route(quotes, older);
+        await page.goto(`${siteUrl}/#/trade/funded`);
+        await page.reload();
+        await showMarket('BTC');
+        await openDetails();
+        await clearLegs(ticket);
+        await page.getByLabel('Order size in USD').fill('1000');
+        await ticket.getByRole('button', { name: '5×', exact: true }).click();
+        const propsRow = ticket.locator('.order-details .data-row').filter({ hasText: /^Props fee · \$0\.80 \+ 0\.05%/ });
+        await propsRow.getByText('$1.10').waitFor(); // the quote's fee, older than the rate's $1.30
+        const [signatures, opens] = [state.signatures, sent('openPosition').length];
+        await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
+        await ticket.getByRole('alert').getByText('The Props fee changed to $0.80 + 0.05%: review the new fee and place the order again.').waitFor({ timeout: 10_000 });
+        assert.deepEqual([state.signatures, sent('openPosition').length], [signatures, opens], 'the open signed more than the fee the ticket showed');
+        await page.unroute(quotes, older);
+        await page.getByLabel('Order size in USD').fill('1001'); // quoted again: $0.80 + 5 bps of $1,001
+        await propsRow.getByText('$1.30').waitFor();
+        await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
+        await ticket.getByText('BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
+        assert.deepEqual(sent('openPosition').slice(opens).map(s => s.data.args.maxFee.toString()), ['1300500']);
+      } finally {
+        await page.unroute(quotes, older);
         setFee('0', 0);
       }
     });
@@ -1750,19 +1802,21 @@ try {
       await page.goto(`${siteUrl}/#/referrals`);
       const main = page.locator('#main');
       await main.locator('.referral-share').getByText(ownCode, { exact: true }).waitFor();
-      await main.getByText('You earn 10% of the exchange fees on every funded trade of the traders who sign up with your code, paid in USDC.').waitFor();
+      await main.getByText('You earn 10% of the Props fee on every funded trade of the traders who sign up with your code, paid in USDC.').waitFor();
       const link = `${siteUrl}/?ref=${ownCode}`;
       await main.getByText(link, { exact: true }).waitFor();
       await main.getByRole('button', { name: 'Copy link' }).click();
       assert.equal(await page.evaluate(() => navigator.clipboard.readText()), link);
       const stat = label => main.locator('.referral-stats > div').filter({ has: page.getByText(label, { exact: true }) }).locator('strong');
       assert.deepEqual(await Promise.all(['Referred', 'With an evaluation', 'Funded', 'Funded volume', 'Earned', 'Paid', 'Pending'].map(label => stat(label).innerText())),
-        ['3', '2', '1', '$118,060', '$7.08', '$5.00', '$2.08']);
+        ['3', '2', '1', '$118,060', '$2.17', '$1.00', '$1.17']);
+      assert.match(await main.getByRole('button', { name: 'About earned' }).getAttribute('title'), /^10% of the Props fee charged on each of their funded trades\./);
       const tops = await main.locator('.referral-stats strong').evaluateAll(values => values.map(v => Math.round(v.getBoundingClientRect().top)));
       assert.equal(new Set(tops).size, 1, `stat values sit at different heights: ${tops}`);
+      assert.deepEqual(await main.locator('.card-table thead th').allTextContents(), ['Trader', 'Market', 'Props fee', 'Your reward', 'Time']);
       const rows = main.locator('.card-table tbody tr');
       assert.equal(await rows.count(), 4);
-      // A reward under a cent keeps its digits; the trader who paid it shows masked.
+      // A reward under a cent keeps its digits (part of a fee, charged as far as the account's USDC went); the trader who paid it shows masked.
       assert.deepEqual((await rows.last().locator('td').allInnerTexts()).slice(0, 4), [short(stub.walletData(keys[5].address).referral.rewards[3].referee), 'SOL', '$0.036', '$0.0036']);
       const form = main.locator('form').filter({ hasText: 'Were you referred?' });
       await form.getByLabel('Referral code').fill(referrer.toLowerCase());
@@ -1811,7 +1865,7 @@ try {
       const signedOut = await browser.newContext(phone);
       const out = await signedOut.newPage();
       await out.goto(`${siteUrl}/#/referrals`);
-      await out.getByText('You earn 10% of the exchange fees', { exact: false }).waitFor();
+      await out.getByText('You earn 10% of the Props fee on every funded trade', { exact: false }).waitFor();
       await out.getByRole('button', { name: 'Connect wallet' }).last().click();
       const field = out.getByRole('dialog', { name: 'Connect a wallet' }).getByLabel('Referral code');
       assert.equal(await field.evaluate(input => getComputedStyle(input).fontSize), '16px');

@@ -9,7 +9,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { keys, useReferralCode, useReferralProgram, useReferrals, useSetReferrer } from './lib/queries';
 import { clearReferral, normalizeReferral, saveReferral, savedReferral } from './lib/referral';
 
-/** Per-trade amounts: a reward is a share of one fee, often under a cent. */
+/** Per-trade amounts: a reward is a share of one fee charge, which can be a fraction of a cent. */
 const FINE_USD = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 });
 const fineUsd = value => value == null ? DASH : FINE_USD.format(Number(value));
 
@@ -80,20 +80,20 @@ export function ReferralsPage() {
   const program = useReferralProgram();
   const r = signedIn ? referrals.data : undefined;
   const rewardBps = r?.rewardBps ?? program.data?.rewardBps;
-  const heading = <PageHeading title="Share your code. Earn on every funded trade." description={`You earn ${rewardBps != null ? bpsPercent(rewardBps) : 'a share'} of the exchange fees on every funded trade of the traders who sign up with your code, paid in USDC.`}>{r?.referredBy && <Badge tone="purple">Referred by {r.referredBy}</Badge>}</PageHeading>;
+  const heading = <PageHeading title="Share your code. Earn on every funded trade." description={`You earn ${rewardBps != null ? bpsPercent(rewardBps) : 'a share'} of the Props fee on every funded trade of the traders who sign up with your code, paid in USDC.`}>{r?.referredBy && <Badge tone="purple">Referred by {r.referredBy}</Badge>}</PageHeading>;
   if (!signedIn) return <div className="page">{heading}<Empty icon={Gift} title="Sign in to get your referral code" action={<Button onClick={() => setModal('wallet')}>Connect wallet</Button>}>Your code is the start of your wallet address. It never changes.</Empty></div>;
   if (!r) return <div className="page">{heading}{referrals.isError ? <Unavailable title="Referrals are unavailable" error={referrals.error} retry={referrals.refetch} /> : <Pending>Loading your referrals…</Pending>}</div>;
   const link = `${location.origin}/?ref=${r.code}`;
   const stats = [
     ['Referred', number(r.referees, 0)], ['With an evaluation', number(r.refereesWithEvaluation, 0)], ['Funded', number(r.refereesFunded, 0)],
     ['Funded volume', usd(r.fundedVolumeUsd, 0), 'The size of every funded trade of the traders you referred.'],
-    ['Earned', usd(r.earnedUsd), `${bpsPercent(r.rewardBps)} of the exchange fee on each of their funded trades. Practice and evaluation trades are simulated and earn nothing.`],
+    ['Earned', usd(r.earnedUsd), `${bpsPercent(r.rewardBps)} of the Props fee charged on each of their funded trades. Practice and evaluation trades are simulated and earn nothing.`],
     ['Paid', usd(r.paidUsd)], ['Pending', usd(r.pendingUsd), 'Earned and not paid yet. Props.trade sends it in USDC to this wallet once your identity is verified.'],
   ];
   return <div className="page referrals-page">{heading}
     <section className="surface referral-share"><div><span>Your code</span><strong>{r.code}</strong><button className="text-button" aria-label="Copy code" onClick={() => copy(r.code)}><Copy size={13} /> Copy</button></div><div><span>Your link</span><code>{link}</code><button className="text-button" aria-label="Copy link" onClick={() => copy(link)}><Copy size={13} /> Copy</button></div></section>
     <div className="referral-stats">{stats.map(([label, value, help]) => <div key={label}><span>{label}{help && <button type="button" className="info-tip" aria-label={`About ${label.toLowerCase()}`} title={help} onClick={() => notify(label, help)}><Info size={12} /></button>}</span><strong>{value}</strong></div>)}</div>
     {r.canSetReferrer && <ReferrerForm until={r.setReferrerUntil} />}
-    <section className="surface"><SectionHeading>Recent rewards</SectionHeading>{r.recent.length ? <div className="table-scroll"><table className="card-table"><thead><tr><th>Trader</th><th>Market</th><th>Exchange fee</th><th>Your reward</th><th>Time</th></tr></thead><tbody>{r.recent.map((x, i) => <tr key={`${x.at}-${i}`}><td data-label="Trader">{x.referee}</td><td data-label="Market">{x.symbol}</td><td data-label="Exchange fee">{fineUsd(x.feeUsd)}</td><td data-label="Your reward"><strong>{fineUsd(x.rewardUsd)}</strong></td><td className="quiet" data-label="Time">{dateTime(x.at)}</td></tr>)}</tbody></table></div> : <Empty icon={Clock3} title="No rewards yet">They appear here as the traders you referred trade their funded accounts.</Empty>}</section>
+    <section className="surface"><SectionHeading>Recent rewards</SectionHeading>{r.recent.length ? <div className="table-scroll"><table className="card-table"><thead><tr><th>Trader</th><th>Market</th><th>Props fee</th><th>Your reward</th><th>Time</th></tr></thead><tbody>{r.recent.map((x, i) => <tr key={`${x.at}-${i}`}><td data-label="Trader">{x.referee}</td><td data-label="Market">{x.symbol}</td><td data-label="Props fee">{fineUsd(x.feeUsd)}</td><td data-label="Your reward"><strong>{fineUsd(x.rewardUsd)}</strong></td><td className="quiet" data-label="Time">{dateTime(x.at)}</td></tr>)}</tbody></table></div> : <Empty icon={Clock3} title="No rewards yet">They appear here as the traders you referred trade their funded accounts.</Empty>}</section>
   </div>;
 }

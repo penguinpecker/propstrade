@@ -18,7 +18,6 @@ import { model, type PositionStatus } from '@props/gmsol-wasm';
 import type { Db } from '../../db/client.ts';
 import { accountEvents, closedTrades, fundedAccounts, gmOrders, gmPositionSnapshots, venueFills } from '../../db/schema.ts';
 import { tokenAccountAmount } from '../../lib/solana.ts';
-import { accrueReferralReward } from '../../routes/referrals.ts';
 import { why } from '../marketdata/upstreams.ts';
 import type { MarketDataService } from '../types.ts';
 import { asOnchain, feeLedger, feesInMotion, feesOwed, fillFee, type FeeRow } from './fees.ts';
@@ -100,8 +99,6 @@ export interface VenueDeps {
   gm: GmIndexer;
   log: Pick<FastifyBaseLogger, 'info' | 'warn' | 'error'>;
   notify(n: Notice): Promise<void>;
-  /** Referrers' share of the exchange fee on each fill of a trader they referred, bps (REFERRAL_REWARD_BPS); none when absent. */
-  referralRewardBps?: number;
 }
 
 const FRESHNESS_ORDER: DataFreshness[] = ['live', 'delayed', 'stale', 'unavailable'];
@@ -147,10 +144,6 @@ const abs = (v: bigint) => (v < 0n ? -v : v);
 const d6 = (v: string) => parseFixed(v, 6);
 const d18 = (v: string) => parseFixed(v, 18);
 const fmt6 = (v: bigint) => formatFixed(v, 6, 6);
-
-/** The exchange's order fee on a fill, USD: a referrer's reward base. The liquidation fee (in the row's fee_usd) is left out,
- *  so a trader earns nothing from their own liquidations. */
-export const orderFeeUsd = (e: TradeEvent) => gmUsd(e.fees.order * (e.isCollateralLong ? e.prices.long.min : e.prices.short.min));
 
 /** A venue_fills row for a GMTrade fill. Costs are valued at the collateral token's min price, as GMTrade charges them. */
 export function fillRow(e: TradeEvent, funded: string, market: MarketInfo, signature: string) {
@@ -366,8 +359,7 @@ export function createVenue(d: VenueDeps) {
     }
   }
 
-  /** Indexes new GMTrade fills of the owner PDA; closing fills also write the round trip to closed_trades, and each fill
-   *  of a referred trader its referrer's reward. */
+  /** Indexes new GMTrade fills of the owner PDA; closing fills also write the round trip to closed_trades. */
   async function syncFills(funded: string, owner: string, trader: string, orderSeq?: bigint): Promise<number> {
     const [{ cursor } = { cursor: null }] = await d.db.select({ cursor: max(venueFills.venueId) }).from(venueFills).where(eq(venueFills.fundedAccount, funded));
     const trades = await d.gm.trades(owner, cursor ?? undefined);
@@ -396,7 +388,6 @@ export function createVenue(d: VenueDeps) {
       const notice = await d.db.transaction(async (tx) => {
         const inserted = await tx.insert(venueFills).values(row).onConflictDoNothing().returning({ id: venueFills.venueId });
         if (!inserted.length) return null;
-        await accrueReferralReward(tx, { ...row, feeUsd: orderFeeUsd(e) }, trader, d.referralRewardBps ?? 0);
         await tx.update(gmOrders).set({ status: 'executed', statusDetail: null, closedAt: sql`coalesce(${gmOrders.closedAt}, now())`, updatedAt: sql`now()` })
           .where(eq(gmOrders.address, e.order));
         const a = fillActivity(row, e);

@@ -75,8 +75,8 @@ export function useWalletTransaction() {
         c.assertProgram(programId);
         // Orders carry the Props fee of the rate the ticket shows (/v1/order-fee) as their max_fee. The program refuses
         // one when the rate went up since (OrderFeeChanged, before anything is sent): the rate is read from the program
-        // itself (the server's copy can lag a change), the ticket re-quotes, and the order is rebuilt at that rate and
-        // sent once more.
+        // itself (the server's copy can lag a change) and the ticket re-quotes. An order that only reduces or protects a
+        // position is rebuilt at that rate and sent once more; any other waits for the trader to review the new fee.
         for (let rate = feeRate(await client.ensureQueryData({ queryKey: keys.orderFee, queryFn: api.orderFee })), resent = false; ;) {
           prepared = await prepare(c, connection, publicKey, rate);
           // A wallet that signs without a prompt has no approval step to show.
@@ -94,6 +94,7 @@ export function useWalletTransaction() {
             const onchain = await c.readOrderFeeRate(connection);
             client.setQueryData<OrderFeeInfo>(keys.orderFee, info => ({ orderFeeSource: info?.orderFeeSource ?? 'program', orderFeeUsd: String(Number(onchain.feeUsdc) / 1e6), orderFeeBps: onchain.feeBps }));
             void client.invalidateQueries({ queryKey: ['quote'] });
+            if (!prepared.reducing) throw new c.TxError(`The Props fee changed to ${feeRateLabel(onchain) ?? 'none'}: review the new fee and place the order again.`);
             if (onchain.feeUsdc === rate.feeUsdc && onchain.feeBps === rate.feeBps) throw new c.TxError('The Props fee is being updated. Try again in a moment.');
             rate = onchain;
             resent = true;

@@ -138,6 +138,20 @@ describe('funded transactions', () => {
     w.slots = w.tracked = undefined;
   });
 
+  it('an open signs at most the fee its quote showed and waits for a review after a fee rise; a close or protection change is re-sent at once', async () => {
+    const key = Keypair.generate();
+    const w = stub.walletData(key.publicKey.toBase58());
+    const input = { funded: w.funded, market: btc, isLong: true, kind: 'Market' as const, price: '64482', sizeUsd: 1000, collateralUsd: 100, slippageBps: 50, rate };
+    const fee = orderFee(rate, usdToGm('1000'));
+    for (const [quotedFee, signed] of [[undefined, fee], [fee - 1n, fee - 1n], [fee + 1n, fee]] as const) {
+      const open = await prepareOpen(connection, key.publicKey, { ...input, quotedFee });
+      expect([maxFee(decode(open.tx)[0]!), open.reducing]).toEqual([signed, undefined]);
+    }
+    const close = await prepareClose(connection, key.publicKey, { funded: w.funded, slippageBps: 50, positions: [{ market: btc, isLong: true, markPrice: '64482', sizeUsd: 1000, percent: 100 }], rate });
+    const protect = await prepareProtection(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, takeProfit: { order: null, price: '70000' }, stopLoss: { order: null, price: null }, rate });
+    expect([close.reducing, protect.reducing]).toEqual([true, true]);
+  });
+
   it('names the vault\'s OrderFeeChanged refusal by its code, so the order can be re-quoted; the exchange\'s error with the same number is not it', async () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());

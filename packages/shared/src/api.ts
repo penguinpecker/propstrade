@@ -122,8 +122,9 @@ export interface PriceImpactQuote {
   /**
    * `platformFeeUsd` in USDC base units (a u64 as a decimal integer string): the `maxFee` the funded open passes to
    * @props/sdk `openPosition`. The program refuses the order (OrderFeeChanged) if the rate gives more when it lands: then
-   * quote again and resend. A close, take profit or stop loss passes its maximum instead, the rate on the account's
-   * exposure cap: `orderFee(rate, CLOSE_ALL, usdToGm(rules.maxExposureUsd))` (the program assesses decreases on that cap).
+   * quote again and let the trader place it again at the new fee. A close, take profit or stop loss passes its maximum
+   * instead, the rate on the account's exposure cap: `orderFee(rate, CLOSE_ALL, usdToGm(rules.maxExposureUsd))` (the
+   * program assesses decreases on that cap).
    */
   maxFeeMicro: string;
   /** Props.trade's fee to close the resulting position (this order's size) at the same rate, charged when a close executes. */
@@ -353,8 +354,8 @@ export interface TraderLookup {
 // ---------- referrals ----------
 // A wallet's referral code is the first 8 characters of its address, upper-cased (9, 10, … when another wallet holds
 // those already); it is given at the first sign-in and never changes. Codes match case-insensitively. A referrer earns
-// `rewardBps` of the exchange fee on every funded-account fill of the traders who signed up with its code (practice and
-// evaluation fills are simulated and earn nothing), paid in USDC by Props.trade.
+// `rewardBps` of the Props fee charged on every funded-account order of the traders who signed up with its code (a fee
+// waived earns nothing; practice and evaluation fees are simulated and earn nothing), paid in USDC by Props.trade.
 export interface ReferralProgram { rewardBps: number }
 export interface ReferralCodeCheck { valid: boolean }
 export interface SetReferrerRequest { code: string }
@@ -367,7 +368,8 @@ export interface ReferralSummary {
   referees: number; refereesWithEvaluation: number; refereesFunded: number;
   fundedVolumeUsd: Decimal;        // the referees' funded fills
   earnedUsd: Decimal; paidUsd: Decimal; pendingUsd: Decimal;
-  recent: Array<{ at: Millis; referee: string /* masked: first 4 … last 4 */; symbol: string; feeUsd: Decimal; rewardUsd: Decimal }>; // latest 50
+  // latest 50; feeUsd: the Props fee one settlement charged the order the reward is for
+  recent: Array<{ at: Millis; referee: string /* masked: first 4 … last 4 */; symbol: string; feeUsd: Decimal; rewardUsd: Decimal }>;
 }
 
 // ---------- verification ----------

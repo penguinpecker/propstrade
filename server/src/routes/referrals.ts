@@ -2,21 +2,22 @@
 // upper-cased, that no other user holds: given at the first sign-in (the first come keeps the short one; users from
 // before the program get theirs from the boot backfill, oldest first), never changed, matched case-insensitively. A user
 // binds one referrer, once, within 7 days of the first sign-in and before buying an evaluation. The referrer then earns
-// REFERRAL_REWARD_BPS of the exchange fee on each funded fill of that trader (written with the fill by
-// modules/chain/venue.ts; practice and evaluation fills are simulated and earn nothing), paid in USDC by Props.trade: an
+// REFERRAL_REWARD_BPS of the Props fee each settlement charges that trader's funded orders (written when the indexer
+// applies the settlement, modules/chain/projector.ts; waived fees earn nothing, nor does a charge whose USDC returns to
+// Props anyway, and practice and evaluation fees are simulated and earn nothing), paid in USDC by Props.trade: an
 // operator sends it, then records the payout under /v1/admin/referrals: only to a referrer who passed identity review
 // (one approved wallet per person, so never to a funded referee's own second wallet), and only once the transfer is
 // confirmed onchain.
 import type { Connection, TokenBalance } from '@solana/web3.js';
 import bs58 from 'bs58';
-import { and, count, desc, eq, isNull, sql, sum } from 'drizzle-orm';
+import { and, count, desc, eq, inArray, isNull, sql, sum } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { formatFixed, parseFixed } from '@props/gmtrade';
 import type { ReferralCodeCheck, ReferralProgram, ReferralSummary } from '@props/shared';
 import type { Config } from '../config.js';
 import type { Db } from '../db/client.js';
-import { adminAuditLog, evaluations, fundedAccounts, kycRequests, referralPayouts, referralRewards, users, venueFills } from '../db/schema.js';
+import { adminAuditLog, evaluations, fundedAccounts, gmOrders, kycRequests, referralPayouts, referralRewards, users, venueFills } from '../db/schema.js';
 import { ApiError, parse } from '../errors.js';
 import { LOCK_KEYS } from '../lib/leader.js';
 import { USDC_MINT, walletSchema } from '../lib/solana.js';
@@ -96,19 +97,28 @@ export async function backfillReferralCodes(db: Db, batch = 500): Promise<number
 }
 
 /**
- * The referrer's reward for a new funded fill of `trader`, written in the fill's own transaction: `rateBps` of the
- * exchange fee the fill paid, rounded down to the micro-dollar. Once per fill (its venue id); nothing for a trader no one
- * referred, a fill without a fee or a zero rate.
+ * The referrer's rewards for the Props fees a confirmed settlement charged `funded`'s orders (the per-order shares the
+ * indexer applied to the fee ledger), written in the settlement's own indexed transaction: `rateBps` of each order's
+ * charge, rounded down to the micro-dollar. Once per order and settlement (its signature and event index); nothing for a
+ * trader no one referred, a fee only waived or a zero rate, nor for a charge that only moved Props' own capital into the
+ * fee vault: one settled once the account breached (its USDC all returns to the capital vault) or in the transaction that
+ * closes the account (`closing`).
  */
-export async function accrueReferralReward(tx: Tx, fill: { venueId: string; symbol: string; feeUsd: string }, trader: string, rateBps: number) {
-  const fee = micro(fill.feeUsd);
-  if (rateBps <= 0 || fee <= 0n) return;
-  const [user] = await tx.select({ referrer: users.referredBy }).from(users).where(eq(users.wallet, trader));
-  if (!user?.referrer) return;
-  await tx.insert(referralRewards).values({
-    referrer: user.referrer, referee: trader, venueFillId: fill.venueId, symbol: fill.symbol, feeUsd: usd(fee), rateBps,
-    rewardUsd: usd((fee * BigInt(rateBps)) / 10_000n),
-  }).onConflictDoNothing({ target: referralRewards.venueFillId });
+export async function accrueReferralRewards(
+  tx: Tx, settlement: { signature: string; eventIndex: number; funded: string; shares: { order: string; charge: bigint }[]; closing?: boolean }, rateBps: number,
+) {
+  const charged = settlement.shares.filter((s) => s.charge > 0n);
+  if (rateBps <= 0 || !charged.length || settlement.closing) return;
+  const [trader] = await tx.select({ wallet: users.wallet, referrer: users.referredBy, status: fundedAccounts.status }).from(fundedAccounts)
+    .innerJoin(users, eq(users.wallet, fundedAccounts.trader)).where(eq(fundedAccounts.address, settlement.funded));
+  if (!trader?.referrer || trader.status === 'breached') return;
+  const referrer = trader.referrer;
+  const symbols = new Map((await tx.select({ order: gmOrders.address, symbol: gmOrders.symbol }).from(gmOrders)
+    .where(inArray(gmOrders.address, charged.map((s) => s.order)))).map((o) => [o.order, o.symbol]));
+  await tx.insert(referralRewards).values(charged.map((s) => ({
+    referrer, referee: trader.wallet, order: s.order, fundedAccount: settlement.funded, settlementSignature: settlement.signature,
+    settlementEventIndex: settlement.eventIndex, symbol: symbols.get(s.order)!, feeUsd: usd(s.charge), rateBps, rewardUsd: usd((s.charge * BigInt(rateBps)) / 10_000n),
+  }))).onConflictDoNothing({ target: [referralRewards.order, referralRewards.settlementSignature, referralRewards.settlementEventIndex] });
 }
 
 /** USDC (micro) the confirmed transaction `signature` moved into `owner`'s token accounts; null when no successful

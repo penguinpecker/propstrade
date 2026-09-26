@@ -66,7 +66,7 @@ export function createIndexer(d: IndexerDeps) {
       fee = BigInt(tx.meta!.fee);
       blockTime = tx.blockTime ?? blockTime;
     }
-    const txInfo = { signature: info.signature, slot: info.slot, fee };
+    const txInfo = { signature: info.signature, slot: info.slot, fee, events };
     const notices = await d.db.transaction(async (tx) => {
       const out: Notice[] = [];
       for (const [i, ev] of events.entries()) {

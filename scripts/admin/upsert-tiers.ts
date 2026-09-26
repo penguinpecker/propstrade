@@ -19,6 +19,8 @@ const RULES = {
   dailyLossLimit: null,
   timeLimit: null,
   minTradingDays: null,
+  // Props.trade's fee per order (the owner's rate of 2026-09-26, the program's caps): simulated on practice and evaluation.
+  orderFee: { usdc: '2', bps: 10, charged: 'executed orders, on the size executed' },
 } as const;
 
 const TIERS = [

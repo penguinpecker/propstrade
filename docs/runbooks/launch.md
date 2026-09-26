@@ -40,7 +40,8 @@ build → deploy → initialize (all paused) → authorities → tiers → marke
   changed since the server that is live (as with the order fee of 2026-09-26: new instruction arguments and accounts,
   new and longer events). The indexer decodes events and the keeper builds instructions with the IDL bundled in
   `@props/sdk`, read once per process, so redeploy the server (section 6, step 4) first, check `/v1/health`, then run
-  section 4 (or 14 for an upgrade). The Props order fee stays off (0) at launch: section 10.1 turns it on.
+  section 4 (or 14 for an upgrade). The Props order fee ($2 + 10 bps, the owner's rate) is on the server from its
+  deploy (section 6) and on the program from go-live (section 10); section 10.1 has the details.
 
 ## 1. Prerequisites
 
@@ -332,13 +333,14 @@ spec tiers. Purchased evaluations keep the terms they were bought with.
 ```sh
 node scripts/admin/upsert-tiers.ts --smoke-test
 node scripts/admin/upsert-tiers.ts --smoke-test --execute
-# tier 1 smoke test: size 200 USD, fee 1 USDC, target 0.1%, enabled, terms 5964d603…
-# tier 2 25K: size 25000 USD, fee 149 USDC, target 8%, disabled, terms 493b95d5…
+# tier 1 smoke test: size 200 USD, fee 1 USDC, target 0.1%, enabled, terms 862084be…
+# tier 2 25K: size 25000 USD, fee 149 USDC, target 8%, disabled, terms 9b57bf02…
 # tier 3 50K: …, disabled    tier 4 100K: …, disabled
 ```
 
 (Straight to launch without a smoke test: run it without `--smoke-test`; the printed terms hashes of the spec tiers are
-`a43fb290…` (10K), `493b95d5…` (25K), `30373f70…` (50K), `35113d17…` (100K).)
+`7acf2c0f…` (10K), `9b57bf02…` (25K), `7ec641a6…` (50K), `c81865de…` (100K). Every tier's rules name the Props fee,
+$2 + 10 bps per executed order, so these hashes commit to it: section 10.1.)
 
 ### 5.4 Markets
 
@@ -426,18 +428,18 @@ the Node provider (without it Railpack sees the root `Cargo.toml` and builds the
    | `HEARTBEAT_URL` | the Better Stack heartbeat URL |
    | `SENTRY_DSN` | optional |
    | `RAILPACK_NODE_NPM_INSTALL` | `npm ci` (build-time only: makes Railpack install exactly the lockfile instead of `npm install`) |
+   | `ORDER_FEE_USDC`, `ORDER_FEE_BPS` | `2`, `10`: the owner's Props fee per order ($2 + 10 bps), charged (simulated) on practice and evaluation until the program is live; the code's default is 0 (section 10.1) |
 
    Leave `PORT` (Railway sets it), `HOST`, `LOG_LEVEL`, `TRUST_PROXY_HOPS` (1 = Railway's edge; set 2 when the API is
-   reached through the app's Vercel rewrite, section 7), `SIM_FILL_DELAY_MS`, `REFERRAL_REWARD_BPS` (1000: referrers
-   earn 10 % of the exchange fee on their referees' funded fills) and `ORDER_FEE_USDC` / `ORDER_FEE_BPS` (Props.trade's
-   fee per order on practice and evaluation accounts until the program is live, 0 = off; section 10.1) unset unless you
-   mean to change their defaults. From the CLI, single-quote reference values and
-   pipe secrets in, so no secret appears in a command line or shell history:
+   reached through the app's Vercel rewrite, section 7), `SIM_FILL_DELAY_MS` and `REFERRAL_REWARD_BPS` (1000: referrers
+   earn 10 % of the Props fee charged on their referees' funded orders) unset unless you mean to change their defaults.
+   From the CLI, single-quote reference values and pipe secrets in, so no secret appears in a command line or shell
+   history:
 
    ```sh
    railway variable set 'DATABASE_URL=${{Postgres.DATABASE_URL}}' APP_ORIGIN=https://<DOMAIN> SOLANA_CLUSTER=mainnet-beta \
      PROGRAM_ID=7qYRWwpmj3j3exVoBUJHzigcWmMN8ruPEdZdZrGzTJ7 GMTRADE_DEPLOY_SLOT=<SLOT> 'RAILPACK_NODE_NPM_INSTALL=npm ci' \
-     --service <SERVER_SERVICE> --skip-deploys
+     ORDER_FEE_USDC=2 ORDER_FEE_BPS=10 --service <SERVER_SERVICE> --skip-deploys
    openssl rand -hex 32 | tr -d '\n' | railway variable set SESSION_SECRET --stdin --service <SERVER_SERVICE> --skip-deploys
    ```
 
@@ -629,6 +631,10 @@ before the account makes anything: a take-profit 10 bp above the fill leaves ≈
 Stop-outs at the equity floor are not exercised deliberately: with collateral = remaining allowance they coincide with
 GMTrade liquidations (step 10).
 
+The Props fee stays 0 through this section: `initialize` left the program's rate at 0, and section 10 sets the owner's
+$2 + 10 bps before the spec tiers open. At $2 per order the smoke tier's $0.20 target and a profitable $20 round trip
+would be out of reach. Practice reads the program's rate too once it exists, so it is free until then as well.
+
 Identity approval for step 4. The identity hash is what enforces one funded account per person (the program allows one
 wallet per hash), so it is always made by `scripts/admin/identity-hash.ts` from one identity document in a fixed
 canonical form: the country that **issued** the document (ISO 3166-1 alpha-2, not the residence country the request
@@ -664,58 +670,67 @@ then fails with that reason: retry it with `POST /v1/admin/jobs/<JOB>/retry`.
 
 ```sh
 node scripts/admin/set-pauses.ts --new-evaluations on --execute     # no new smoke-tier purchases while switching
-node scripts/admin/upsert-tiers.ts --execute                        # spec tiers: 10K and 25K on, 50K and 100K off
+node scripts/admin/upsert-tiers.ts --execute                        # spec tiers: 10K and 25K on, 50K and 100K off; their terms name the Props fee
+node scripts/admin/set-order-fee.ts --usdc 2 --bps 10 --execute     # the Props fee: section 10.1 first
 node scripts/admin/set-params.ts --min-payout 50 --execute
 node scripts/admin/deposit-capital.ts --amount <USDC_AMOUNT> --execute
 node scripts/admin/fund-sol-treasury.ts --sol <SOL_AMOUNT> --execute
-node scripts/admin/status.ts        # tiers 1–2 enabled with "capital covers" ≥ 1; min payout 50 USDC; no warnings
+node scripts/admin/status.ts        # tiers 1–2 enabled with "capital covers" ≥ 1; min payout 50 USDC; order fee 2 USDC + 10 bps; no warnings
 node scripts/admin/set-pauses.ts --new-evaluations off --trading off --payouts off --execute
-curl -s https://api.<DOMAIN>/v1/config | jq '.paused'                # all false (cached up to 30 s)
+curl -s https://api.<DOMAIN>/v1/config | jq '.paused, .orderFeeUsd, .orderFeeBps'   # all false, "2", 10 (cached up to 30 s)
 ```
 
 Then announce `<DOMAIN>`.
 
-### 10.1 Props order fee (off at launch)
+### 10.1 Props order fee ($2 + 10 bps)
 
-Props.trade charges its own fee on every order (`docs/design/order-fee.md`): a flat USDC amount and/or basis points of
-the order's size, at most 2 USDC and 10 bps, the same rate on every account and stage, applied to orders placed or
-updated after it is set. On funded accounts the program assesses it when an order is placed (the trader signs the most
-they accept: a raised rate fails their order with `OrderFeeChanged` and the app quotes again), holds an increase's fee
-in the account's USDC, and the keeper charges it only once the order executes (the rate on the size executed; an order
-the exchange cancelled, the trader cancelled or a breach close pays nothing). On practice and evaluation accounts it is
-simulated at the fills. It is 0 (off) until the owner names the rate.
+Props.trade charges its own fee on every order (`docs/design/order-fee.md`): the owner's rate (2026-09-26) is 2 USDC plus
+10 bps (0.1 %) of the order's size, per order, on every account and stage. It is also the most the program allows, so a
+higher rate needs a program upgrade. It applies to orders placed or updated after it is set. On funded accounts the
+program assesses it when an order is placed (the trader signs the most they accept; after a rate rise an open fails with
+`OrderFeeChanged` and waits for the trader to place it again at the new fee, while a close, take profit or stop loss is
+signed again at once), holds an increase's fee in the account's USDC, and the keeper charges it only once the order
+executes (the rate on the size executed; an order the exchange cancelled, the trader cancelled or a breach close pays
+nothing). On practice and evaluation accounts it is simulated at the fills. A $1,000 order costs $3.00, a $10,000 one
+$12.00; a take profit or stop loss is assessed up to the account's exposure cap ($12 on a 10K account, $27 on a 25K one)
+and charged on what it closes.
 
-Before the program is live, a demo rate for practice and evaluation can be set on the server alone: Railway variables
-`ORDER_FEE_USDC` (e.g. `0.50`) and `ORDER_FEE_BPS` (e.g. `2`), redeploy. Once the program's Config exists the server
-reads the rate from it for every stage and ignores those two (set them back to 0 to avoid confusion).
+Where the rate comes from:
+- Before the program exists: the server's `ORDER_FEE_USDC=2` and `ORDER_FEE_BPS=10` (section 6; the code's default is
+  0), on practice and evaluation; `/v1/order-fee` answers them with `"orderFeeSource":"server"`.
+- From `initialize` (section 5) until `set-order-fee.ts` in section 10: the program's rate, which `initialize` leaves at
+  0, on every stage. Only the smoke test runs then, and it needs the 0 (section 9); practice is free meanwhile.
+- From then on: the program's rate on every stage. Leave the server's settings at 2 and 10: they are what a server that
+  cannot read the Config when it starts charges until it can.
 
-Before the first nonzero rate on the program (setting it back to 0 does not clear fees already due, and the program
-refuses every payout request and closure while any are due), check each:
+Before setting it (setting it back to 0 does not clear fees already due, and the program refuses every payout request
+and closure while any are due), check each:
 
 1. The server live from a commit with the keeper's settlement (this release): `settle_order_fees` for executed orders,
    waives for the rest, `[settle_order_fees, close_funded]` at closure. `/v1/health` shows the keeper leading.
 2. A second risk authority key held by the operators, for `scripts/admin/settle-order-fees.ts` when the keeper cannot
    settle (section 12). Add it with `set-authorities.ts --risk <KEEPER_RISK_PUBKEY>,<FALLBACK_RISK_PUBKEY> --kyc …`.
 3. The app live from a commit that passes `maxFee` on every funded order (open, close, take profit, stop loss and their
-   updates) and re-quotes on `OrderFeeChanged`.
-4. Published terms that name the fee: new tier terms through `upsert-tiers.ts` (its rules JSON, hashed into each tier,
-   says what the fee is) and the app's copy.
-5. The owner's decision on accounts bought before the change (the rate is global: a running evaluation's target gets
-   harder; nothing onchain pins the rate to the terms a trader bought).
+   updates) and, on `OrderFeeChanged`, re-quotes, signs a close, take profit or stop loss again at once and leaves an
+   open for the trader to place again.
+4. The spec tiers' published terms name the fee: `upsert-tiers.ts` in section 10, just before (the terms hashes in
+   section 5.3), and the app's rules dialog ("Props fee per executed order").
+5. Accounts bought before the change: only smoke-tier ones (section 9). The rate is global: any still running pay it on
+   their orders from now on, and a later change of the rate would apply to running evaluations too
+   (`docs/design/order-fee.md` §10 Q5).
 
 Then, with the admin key (`--print-for <SQUADS_VAULT>` after the handover; both values are always named):
 
 ```sh
-node scripts/admin/set-order-fee.ts --usdc 0.50 --bps 2                 # dry run: prints current and new, and the fee on $1,000 / $10,000
-node scripts/admin/set-order-fee.ts --usdc 0.50 --bps 2 --execute
-node scripts/admin/status.ts | grep 'order fee'                          # order fee 0.5 USDC + 2 bps of the size, per order
-curl -s https://api.<DOMAIN>/v1/order-fee                               # {"orderFeeUsd":"0.5","orderFeeBps":2,"orderFeeSource":"program"} (cached up to 30 s)
+node scripts/admin/set-order-fee.ts --usdc 2 --bps 10             # dry run: current off, new 2 USDC + 10 bps per order (3 USDC on a $1,000 order, 12 on $10,000)
+node scripts/admin/set-order-fee.ts --usdc 2 --bps 10 --execute
+node scripts/admin/status.ts | grep 'order fee'                   # order fee 2 USDC + 10 bps of the size, per order
+curl -s https://api.<DOMAIN>/v1/order-fee                        # {"orderFeeUsd":"2","orderFeeBps":10,"orderFeeSource":"program"} (cached up to 30 s)
 ```
 
-Before the program is live, practice and evaluation charge the server's `ORDER_FEE_USDC` / `ORDER_FEE_BPS` (0 by
-default; section 16) and `/v1/order-fee` answers them with `"orderFeeSource":"server"`.
-
-`--usdc 0 --bps 0` turns it off again (fees already assessed or due stay until they are released or settled).
+`--usdc 0 --bps 0` turns it off on the program, for every stage (fees already assessed or due stay until they are
+released or settled); set the server's two settings to 0 as well, so a server that cannot read the Config at start
+does not charge them.
 
 ## 11. Monitoring and alerts
 
@@ -918,8 +933,8 @@ variable that is not documented there and here):
 | `LOG_LEVEL` | no | pino level (info) |
 | `TRUST_PROXY_HOPS` | no | trusted reverse proxies (1 = Railway's edge; 2 when the app's Vercel rewrite fronts the API, see section 7) |
 | `SIM_FILL_DELAY_MS` | no | sim keeper delay (2000, minimum 1000) |
-| `REFERRAL_REWARD_BPS` | no | referrers' share of the exchange fee on each funded fill of the traders they referred, bps (1000 = 10 %, at most 5000; 0 stops new rewards) |
-| `ORDER_FEE_USDC`, `ORDER_FEE_BPS` | no | Props.trade's fee per order on practice and evaluation accounts until the program is live (flat USDC ≤ 2, bps ≤ 10; 0 = off); then every stage reads the program's rate (section 10.1) |
+| `REFERRAL_REWARD_BPS` | no | referrers' share of the Props fee each settlement charges a funded order of the traders they referred, bps (1000 = 10 %, at most 5000; 0 stops new rewards; read when the indexer applies the settlement) |
+| `ORDER_FEE_USDC`, `ORDER_FEE_BPS` | no (2 and 10 at launch) | Props.trade's fee per order on practice and evaluation accounts until the program is live (flat USDC ≤ 2, bps ≤ 10; 0 = off, the default); the owner's rate is 2 and 10; then every stage reads the program's rate (section 10.1) |
 | `RISK_AUTHORITY_KEYPAIR` | yes on mainnet | risk authority secret key (JSON byte array or base58) |
 | `KYC_AUTHORITY_KEYPAIR` | yes on mainnet | KYC authority secret key |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | no | keeper alerts to Telegram |

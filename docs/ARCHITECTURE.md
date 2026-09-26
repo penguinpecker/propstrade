@@ -44,7 +44,7 @@ If implementation proves a statement here wrong, fix the code to the facts AND u
 | Practice | free, 25K virtual, same engine and rules, reset anytime, never paid out | |
 | Acceptable price | every order carries one; default slippage 0.5% (user-editable ≤ 5%) | protects against GMTrade's scheduled price-impact windows |
 | Geo | block US persons and sanctioned regions (edge middleware + KYC country and region) | GMTrade terms bar US persons |
-| Costs | GMTrade's, in every stage: order fee on each open and close (the market's factor by impact direction: lower when the order improves the long/short balance, higher when it worsens it), price impact (in the execution price), borrowing (the larger side pays), funding (the paying side only: received funding is never credited), liquidation fee. Props.trade: the evaluation fee, the profit share and its own fee per order (`Config.order_fee_usdc` + `order_fee_bps` of the size, at most $2 + 10 bps, 0 = off, the same on every stage; charged only when the order executes, on the size it executes: see §8 "Props order fee"; on practice and evaluation accounts simulated) | The order ticket previews open, close and round-trip fees (the Props fee included), the side's hourly rates and cost, and the liquidation price (`GET /v1/quote`); every trip's breakdown is in `ClosedTrade` |
+| Costs | GMTrade's, in every stage: order fee on each open and close (the market's factor by impact direction: lower when the order improves the long/short balance, higher when it worsens it), price impact (in the execution price), borrowing (the larger side pays), funding (the paying side only: received funding is never credited), liquidation fee. Props.trade: the evaluation fee, the profit share and its own fee per order (`Config.order_fee_usdc` + `order_fee_bps` of the size: $2 + 10 bps, the owner's rate of 2026-09-26 and the program's caps, set by the operator at launch (0 = off, the code's default); the same on every stage; charged only when the order executes, on the size it executes: see §8 "Props order fee"; on practice and evaluation accounts simulated) | The order ticket previews open, close and round-trip fees (the Props fee included), the side's hourly rates and cost, and the liquidation price (`GET /v1/quote`); every trip's breakdown is in `ClosedTrade` |
 
 Evaluation and funded use **identical** risk semantics so passing an evaluation predicts funded behaviour.
 
@@ -727,7 +727,7 @@ Launch (round 3, `docs/runbooks/launch.md` is the go-live procedure):
 - Identity hashes come only from `scripts/admin/identity-hash.ts`: HMAC-SHA256 under IDENTITY_SALT of one document in
   canonical form (`<ISSUER alpha-2>:<PASSPORT|ID_CARD>:<NUMBER A-Z0-9>`), so one document always gives one hash.
 
-Referrals (2026-09-25, `server/src/routes/referrals.ts`, migration 0009): a wallet's code is the shortest prefix of its
+Referrals (2026-09-25, `server/src/routes/referrals.ts`, migrations 0009 and 0011): a wallet's code is the shortest prefix of its
 address, 8 characters or more, upper-cased, that no other user holds (`users.referral_code`: unique, upper case by a
 check constraint, so a code typed in any case, trimmed and upper-cased, matches once). Sign-in gives it, in its own
 transaction after the user row is written, under one advisory lock (`LOCK_KEYS.referralCodes`, always taken before any
@@ -735,25 +735,39 @@ user row, so it never deadlocks with the backfill), which also serializes the bo
 before 0009 theirs, oldest `created_at` first (the first come keeps the short one). `POST /v1/me/referrer` binds a
 referrer once (`users.referred_by` = its wallet): 404 `unknown_referral_code`, 409 `already_referred`, 422
 `own_referral_code`, 403 `referral_window_closed` from 7 days after `users.created_at` or once the wallet has an indexed
-evaluation (one bought seconds before the bind and not indexed yet is not seen). The venue loop's fill transaction
-(`chain/venue.ts syncFills`) writes the referrer's reward with every new funded fill of a referred trader:
-`REFERRAL_REWARD_BPS` (default 1000, 0–5000) of the fill's order fee (`venue.ts orderFeeUsd`: never the liquidation
-fee `fee_usd` also holds, so no one earns from their own liquidations; never funding or borrowing), rounded down to the micro-dollar, one `referral_rewards` row per fill
-(`venue_fill_id` unique) with the rate it used. Practice and evaluation fills (`sim_fills`) earn nothing. Props.trade pays
-rewards in USDC by hand, nothing onchain: `GET /v1/admin/referrals` lists what each referrer earned, was paid and is
-owed; `POST /v1/admin/referrals/payouts` records a transfer (above 0 and at most what is owed, its signature once per
-referrer, in `admin_audit_log`) only for a referrer with an approved `kyc_requests` row (409 `referrer_unverified`:
-`kyc_requests_approved_identity_uq` allows one approved wallet per person and every funded referee has one, so a funded
-trader's second wallet is never paid) and only when the confirmed transaction moves at least the amount into the
-referrer's own USDC (422 `payout_not_found` / `payout_not_sent`; one batch transaction can be recorded for each referrer
-it pays). `GET /v1/me/referrals` answers the page (`ReferralSummary`: the referrer by code, never by wallet; referees
-masked to first 4 … last 4); `GET /v1/referrals` answers the rate (public); `GET /v1/referrals/:code` answers
-`{ valid }` (public, 60 a minute, `no-store`). Known: because a code is the start of a wallet, the public check tells
-whether a given wallet has signed in (60 a minute per client); only random codes would hide that. Two different people
-referring each other each earn on the other's funded fees, as on any referral program.
+evaluation (one bought seconds before the bind and not indexed yet is not seen). Rewards come from the Props fee (the
+owner's decision of 2026-09-26, migration 0011; before it, from the exchange's fee on funded fills, which never earned
+anything in production: no funded account existed): when the indexer applies a settlement's `OrderFeesSettled`
+(`chain/projector.ts`, in the transaction that applies its per-order shares to the fee ledger,
+`chain/fees.ts confirmSettlement`), each order of a referred trader's funded account it charged earns the referrer
+`REFERRAL_REWARD_BPS` (default 1000, 0–5000) of that charge, rounded down to the micro-dollar: one `referral_rewards`
+row per order and settlement (`"order"` → `order_fees`, `settlement_signature` + `funded_account` →
+`order_fee_settlements`; unique with the settlement's event index, migration 0012, as one hand-built transaction can
+settle an account twice) with the Props fee charged (`fee_usd`) and the rate it used. An order charged in parts earns on
+each part; a settlement this server did not send (`scripts/admin/settle-order-fees.ts`) earns on the charges it is
+spread over. Waived fees, fees assessed or due but not charged, a sent settlement that never landed, funded fills and
+practice and evaluation fees (simulated) earn nothing; so does a charge that only moved Props' own capital into the fee
+vault: one settled once the account breached (its USDC all returns to the capital vault) or in the transaction that
+closes the account (the closure `[settle_order_fees, close_funded]` of the keeper or the operators' close job). Open
+for the owner (`docs/design/order-fee.md` §10 Q9, Q10): rewards on the session guard's closes, and on the earlier
+charges of an account that ends breached. Reading a settlement again never earns twice: the indexer applies each event
+once, a confirmed settlement applies no event again, and the unique key holds.
+Props.trade pays rewards in USDC by hand, nothing onchain: `GET /v1/admin/referrals` lists what each referrer earned,
+was paid and is owed; `POST /v1/admin/referrals/payouts` records a transfer (above 0 and at most what is owed, its
+signature once per referrer, in `admin_audit_log`) only for a referrer with an approved `kyc_requests` row (409
+`referrer_unverified`: `kyc_requests_approved_identity_uq` allows one approved wallet per person and every funded
+referee has one, so a funded trader's second wallet is never paid) and only when the confirmed transaction moves at
+least the amount into the referrer's own USDC (422 `payout_not_found` / `payout_not_sent`; one batch transaction can be
+recorded for each referrer it pays). `GET /v1/me/referrals` answers the page (`ReferralSummary`: the referrer by code,
+never by wallet; referees masked to first 4 … last 4); `GET /v1/referrals` answers the rate (public);
+`GET /v1/referrals/:code` answers `{ valid }` (public, 60 a minute, `no-store`). Known: because a code is the start of
+a wallet, the public check tells whether a given wallet has signed in (60 a minute per client); only random codes would
+hide that. Two different people referring each other each earn on the other's funded Props fees, as on any referral
+program.
 
 Props order fee (2026-09-26, `docs/design/order-fee.md`; the program part is built and audited there, this is the
-server's; the rate stays 0 until the owner names it, `docs/runbooks/launch.md` §10.1):
+server's). The owner's rate (2026-09-26): $2 + 10 bps per order on every stage, the program's caps; the operator sets it
+at launch, the server's settings with the deploy and the program's at go-live (`docs/runbooks/launch.md` §10.1):
 - One rate for every stage: the onchain Config's `order_fee_usdc` / `order_fee_bps` once the program is live (the chain
   module's program reader, `orderFeeRate()`: cached 30 s, served at once from the last read while a newer one loads,
   refreshed after an indexed `ConfigChanged`, kept through a failed read), before that the server's `ORDER_FEE_USDC` /
@@ -763,7 +777,11 @@ server's; the rate stays 0 until the owner names it, `docs/runbooks/launch.md` �
   ⌊⌊min(size, cap) / 10^14⌋ × bps / 10^4⌋ micro-USDC, a decrease capped at the account's exposure cap.
 - Quote (`GET /v1/quote`): `platformFeeUsd` = the order's fee, `maxFeeMicro` = the same as the u64 a funded open passes
   as `maxFee`, `platformCloseFeeUsd` = closing the resulting position (the same size), `roundTripFeeUsd` counts both.
-  A funded close, take profit or stop loss passes its maximum instead (the rate on `rules.maxExposureUsd`).
+  A funded close, take profit or stop loss passes its maximum instead (the rate on `rules.maxExposureUsd`). The app's
+  open signs the lower of the quote's `maxFeeMicro` (when the quote priced its size) and the fee at the rate it holds, so
+  it never signs more than the ticket showed. Refused with `OrderFeeChanged` (the rate rose), the app reads the
+  program's rate and re-quotes; a close, take profit, stop loss or trigger edit is signed again at once at the new fee
+  (with a notice), an open is not: the trader sees the new fee and places it again (`app/src/lib/transactions.ts`).
 - Simulator (practice, evaluation): each order stores the fee assessed at placement and the rate it used
   (`sim_orders.platform_fee_usd`, `fee_rate_usd`, `fee_rate_bps`: an increase on its size, a close / TP / SL on the
   exposure cap, the session guard's close like the trader's); an increase must leave its collateral, its fee and the
@@ -792,7 +810,9 @@ server's; the rate stays 0 until the owner names it, `docs/runbooks/launch.md` �
   charged again; and no earlier settlement awaits its outcome. Idempotent: `order_fee_settlements` (one row per
   transaction and account) gets the settlement with each order's share and its blockhash's last valid height in the
   database transaction that stores its signature; the indexed `OrderFeesSettled` applies the shares, once (one this
-  server did not send, e.g. `scripts/admin/settle-order-fees.ts`, is spread over the due rows oldest first); one refused
+  server did not send, e.g. `scripts/admin/settle-order-fees.ts`, is spread over the due rows oldest first; a second
+  settlement of the same account in one hand-built transaction too, counted on the same row: `settlements`, with the
+  index of the last event applied, `event_index`, migration 0012); one refused
   is `failed`; one still unconfirmed is `failed` only once the confirmed block height (read before its status) has
   passed its last valid height and it is not found. Fee bookkeeping that fails skips the settlement for that tick, never
   the account's breach, session or upgrade checks (`fee-view` alert). Closure: a
@@ -806,19 +826,27 @@ server's; the rate stays 0 until the owner names it, `docs/runbooks/launch.md` �
   (fees due + the fees of pending increases); `AccountSummary.platformFees` {due, paid, held}; eligibility says "Order
   fees are being settled" while any are due. The ledger is read only for an account whose fees are in motion (some due,
   or a tracked order no longer pending), so a keeper tick's database load does not grow with idle accounts.
-- `VaultStats.totals.orderFeesCharged` sums the indexed settlements; `feesCollected` is evaluation fees. Referrals are
-  unchanged: 10 % of the exchange's fee on funded fills; Props fees earn no reward yet (owner decision pending).
+- `VaultStats.totals.orderFeesCharged` sums the indexed settlements; `feesCollected` is evaluation fees. Referrals earn
+  10 % of each charge the indexed settlements make on a referred trader's funded orders (the owner's decision of
+  2026-09-26, "Referrals" above); simulated, waived and uncharged fees earn nothing, nor do charges on a breached
+  account or in the transaction that closes the account (that USDC returns to the capital vault with the account's).
 - Not built: the design's immediate waive of what several decreases finishing between two syncs cannot owe (until the
   exchange's indexer reports their sizes, about 35 s, a close's whole assessment stays held against new exposure), and
   waiving unknown outcomes at once when a flat trader asks for a payout (a refused request never reaches the server;
   the 24 h fallback applies).
-- Tests: `test/sim/order-fee.test.ts` (the demo rule), `chain/test/fees.test.ts` (ledger, plans, fills, rate source,
-  valuation), `keeper/test/rules.test.ts` (settle and closure steps, payout review), the validator e2e suites (a nonzero
-  rate: assessed, held, released; the session guard's close assessed), and `keeper/test/fees.e2e.test.ts`: the real
-  program in LiteSVM served to the real indexer, venue loop, job executor and keeper (an executed open charged, a TP
-  charged on its execution and the exchange-cancelled SL waived, a payout refused with `FeesDue` then approved and paid,
-  a breached account with fees due and no USDC closed with `[settle_order_fees, close_funded]`). A local validator cannot
-  make an order leave the book but by a cancel, so fees never become due there.
+- Tests: `test/sim/order-fee.test.ts` (the demo rule; at the owner's rate against rate 0, the same orders differ by
+  exactly their Props fees), `chain/test/fees.test.ts` (ledger, plans, fills, rate source, valuation, two settlements in
+  one transaction), `keeper/test/rules.test.ts` (settle and closure steps, payout review), `test/referrals.test.ts`
+  (rewards per charge; none after a breach or in the closing transaction), the validator e2e suites (a nonzero rate:
+  assessed, held, released; the session guard's close assessed), and `keeper/test/fees.e2e.test.ts`: the real program in
+  LiteSVM served to the real indexer, venue loop, job executor and keeper (an executed open charged, a TP charged on its
+  execution and the exchange-cancelled SL waived, a payout refused with `FeesDue` then approved and paid, a breached
+  account with fees due and no USDC closed with `[settle_order_fees, close_funded]`; at the owner's rate with referred
+  traders: each order's arithmetic and reward, a full re-read and a re-projected event adding nothing, two keepers at once,
+  the session guard, an unknown outcome waived after 24 h, a breach earning nothing, a keeper that crashed before
+  sending, a landed but unindexed settlement across a leader change, a hand-sent settlement, two in one transaction and a
+  rate change mid-flight). A local validator cannot make an order leave the book but by a cancel, so fees never become
+  due there.
 
 Deployment (2026-09-23): app on Vercel (`propstrade.vercel.app`), server + Postgres 18 on Railway. With no custom domain
 yet, the app's `vercel.json` proxies `/v1/*` to the Railway service (uncached, except `/v1/candles` which the edge

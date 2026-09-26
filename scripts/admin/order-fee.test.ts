@@ -1,9 +1,11 @@
 // The order fee's admin tooling (docs/runbooks/launch.md §10.1, §12): set-order-fee.ts always names both values and
 // stays within the program's caps; settle-order-fees.ts names the account's fees due and settlement count it read,
 // refuses a settlement the program would refuse, and only for a risk authority. Both print a transaction Squads (or a
-// risk key holder) can import with --print-for, and only when the dry run passes.
+// risk key holder) can import with --print-for, and only when the dry run passes. upsert-tiers.ts publishes the fee in
+// every tier's terms.
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
@@ -100,5 +102,20 @@ test('settle-order-fees: names the fees due and the settlement count read, and r
     assert.deepEqual(printed(ok.stdout), client.program.coder.instruction.encode('settleOrderFees', {
       charge: n(2_500_000), waive: n(2_500_000), expectedDue: n(5_000_000), expectedSettlements: n(3),
     }));
+  });
+});
+
+test('upsert-tiers: every tier\'s published terms name the Props fee, and its onchain terms hash is sha256 of those rules', async () => {
+  await withChain(async (script) => {
+    const { stdout } = await script('./upsert-tiers.ts', ['--print-for', key().toBase58()]);
+    const rules = {
+      profitTargetBps: 800, maxDrawdownBps: 500, maxExposureBps: 10_000, traderShareBps: 8000, drawdown: 'static', includesOpenPnl: true, dailyLossLimit: null,
+      timeLimit: null, minTradingDays: null, orderFee: { usdc: '2', bps: 10, charged: 'executed orders, on the size executed' },
+    };
+    const terms = createHash('sha256').update(JSON.stringify({ tier: '10K', sizeUsd: '10000', feeUsdc: '79', ...rules })).digest();
+    assert.match(stdout, new RegExp(`tier 1 10K: .*, terms ${terms.toString('hex')}\\n`));
+    const [first] = Transaction.from(bs58.decode(stdout.trim().split('\n').at(-1)!)).instructions;
+    const { data } = client.program.coder.instruction.decode(first!.data) as unknown as { data: { params: { termsHash: number[] } } };
+    assert.deepEqual(Buffer.from(data.params.termsHash), terms);
   });
 });

@@ -11,7 +11,7 @@
 // Leader election uses Postgres advisory locks, which need no table (keys in src/lib/leader.ts).
 import { sql } from 'drizzle-orm';
 import {
-  bigint, bigserial, boolean, char, check, index, integer, jsonb, numeric, pgEnum, pgTable, primaryKey, text,
+  bigint, bigserial, boolean, char, check, foreignKey, index, integer, jsonb, numeric, pgEnum, pgTable, primaryKey, text,
   timestamp, uniqueIndex, uuid, varchar, type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
@@ -463,8 +463,16 @@ export const orderFeeSettlements = pgTable('order_fee_settlements', {
   settledAt: at('settled_at'),
   /** A sent settlement's blockhash can land until the confirmed block height passes this; failed only after that. */
   lastValidBlockHeight: bigint('last_valid_block_height', { mode: 'number' }),
+  /**
+   * The settle_order_fees the row counts: 1, or more when one transaction settled the account several times (only a
+   * hand-built one), each later one spread like a settlement this server did not send.
+   */
+  settlements: integer('settlements').notNull().default(1),
+  /** The index of the last OrderFeesSettled applied, among its transaction's events: one at or before it was applied already. */
+  eventIndex: integer('event_index'),
 }, (t) => [
-  // One transaction can settle several accounts (an operators' batch): one row, and one confirmation, per account.
+  // One transaction can settle several accounts (an operators' batch): one row per account, which also counts a hand-built
+  // transaction's further settlements of that account (`settlements`).
   primaryKey({ columns: [t.signature, t.fundedAccount] }),
   index('order_fee_settlements_funded_status_idx').on(t.fundedAccount, t.status),
 ]);
@@ -636,20 +644,34 @@ export const adminAuditLog = pgTable('admin_audit_log', {
 // ---------- referrals (src/routes/referrals.ts) ----------
 
 /**
- * A referrer's reward for one funded fill (venue_fills) of a trader it referred: rate_bps of the exchange fee the fill
- * paid (venue_fills.fee_usd). Written in the fill's own transaction (modules/chain/venue.ts), once per fill.
+ * A referrer's reward for the Props fee one settlement charged a funded order (order_fees) of a trader it referred:
+ * rate_bps of that charge (the settlement's share for the order), rounded down to the micro-dollar. Written with the
+ * indexed OrderFeesSettled that confirms the charge (modules/chain/projector.ts), once per order and settlement.
  */
 export const referralRewards = pgTable('referral_rewards', {
   id: bigserial('id', { mode: 'number' }).primaryKey(),
   referrer: pubkey('referrer').notNull().references(() => users.wallet),
   referee: pubkey('referee').notNull().references(() => users.wallet),
-  venueFillId: text('venue_fill_id').notNull().unique().references(() => venueFills.venueId),
+  order: pubkey('order').notNull().references(() => orderFees.order),
+  fundedAccount: pubkey('funded_account').notNull(),
+  /** The settle_order_fees transaction that charged it (with funded_account: its order_fee_settlements row). */
+  settlementSignature: signature('settlement_signature').notNull(),
+  /** Its OrderFeesSettled's index among that transaction's events (one transaction can settle an account twice). */
+  settlementEventIndex: integer('settlement_event_index').notNull(),
   symbol: text('symbol').notNull(),
+  /** The Props fee that settlement charged the order. */
   feeUsd: usd('fee_usd').notNull(),
   rateBps: integer('rate_bps').notNull(),
   rewardUsd: usd('reward_usd').notNull(),
   createdAt: now('created_at'),
-}, (t) => [index('referral_rewards_referrer_created_idx').on(t.referrer, t.createdAt.desc().nullsFirst())]); // = order by created_at desc
+}, (t) => [
+  uniqueIndex('referral_rewards_order_settlement_uq').on(t.order, t.settlementSignature, t.settlementEventIndex),
+  foreignKey({
+    name: 'referral_rewards_settlement_fk', columns: [t.settlementSignature, t.fundedAccount],
+    foreignColumns: [orderFeeSettlements.signature, orderFeeSettlements.fundedAccount],
+  }),
+  index('referral_rewards_referrer_created_idx').on(t.referrer, t.createdAt.desc().nullsFirst()), // = order by created_at desc
+]);
 
 /** USDC Props.trade sent a referrer, recorded by an operator after sending it (POST /v1/admin/referrals/payouts). */
 export const referralPayouts = pgTable('referral_payouts', {
