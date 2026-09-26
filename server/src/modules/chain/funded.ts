@@ -3,18 +3,21 @@
 //
 // For a funded account with size S and loss allowance L (the principal posted):
 //   value V   = owner USDC + collateral escrowed in pending increase orders + Σ position net value (model, no debt)
+//               − Props fees executed orders owe and nothing has charged yet (chain/fees.ts)
 //   equity    = S − L + V            (so the allowance, equity − floor, is V itself)
 //   unrealized= Σ (position net value − its collateral)      realized = V − L − unrealized
+//   available margin = owner USDC − the Props fees the program holds (due + those of pending increases)
 import { and, asc, desc, eq, gte, isNull } from 'drizzle-orm';
 import type {
   AccountStatus, AccountSummary, ActivityItem, ClosedTrade, DataFreshness, Order, Payout, PayoutEligibility, Performance, Position,
 } from '@props/shared';
-import { BPS } from '@props/sdk';
+import { BPS, orderFee } from '@props/sdk';
 import { formatFixed, parseFixed } from '@props/gmtrade';
 import type { Db } from '../../db/client.ts';
 import {
-  accountEvents, accounts, closedTrades, equitySnapshots, evaluations, fundedAccounts, gmOrders, gmPositionSnapshots, payouts, venueFills,
+  accountEvents, accounts, closedTrades, equitySnapshots, evaluations, fundedAccounts, gmOrders, gmPositionSnapshots, orderFees, payouts, venueFills,
 } from '../../db/schema.ts';
+import { chargedSince } from './fees.ts';
 import type { AccountsProvider } from '../types.ts';
 import type { ProgramReader } from './program.ts';
 import { rejectionReason } from './projector.ts';
@@ -36,7 +39,7 @@ type FundedRow = typeof fundedAccounts.$inferSelect;
 
 /** Money of a funded account in GMTrade USD (1e20), from a valuation. */
 export function money(v: Valuation, principal: bigint /* micro */) {
-  let value = (v.ownerUsdc + v.pendingCollateral) * MICRO_TO_GM;
+  let value = (v.ownerUsdc + v.pendingCollateral - v.fees.owed) * MICRO_TO_GM;
   let unrealized = 0n;
   let notional = 0n;
   for (const p of v.positions) {
@@ -84,11 +87,14 @@ export function createFundedProvider(d: { db: Db; venue: Venue; program: Program
     let notional = 0n;
     let available = 0n;
     let freshness: DataFreshness;
+    let fees: { due: bigint; paid: bigint; held: bigint };
     let status = STATUS[funded.status]!;
     // A closed account holds nothing onchain any more: its final state is the snapshot taken when it closed.
     if (v && v.status !== 'closed' && funded.status !== 'closed') {
       const m = money(v, principal);
-      [equity, realized, unrealized, notional, available, freshness] = [floor + m.value, m.realized, m.unrealized, m.notional, v.ownerUsdc, v.freshness];
+      // New exposure must leave the fees the program holds in the USDC: what is left is the margin an order may commit.
+      const free = v.ownerUsdc - v.fees.held;
+      [equity, realized, unrealized, notional, available, freshness, fees] = [floor + m.value, m.realized, m.unrealized, m.notional, free > 0n ? free : 0n, v.freshness, v.fees];
       // A breached account still holding positions or orders is being closed ('Closing', a current account in the app);
       // it reads 'breached' (ended) once flat.
       status = v.status === 'breached' && !v.flat ? 'closure_pending' : STATUS[v.status] ?? status;
@@ -98,6 +104,7 @@ export function createFundedProvider(d: { db: Db; venue: Venue; program: Program
       realized = toGmUsd(last?.realizedPnl ?? '0');
       unrealized = toGmUsd(last?.unrealizedPnl ?? '0');
       freshness = funded.status === 'closed' ? 'live' : 'stale'; // a closed account's last snapshot is its final state
+      fees = { due: 0n, paid: await chargedSince(db, row.id, null), held: 0n };
     }
     const profit = realized > 0n ? realized / MICRO_TO_GM : 0n;
     return {
@@ -110,6 +117,7 @@ export function createFundedProvider(d: { db: Db; venue: Venue; program: Program
       },
       equity: gmUsd(equity), realizedPnl: gmUsd(realized), unrealizedPnl: gmUsd(unrealized),
       allowanceRemaining: gmUsd(equity - floor), availableMargin: micro(available), openNotional: gmUsd(notional),
+      platformFees: { dueUsd: micro(fees.due), paidUsd: micro(fees.paid), heldUsd: micro(fees.held) },
       targetProgressPct: null,
       eligiblePayout: fmt6((profit * BigInt(row.traderShareBps)) / BigInt(BPS)),
       createdAt: row.createdAt.getTime(), activatedAt: row.activatedAt?.getTime() ?? null, resolvedAt: row.resolvedAt?.getTime() ?? null,
@@ -122,17 +130,18 @@ export function createFundedProvider(d: { db: Db; venue: Venue; program: Program
   }
 
   async function ordersOf(funded: string): Promise<Order[]> {
-    const rows = await db.select().from(gmOrders).where(and(eq(gmOrders.fundedAccount, funded), isNull(gmOrders.closedAt))).orderBy(asc(gmOrders.createdAt));
-    return rows.map((o) => ({
+    const rows = await db.select({ o: gmOrders, fee: orderFees.assessedUsd }).from(gmOrders).leftJoin(orderFees, eq(orderFees.order, gmOrders.address))
+      .where(and(eq(gmOrders.fundedAccount, funded), isNull(gmOrders.closedAt))).orderBy(asc(gmOrders.createdAt));
+    return rows.map(({ o, fee }) => ({
       id: o.address, symbol: o.symbol, side: o.side, kind: o.kind, isIncrease: o.isIncrease, sizeUsd: dec(o.sizeUsd),
       collateralUsd: o.collateralUsd === null ? null : dec(o.collateralUsd), triggerPrice: o.triggerPrice && decPrice(o.triggerPrice), acceptablePrice: o.acceptablePrice && decPrice(o.acceptablePrice),
       status: o.status, statusDetail: o.statusDetail ?? undefined, createdAt: o.createdAt.getTime(), updatedAt: o.updatedAt.getTime(),
-      signature: o.createSignature, gmOrder: o.address,
+      platformFeeUsd: dec(fee ?? '0'), signature: o.createSignature, gmOrder: o.address,
     }));
   }
 
   async function positionsOf(v: Valuation, funded: string): Promise<Position[]> {
-    const orders = await ordersOf(funded);
+    const [orders, rate] = await Promise.all([ordersOf(funded), d.program.orderFeeRate()]);
     const out: Position[] = [];
     for (const p of v.positions) {
       const { market, position, status } = p;
@@ -162,7 +171,7 @@ export function createFundedProvider(d: { db: Db; venue: Venue; program: Program
         unrealizedPnl: status ? gmUsd(status.netValue - collateral) : null,
         pendingFeesUsd: pending(status && status.pendingBorrowingFeeValue + status.pendingFundingFeeValue + status.closeOrderFeeValue),
         pendingBorrowUsd: pending(status?.pendingBorrowingFeeValue), pendingFundingUsd: pending(status?.pendingFundingFeeValue),
-        closeFeeUsd: pending(status?.closeOrderFeeValue), closing,
+        closeFeeUsd: pending(status?.closeOrderFeeValue), platformFeeUsd: micro(orderFee(rate, position.sizeInUsd)), closing,
         takeProfit: protection('TakeProfit'), stopLoss: protection('StopLoss'),
         openedAt: (opening ?? snapshot)?.ts.getTime() ?? v.at, venue: 'exchange', gmPosition: p.address,
       });
@@ -177,7 +186,8 @@ export function createFundedProvider(d: { db: Db; venue: Venue; program: Program
     return rows.map((t) => ({
       id: t.id, symbol: t.symbol, side: t.side, openedAt: t.openedAt.getTime(), closedAt: t.closedAt.getTime(), sizeUsd: dec(t.sizeUsd),
       entryPrice: decPrice(t.entryPrice), exitPrice: decPrice(t.exitPrice), feesUsd: dec(t.feesUsd), orderFeesUsd: dec(t.orderFeesUsd),
-      fundingUsd: dec(t.fundingUsd), borrowUsd: dec(t.borrowUsd), priceImpactUsd: dec(t.priceImpactUsd), netPnl: dec(t.netPnl),
+      platformFeeUsd: dec(t.platformFeeUsd), fundingUsd: dec(t.fundingUsd), borrowUsd: dec(t.borrowUsd), priceImpactUsd: dec(t.priceImpactUsd),
+      netPnl: dec(t.netPnl),
       venue: t.venue === 'gmtrade' ? 'exchange' : t.venue, signatures: t.signatures,
     }));
   }
@@ -198,6 +208,7 @@ export function createFundedProvider(d: { db: Db; venue: Venue; program: Program
     const sum = (list: bigint[]) => list.reduce((s, x) => s + x, 0n);
     const realized = sum(nets);
     const fees = sum(fills.map((f) => toMicro6(f.feeUsd)));
+    const platformFees = sum(fills.map((f) => toMicro6(f.platformFeeUsd)));
     const fundingBorrow = sum(fills.map((f) => toMicro6(f.fundingUsd) + toMicro6(f.borrowUsd)));
     const gross = sum(fills.filter((f) => !f.isIncrease).map((f) => toMicro6(f.realizedPnl ?? '0') + toMicro6(f.feeUsd) + toMicro6(f.fundingUsd) + toMicro6(f.borrowUsd)));
     const bySymbol = new Map<string, bigint>();
@@ -210,7 +221,7 @@ export function createFundedProvider(d: { db: Db; venue: Venue; program: Program
         ...points.map((p) => ({ ts: p.ts.getTime(), equity: dec(p.equity), netPnl: fmt6(toMicro6(p.equity) - size) })),
         { ts: Date.now(), equity: summary.equity, netPnl: fmt6(m6(summary.equity) - size) },
       ],
-      netPnl: fmt6(realized + unrealized), grossRealized: fmt6(gross), feesUsd: fmt6(fees), fundingBorrowUsd: fmt6(fundingBorrow),
+      netPnl: fmt6(realized + unrealized), grossRealized: fmt6(gross), feesUsd: fmt6(fees), platformFeesUsd: fmt6(platformFees), fundingBorrowUsd: fmt6(fundingBorrow),
       unrealizedPnl: summary.unrealizedPnl, trades: trades.length,
       winRatePct: trades.length ? (wins.length / trades.length) * 100 : null,
       profitFactor: losses.length ? Number(sum(wins)) / Number(-sum(losses)) : null,
@@ -298,6 +309,7 @@ export function createFundedProvider(d: { db: Db; venue: Venue; program: Program
       else if (status !== 'active') reasons.push(`Payouts need an active account; this one is ${status?.replace('_', ' ')}`);
       if (open || v.pendingOrders) reasons.push('Close every position and cancel pending orders first');
       else if (!v.flat) reasons.push('Waiting for the next account sync to confirm the account is flat');
+      else if (v.fees.due > 0n) reasons.push('Order fees are being settled; payouts open once they are');
       if (positive === 0n) reasons.push('There is no realized profit to pay out');
       else if (traderShare < minPayout) reasons.push(`Your share must be at least ${micro(minPayout)} USDC`);
       return {

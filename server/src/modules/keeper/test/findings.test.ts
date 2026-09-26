@@ -291,7 +291,7 @@ test('finding 3: a $10k hedge placed in the same minute is linked even when one 
   ];
   const now = T0 + 60 * MIN;
   const links = linkedPositions(exposuresOf(ours), exposuresOf(theirs), now);
-  const review = reviewPayout({ profit: 1_000_000_000n, requestedAt: T0 + 45 * MIN, flat: true, verified: true, fills: ours, links, now });
+  const review = reviewPayout({ profit: 1_000_000_000n, feesDue: 0n, feesCharged: 0n, requestedAt: T0 + 45 * MIN, flat: true, verified: true, fills: ours, links, now });
   assert.equal(review.decision, 'hold', 'the payout of a same-minute $10k hedge was approved because one leg opened with a $1 stub 10 minutes earlier');
 });
 
@@ -366,7 +366,7 @@ test('finding 6: freeing an order slot for a session close cancels a pending inc
   const pos = (size: bigint, netValue: bigint) => ({ size: size * USD, collateral: 50_000_000n, netValue: netValue * USD });
   const o = (order: string, slot: number, type: OrderView['type']): OrderView => ({ order, slot, type, sizeUsd: USD, placedByRisk: false, state: 'pending', createdAt: 1 });
   const view: AccountView = {
-    funded: 'F', status: 'active', ownerLamports: 250_000_000n, value: 300n * USD,
+    funded: 'F', status: 'active', ownerLamports: 250_000_000n, value: 300n * USD, fees: { due: 0n, settlements: 0n, plan: null, closing: null },
     slots: [
       { index: 0, marketToken: 'NVDA', isLong: true, gmPosition: 'p0', sizeUsd: 1_000n * USD, collateral: 50_000_000n, pendingUsd: 0n }, // 20x NVDA
       { index: 1, marketToken: 'BTC', isLong: true, gmPosition: 'p1', sizeUsd: 500n * USD, collateral: 50_000_000n, pendingUsd: 0n },

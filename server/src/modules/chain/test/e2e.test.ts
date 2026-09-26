@@ -2,7 +2,9 @@
 // deployed; ports 28899/28900) and a real Postgres: the chain module indexes every transaction through the logs
 // subscription, the job executor sends set_identity / record_evaluation_result / approve_payout / reject_payout with
 // throwaway authority keys, and a restart backfills without gaps or duplicates. GMTrade keepers do not run locally, so
-// orders are placed and cancelled but never filled; GMTrade's indexer is stubbed empty.
+// orders are placed and cancelled but never filled; GMTrade's indexer is stubbed empty. The Props order fee is on
+// ($0.50 + 2 bps) from the funded account's first order: assessed, held and released here; charged and waived by the
+// keeper in keeper/test/fees.e2e.test.ts (only there can an order leave the book other than by a cancel).
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -12,12 +14,12 @@ import { Keypair, LAMPORTS_PER_SOL, PublicKey, type Connection } from '@solana/w
 import { count, eq, sql } from 'drizzle-orm';
 import type { AccountSummary, AppConfig, Order, Payout, PayoutEligibility, VaultStats, VerifyResult } from '@props/shared';
 import {
-  PROPS_VAULT_PROGRAM_ID, PropsVaultClient, USDC_MINT, capitalVaultAddress, enumName, evaluationPda, fundedPda, ownerUsdcAddress, payoutPda,
+  PROPS_VAULT_PROGRAM_ID, PropsVaultClient, USDC_MINT, capitalVaultAddress, enumName, evaluationPda, fundedPda, orderFee, ownerUsdcAddress, payoutPda,
   solTreasuryPda, traderProfilePda,
 } from '@props/sdk';
 import { buildApp } from '../../../app.ts';
 import { loadConfig } from '../../../config.ts';
-import { chainJobs, evaluations, fundedAccounts, gmOrders, indexerCursors, payouts, programEvents, vaultLedger } from '../../../db/schema.ts';
+import { chainJobs, evaluations, fundedAccounts, gmOrders, indexerCursors, orderFeeSettlements, orderFees, payouts, programEvents, vaultLedger } from '../../../db/schema.ts';
 import { createSealer } from '../../../lib/integrity.ts';
 import { createConnection } from '../../../lib/solana.ts';
 import { createStreamHub } from '../../../stream.ts';
@@ -207,27 +209,45 @@ test('chain module against solana-test-validator: index, jobs, funded lifecycle,
   assert.deepEqual([summary.stage, summary.status, summary.equity, summary.allowanceRemaining, summary.availableMargin, summary.label, summary.freshness],
     ['funded', 'active', '10000', '500', '500', 'Funded 10K', 'live']);
 
-  // ---- a real GMTrade order through the program's CPI, tracked by the indexer, then cancelled
+  // ---- the Props order fee: the admin sets $0.50 + 2 bps onchain; /v1/config (and every stage) follows the program
+  const rate = { feeUsdc: 500_000n, feeBps: 2 };
+  await send([await vault.setOrderFee({ admin: admin.publicKey, ...rate })], [admin]);
+  const rated = await until(async () => {
+    const c = (await get<AppConfig>('/v1/config')).body;
+    return c.orderFeeUsd === '0.5' && c;
+  }, 20_000, 'the new rate in /v1/config (its indexed ConfigChanged drops the cached Config)');
+  assert.deepEqual([rated.orderFeeBps, rated.orderFeeSource], [2, 'program']);
+
+  // ---- a real GMTrade order through the program's CPI, tracked by the indexer, then cancelled; it passes the fee the
+  // program assesses as its maxFee, as the app does
   const open = await vault.openPosition({
     trader: trader.publicKey, funded: await fresh(), marketToken: MARKETS.SOL.token, isLong: true, orderType: 'market',
-    collateral: usdc('50'), sizeDeltaUsd: 500n * USD, acceptablePrice: 10n ** 30n,
+    collateral: usdc('50'), sizeDeltaUsd: 500n * USD, acceptablePrice: 10n ** 30n, maxFee: orderFee(rate, 500n * USD),
   });
   await send([open.instruction], [trader]);
   const orders = await until(async () => {
     const list = (await get<Order[]>(`/v1/accounts/${fundedAddress.toBase58()}/orders`, session.cookie)).body;
     return list.length === 1 && list;
   }, 20_000, 'order indexed');
-  assert.deepEqual([orders[0]!.id, orders[0]!.symbol, orders[0]!.kind, orders[0]!.side, orders[0]!.status, orders[0]!.collateralUsd, orders[0]!.sizeUsd],
-    [open.order.toBase58(), 'SOL', 'Market', 'Long', 'awaiting_execution', '50', '500']);
+  assert.deepEqual([orders[0]!.id, orders[0]!.symbol, orders[0]!.kind, orders[0]!.side, orders[0]!.status, orders[0]!.collateralUsd, orders[0]!.sizeUsd, orders[0]!.platformFeeUsd],
+    [open.order.toBase58(), 'SOL', 'Market', 'Long', 'awaiting_execution', '50', '500', '0.6']);
+  // The open's fee ($0.50 + 2 bps of $500) is held in the account's USDC next to its collateral, as the program holds it.
   summary = await until(async () => {
     const s = await summaryOf();
-    return s.availableMargin === '450' && s;
-  }, 20_000, 'escrowed collateral in the valuation');
+    return s.availableMargin === '449.4' && s;
+  }, 20_000, 'escrowed collateral and the held fee in the valuation');
   assert.equal(summary.equity, '10000', 'collateral escrowed in a pending order still counts');
+  assert.deepEqual(summary.platformFees, { dueUsd: '0', paidUsd: '0', heldUsd: '0.6' });
+  const [assessed] = await t.db.select().from(orderFees).where(eq(orderFees.order, open.order.toBase58()));
+  assert.deepEqual([assessed!.assessedUsd, assessed!.rateUsd, assessed!.rateBps, assessed!.state], ['0.600000', '0.500000', 2, 'assessed']);
 
   await send([await vault.cancelOrder({ authority: trader.publicKey, funded: await fresh(), order: open.order })], [trader]);
   await until(async () => (await t.db.select().from(gmOrders).where(eq(gmOrders.address, open.order.toBase58())))[0]?.status === 'canceled', 20_000, 'cancel indexed');
   assert.deepEqual((await get<Order[]>(`/v1/accounts/${fundedAddress.toBase58()}/orders`, session.cookie)).body, []);
+  // A cancel through the program releases the fee: nothing is due and nothing moves.
+  assert.equal((await t.db.select().from(orderFees).where(eq(orderFees.order, open.order.toBase58())))[0]!.state, 'released');
+  const onchainFees = (await fresh()).account;
+  assert.deepEqual([onchainFees.orderFeesDue.toString(), onchainFees.orderFeesPaid.toString()], ['0', '0']);
   await send([await vault.sync({ funded: await fresh() })], [trader]);
   await until(async () => (await t.db.select().from(fundedAccounts))[0]?.lastSyncAt, 20_000, 'sync indexed');
 
@@ -276,6 +296,7 @@ test('chain module against solana-test-validator: index, jobs, funded lifecycle,
   assert.equal(enumName((await vault.fetchFunded(fundedAddress))!.status), 'closed');
   const [closeJob] = await t.db.select().from(chainJobs).where(eq(chainJobs.subject, `close:${fundedAddress.toBase58()}`));
   await until(async () => (await t.db.select().from(chainJobs).where(eq(chainJobs.id, closeJob!.id)))[0]?.status === 'confirmed', 20_000, 'close job confirmed');
+  assert.equal((await t.db.select().from(orderFeeSettlements)).length, 0, 'nothing due, nothing settled: close_funded went alone');
   summary = await summaryOf();
   assert.deepEqual([summary.status, summary.equity, summary.realizedPnl], ['closed', '10100', '100']);
   const stats = (await get<VaultStats>('/v1/vault')).body;

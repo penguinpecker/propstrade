@@ -1,20 +1,24 @@
 // The risk keeper's loop (leader only, ARCHITECTURE.md §4.5). Every tick: watch GMTrade's program for upgrades; for each
-// open funded account (eight at a time) read the chain, plan the next transaction (rules.ts), send it with the risk
-// authority after confirming leadership, then read and plan again until nothing is left; review payout requests; raise
-// alerts.
+// open funded account (eight at a time) read the chain and its Props fee ledger, plan the next transaction (rules.ts),
+// send it with the risk authority after confirming leadership, then read and plan again until nothing is left; review
+// payout requests; raise alerts.
 import { setTimeout as sleep } from 'node:timers/promises';
 import { PublicKey, type Connection, type Keypair, type TransactionInstruction } from '@solana/web3.js';
 import { and, count, desc, eq, gt, gte, inArray, isNotNull, isNull, max, ne } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Notification } from '@props/shared';
 import {
-  CLOSE_ALL, GMTRADE_PROGRAM_ID, PROPS_VAULT_PROGRAM_ID, enumName, marketConfigPda, ownerPda, traderProfilePda, type ConfigAccount,
+  CLOSE_ALL, GMTRADE_PROGRAM_ID, PROPS_VAULT_PROGRAM_ID, enumName, fromMicro, marketConfigPda, ownerPda, traderProfilePda, type ConfigAccount,
   type PropsVaultClient,
 } from '@props/sdk';
 import type { Db } from '../../db/client.ts';
 import type { Sealer } from '../../lib/integrity.ts';
 import { chainJobs, fundedAccounts, gmOrders, gmtradeDeploys, indexerCursors, payouts, venueFills } from '../../db/schema.ts';
 import type { KeeperStatus, MarketDataService } from '../types.ts';
+import {
+  UNKNOWN_ALERT_MS, asOnchain, chargedSince, dueInLedger, failSettlement, feeLedger, feesInMotion, inStep, planSettlement,
+  recordSettlement, unknownSince,
+} from '../chain/fees.ts';
 import { money } from '../chain/funded.ts';
 import { fundedHref } from '../chain/projector.ts';
 import { enqueue } from '../chain/jobs.ts';
@@ -44,6 +48,9 @@ const CALENDAR_WARNING_MS = 30 * 86_400_000;
 /** A props_vault transaction not indexed this long after it landed means the indexer is stuck or down. */
 const INDEXER_LAG_ALERT_MS = 5 * 60_000;
 const INDEXER_CHECK_EVERY_MS = 60_000;
+/** Props fees due this long (unsettled for whatever reason) raise an alert; so does a fee ledger out of step this long. */
+const FEES_DUE_ALERT_MS = 30 * 60_000;
+const LEDGER_LAG_ALERT_MS = 5 * 60_000;
 const FREE = PublicKey.default;
 /** A forced close must not fail on price: a long decrease sells at no less than 1, a short buys back at no more than u128::MAX. */
 const ANY_PRICE = { long: 1n, short: CLOSE_ALL };
@@ -79,6 +86,8 @@ export function createKeeper(d: KeeperDeps) {
   const clock = d.now ?? Date.now;
   const status: KeeperStatus = { leader: false, lastTickAt: null, venueUpgrade: null };
   let indexerCheckedAt = 0;
+  /** Since when each account's fee ledger has disagreed with its onchain fees due (the indexer may just be behind). */
+  const ledgerBehindSince = new Map<string, number>();
 
   // ---------- reading an account ----------
 
@@ -104,7 +113,10 @@ export function createKeeper(d: KeeperDeps) {
   async function readAccount(funded: string, market: (token: string) => Promise<MarketView>): Promise<Read | null> {
     const state = await readFundedState(d, funded);
     if (!state) return null;
-    const valuation = await valueFunded(d, funded, state);
+    // The fee ledger is read only for an account whose fees are in motion: the database load of a tick does not grow
+    // with the accounts that merely hold positions and resting orders.
+    const ledger = feesInMotion(big(state.account.orderFeesDue), state.orders) ? await feeLedger(db, funded) : null;
+    const valuation = await valueFunded(d, funded, state, ledger ? asOnchain(ledger, big(state.account.orderFeeSettlements)) : []);
     const unvalued = [...new Set(valuation.positions.filter((p) => !p.status).map((p) => p.market.symbol))];
     if (unvalued.length) {
       // The stale check sees only the price feed, which can be live while a market's state is missing.
@@ -123,6 +135,11 @@ export function createKeeper(d: KeeperDeps) {
     return {
       state,
       view: {
+        // Fee bookkeeping never stops the breach, session and upgrade steps: on an error there is no settlement this tick.
+        fees: await feeView(funded, state, ledger).catch((err: unknown) => {
+          d.alerts.send(`fee-view:${funded}`, 'warning', `Keeper could not work out the Props fee settlement of funded account ${funded}: ${(err as Error).message}; its other checks ran`);
+          return { due: big(state.account.orderFeesDue), settlements: big(state.account.orderFeeSettlements), plan: null, closing: null };
+        }),
         funded, status: enumName(state.account.status), slots,
         orders: state.orders.map((o, i) => ({
           order: orderKeys[i]!, slot: o.tracked.slot, type: enumName<OrderType>(o.tracked.orderType), sizeUsd: big(o.tracked.sizeUsd),
@@ -138,6 +155,56 @@ export function createKeeper(d: KeeperDeps) {
     };
   }
 
+  /**
+   * The account's Props fee settlement plans, from its fee ledger (chain/fees.ts): none while a settlement already sent
+   * awaits its outcome (settled here once it cannot land any more), nor while the ledger does not account for the fees
+   * due, the settlements and the charges the chain shows (the indexer has not applied an event yet, or a settlement
+   * landed that this server did not send; alerted when it lasts). Alerts on fees due too long
+   * and on orders whose outcome stays unknown.
+   */
+  async function feeView(funded: string, state: FundedState, ledger: Awaited<ReturnType<typeof feeLedger>> | null): Promise<AccountView['fees']> {
+    const due = big(state.account.orderFeesDue);
+    const settlements = big(state.account.orderFeeSettlements);
+    const none = { due, settlements, plan: null, closing: null };
+    if (due === 0n || !ledger) {
+      ledgerBehindSince.delete(funded);
+      return none; // nothing to settle (a settlement still awaiting its indexed event changes nothing here)
+    }
+    const { rows, pending } = ledger;
+    if (pending) {
+      // Failed only once it can no longer land: the confirmed height (read first) past its blockhash's last valid
+      // height, then no status (or an error). Landed: the indexer confirms it (the ledger stays behind until then).
+      if (pending.lastValidBlockHeight === null || (await rpc.getBlockHeight('confirmed')) > pending.lastValidBlockHeight) {
+        const landed = (await rpc.getSignatureStatuses([pending.signature], { searchTransactionHistory: true })).value[0];
+        if (!landed || landed.err) await failSettlement(db, pending.signature);
+      }
+      return none;
+    }
+    if (!inStep(ledger, { due, paid: big(state.account.orderFeesPaid), settlements })) {
+      const since = ledgerBehindSince.get(funded) ?? Date.now();
+      ledgerBehindSince.set(funded, since);
+      if (Date.now() - since >= LEDGER_LAG_ALERT_MS) {
+        d.alerts.send(`fee-ledger:${funded}`, 'critical', `Props fee ledger of funded account ${funded} does not match the chain for ${Math.round((Date.now() - since) / 60_000)} min (fees due ${fromMicro(due)} USDC onchain, ${fromMicro(dueInLedger(rows))} in the ledger; settlements ${settlements} onchain, ${ledger.settled.count} in the ledger; charged ${fromMicro(big(state.account.orderFeesPaid))} USDC onchain, ${fromMicro(ledger.settled.charged)} in the ledger): settlements wait; check the indexer`);
+      }
+      return none;
+    }
+    ledgerBehindSince.delete(funded);
+    const oldestDue = rows.filter((r) => r.state === 'due' && r.assessed > r.charged + r.waived && r.dueAt).map((r) => r.dueAt!.getTime()).sort()[0];
+    if (oldestDue !== undefined && Date.now() - oldestDue >= FEES_DUE_ALERT_MS) {
+      d.alerts.send(`fees-due:${funded}`, 'warning', `Funded account ${funded} has had ${fromMicro(due)} USDC of Props order fees due for ${Math.round((Date.now() - oldestDue) / 60_000)} min (its payouts and closure wait for them)`);
+    }
+    const unknown = unknownSince(rows);
+    if (unknown && Date.now() - unknown.getTime() >= UNKNOWN_ALERT_MS) {
+      d.alerts.send(`fee-outcome:${funded}`, 'warning', `Funded account ${funded}: the exchange's indexer has not told whether an order whose Props fee is due since ${unknown.toISOString()} executed; its fee is waived 24 h after it became due`);
+    }
+    const balance = state.ownerUsdc;
+    return {
+      due, settlements,
+      plan: planSettlement(rows, { balance, now: Date.now() }),
+      closing: planSettlement(rows, { balance, now: Date.now(), closing: true }),
+    };
+  }
+
   // ---------- sending ----------
 
   async function instruction(a: Action, state: FundedState, address: PublicKey, removed: Set<string>, ordersBefore: number, risk: Keypair): Promise<TransactionInstruction> {
@@ -150,6 +217,9 @@ export function createKeeper(d: KeeperDeps) {
       // a cancelled or unfilled increase leaves one per market and side: passing those too outgrew the transaction.
       case 'closeFunded': return client.closeFunded({ riskAuthority: risk.publicKey, funded: ref, positions: await client.fetchOwnerPositions(address, { open: true }) });
       case 'closeCompleted': return client.closeCompletedOrder({ funded: address, order: new PublicKey(a.order) });
+      case 'settleFees': return client.settleOrderFees({
+        riskAuthority: risk.publicKey, funded: address, charge: a.plan.charge, waive: a.plan.waive, expectedDue: a.expectedDue, expectedSettlements: a.expectedSettlements,
+      });
       case 'cancel': return client.cancelOrder({ authority: risk.publicKey, funded: ref, order: new PublicKey(a.order) });
       case 'sync': {
         // Orders closed earlier in the same transaction are no longer tracked when sync runs.
@@ -183,13 +253,29 @@ export function createKeeper(d: KeeperDeps) {
       if (a.type === 'close') ordersBefore++;
     }
     if (!instructions.length) throw new Error(`${step.actions[0]!.type} does not fit in a transaction`);
-    const signature = await sendTransaction(rpc, {
-      instructions, signer: risk, gate,
-      beforeSend: async () => {
-        if (!(await held())) throw new LeadershipLost('leadership lost before sending');
-      },
-    });
-    return { signature, sent };
+    const settlement = sent.find((a) => a.type === 'settleFees');
+    let recorded: string | undefined;
+    try {
+      const signature = await sendTransaction(rpc, {
+        instructions, signer: risk, gate,
+        beforeSend: async (signature, lastValidBlockHeight) => {
+          if (!(await held())) throw new LeadershipLost('leadership lost before sending');
+          // Recorded with its signature before it goes out: the indexed event applies it to the ledger, once.
+          if (settlement) {
+            await recordSettlement(db, {
+              signature, funded, plan: settlement.plan, expectedDue: settlement.expectedDue, expectedSettlements: settlement.expectedSettlements, sentBy: 'keeper',
+              lastValidBlockHeight,
+            });
+            recorded = signature;
+          }
+        },
+      });
+      return { signature, sent };
+    } catch (err) {
+      // Refused onchain or expired unlanded: it changed nothing, and the next plan starts from a fresh read.
+      if (recorded && (err instanceof Rejected || err instanceof Expired)) await failSettlement(db, recorded);
+      throw err;
+    }
   }
 
   /**
@@ -244,6 +330,9 @@ export function createKeeper(d: KeeperDeps) {
     }
     if (step.kind === 'closure') {
       d.alerts.send(`closed:${funded}`, 'info', `Breached funded account ${funded} closed: its USDC and SOL are back in the vault and its principal is released (${signature})`);
+    }
+    for (const a of sent) {
+      if (a.type === 'settleFees') d.log.info({ funded, signature, charge: fromMicro(a.plan.charge), waive: fromMicro(a.plan.waive) }, 'keeper: Props fees settled');
     }
     if (step.kind === 'session') {
       for (const a of sent) {
@@ -342,6 +431,7 @@ export function createKeeper(d: KeeperDeps) {
     const profile = await client.fetch('traderProfile', traderProfilePda(new PublicKey(trader)));
     const [lastPaid] = await db.select({ at: max(payouts.requestedAt) }).from(payouts)
       .where(and(eq(payouts.fundedAccount, p.fundedAccount), eq(payouts.status, 'paid')));
+    const feesCharged = await chargedSince(db, p.fundedAccount, lastPaid?.at ?? null);
     const fills = (await db.select().from(venueFills)
       .where(and(eq(venueFills.fundedAccount, p.fundedAccount), lastPaid?.at ? gt(venueFills.ts, lastPaid.at) : undefined))).map(fillRow);
     const ours = exposuresOf(fills);
@@ -352,7 +442,8 @@ export function createKeeper(d: KeeperDeps) {
       ))).map(fillRow)
       : [];
     const r = reviewPayout({
-      profit: toMicro6(p.profit), requestedAt: p.requestedAt.getTime(), flat, verified: !!profile?.identityHash.some((b) => b !== 0),
+      profit: toMicro6(p.profit), feesDue: big(account.orderFeesDue), feesCharged, requestedAt: p.requestedAt.getTime(), flat,
+      verified: !!profile?.identityHash.some((b) => b !== 0),
       fills, links: linkedPositions(ours, exposuresOf(others), clock()), now: clock(),
     });
     if (r.decision === 'approve') {

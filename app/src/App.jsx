@@ -10,7 +10,8 @@ import { PayoutsPage, PayoutReview, PayoutReceipt, VaultPage, SettingsPage } fro
 import { SearchPage } from './Search.jsx';
 import { ReferralsPage, SignupReferral, useReferralSignIn } from './Referrals.jsx';
 import { env } from './lib/env';
-import { applyStreamEvent, keys, useAccounts, useConfig, useMarkets, useNotifications, useReadNotifications } from './lib/queries';
+import { applyStreamEvent, keys, useAccounts, useConfig, useMarkets, useNotifications, useOrderFee, useReadNotifications } from './lib/queries';
+import { feeRate, feeRateLabel } from './lib/pnl';
 import { GOOGLE_ONLY } from './lib/privy';
 import { useSession } from './lib/session';
 import { useStream } from './lib/stream';
@@ -196,7 +197,9 @@ function RulesDialog({ onClose }) {
   // While a tier is being reviewed for purchase, its rules are the ones that matter, not the open account's.
   const account = ONBOARDING.includes(path) ? null : stageAccount;
   const rules = account?.rules ?? (tier && tierRules(tier));
-  return <Dialog title={account ? `Rules for ${account.label}` : tier ? `Rules for the ${tier.name} evaluation` : 'Account rules'} onClose={onClose}>{rules ? <><RuleList rules={rules} /><DataRow label="Equity floor" value={usd(rules.floorUsd)} /><DataRow label="Maximum total exposure" value={usd(rules.maxExposureUsd, 0)} />{rules.version != null && <DataRow label="Terms version" value={`v${rules.version}${rules.termsHash ? ` · ${rules.termsHash.slice(0, 8)}` : ''}`} />}<Notice tone="purple">Each position is backed only by its own collateral, so the exchange can liquidate one position while your account equity is still above its floor. The floor includes open P&L and trading costs across all positions.</Notice></> : config.isError ? <Unavailable title="Rules are unavailable" error={config.error} retry={config.refetch} /> : <Pending>Loading the program rules…</Pending>}{path === '/program' ? <Button className="full-width" onClick={onClose}>Back to program details</Button> : <Button className="full-width" onClick={() => navigate('/program')}>View program details</Button>}</Dialog>;
+  const orderFee = useOrderFee();
+  const propsFee = feeRateLabel(feeRate(orderFee.data)); // the same rate on every stage; simulated on practice and evaluation
+  return <Dialog title={account ? `Rules for ${account.label}` : tier ? `Rules for the ${tier.name} evaluation` : 'Account rules'} onClose={onClose}>{rules ? <><RuleList rules={rules} /><DataRow label="Equity floor" value={usd(rules.floorUsd)} /><DataRow label="Maximum total exposure" value={usd(rules.maxExposureUsd, 0)} />{propsFee && <DataRow label="Props fee per executed order" value={propsFee} />}{rules.version != null && <DataRow label="Terms version" value={`v${rules.version}${rules.termsHash ? ` · ${rules.termsHash.slice(0, 8)}` : ''}`} />}<Notice tone="purple">Each position is backed only by its own collateral, so the exchange can liquidate one position while your account equity is still above its floor. The floor includes open P&L and trading costs across all positions.</Notice></> : config.isError ? <Unavailable title="Rules are unavailable" error={config.error} retry={config.refetch} /> : <Pending>Loading the program rules…</Pending>}{path === '/program' ? <Button className="full-width" onClick={onClose}>Back to program details</Button> : <Button className="full-width" onClick={() => navigate('/program')}>View program details</Button>}</Dialog>;
 }
 
 function NotificationsDialog({ onClose }) {

@@ -1,5 +1,6 @@
-// Order-ticket arithmetic: what a take-profit or stop-loss would make, and what carrying the position costs. Pure, so
-// the ticket, the chart labels and the tests read the same numbers.
+// Order-ticket arithmetic: what a take-profit or stop-loss would make, what carrying the position costs and what Props
+// charges per order. Pure, so the ticket, the chart labels and the tests read the same numbers.
+import type { OrderFeeRate } from '@props/sdk';
 import type { Market } from '@props/shared';
 
 export interface ExpectedPnlInput {
@@ -39,4 +40,36 @@ export function sideRates(market: Pick<Market, 'fundingRateHourlyLong' | 'fundin
 export function hourlyCostUsd(market: Parameters<typeof sideRates>[0], side: 'Long' | 'Short', sizeUsd: number): number | null {
   const { funding, borrow } = sideRates(market, side);
   return funding == null || borrow == null ? null : sizeUsd * (Math.max(0, funding) + borrow) / 100;
+}
+
+/** Props.trade's fee per order as AppConfig gives it; a server that predates it gives none, which is no fee. */
+export interface FeeConfig { orderFeeUsd?: string; orderFeeBps?: number }
+
+/** The rate as the program and the SDK read it: USDC base units per order plus bps of the order's size. */
+export const feeRate = (config: FeeConfig | null | undefined): OrderFeeRate => ({ feeUsdc: BigInt(Math.round((Number(config?.orderFeeUsd) || 0) * 1e6)), feeBps: config?.orderFeeBps ?? 0 });
+
+/**
+ * The Props fee of an order of `sizeUsd`, in USD: the program's formula (the flat part plus the bps of the size in
+ * micro-USD, rounded down), which @props/sdk orderFee computes for the orders the app signs. Restated here so the
+ * ticket's code stays out of the SDK's chunk; pnl.test.ts holds it to orderFee. A close, take profit or stop loss is
+ * assessed on at most the account's exposure cap: the fee on the cap is its maximum.
+ */
+export const propsFeeUsd = (rate: OrderFeeRate, sizeUsd: number) =>
+  sizeUsd > 0 ? Number(rate.feeUsdc + BigInt(sizeUsd.toFixed(6).replace('.', '')) * BigInt(rate.feeBps) / 10_000n) / 1e6 : 0;
+
+const dollars = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 6 });
+/** The rate as the ticket and the rules name it: "$0.50 + 0.02%", "$0.50" or "0.02%"; null while it is off. */
+export function feeRateLabel(rate: OrderFeeRate): string | null {
+  const parts = [rate.feeUsdc > 0n ? dollars.format(Number(rate.feeUsdc) / 1e6) : '', rate.feeBps > 0 ? `${rate.feeBps / 100}%` : ''].filter(Boolean);
+  return parts.length ? parts.join(' + ') : null;
+}
+
+/**
+ * The largest order `availableMarginUsd` opens at `leverage` with the order's own Props fee left beside its margin, as
+ * the program requires of a funded order (collateral + fee + held fees ≤ the account's USDC; availableMargin is already
+ * net of the held fees): size / leverage + flat + size × bps ≤ margin. Demo accounts follow the same rule.
+ */
+export function buyingPower(availableMarginUsd: number, leverage: number, rate: OrderFeeRate): number {
+  const flat = Number(rate.feeUsdc) / 1e6, share = rate.feeBps / 10_000;
+  return Math.max(0, (availableMarginUsd - flat) * leverage / (1 + share * leverage));
 }

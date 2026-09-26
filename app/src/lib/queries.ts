@@ -8,6 +8,7 @@ import { readCandleSnapshot, writeCandleSnapshot } from './candles';
 
 export const keys = {
   config: ['config'] as const,
+  orderFee: ['order-fee'] as const,
   me: ['me'] as const,
   markets: ['markets'] as const,
   market: (symbol: string) => ['market', symbol] as const,
@@ -56,6 +57,8 @@ export function createQueryClient() {
 
 // ---------- reads ----------
 export const useConfig = () => useQuery({ queryKey: keys.config, queryFn: api.config, staleTime: 60_000 });
+/** Props' fee rate for every stage: the ticket, buying power, the rules and the max_fee a funded order signs. */
+export const useOrderFee = () => useQuery({ queryKey: keys.orderFee, queryFn: api.orderFee, staleTime: 60_000 });
 
 /** The session's wallet profile; `null` when there is no valid session. */
 export const meOptions = queryOptions({

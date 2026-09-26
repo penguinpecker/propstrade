@@ -77,7 +77,7 @@ async function evaluation(u: User) {
 function recomputeRoot(list: Fill[]): string {
   const h = (b: Buffer | string) => createHash('sha256').update(b).digest();
   let level = [...list].sort((a, b) => a.ts - b.ts || (a.id < b.id ? -1 : 1)).map((f) => h([
-    f.id, f.symbol, f.side, f.isIncrease ? 'increase' : 'decrease', f.sizeUsd, f.price, f.feeUsd, f.priceImpactUsd, f.fundingUsd,
+    f.id, f.symbol, f.side, f.isIncrease ? 'increase' : 'decrease', f.sizeUsd, f.price, f.feeUsd, f.platformFeeUsd, f.priceImpactUsd, f.fundingUsd,
     f.borrowUsd, f.realizedPnl ?? '', String(f.ts),
   ].join('|')));
   if (!level.length) return '0'.repeat(64);
@@ -784,13 +784,13 @@ describe('trigger rule', () => {
 
 describe('trades root', () => {
   const fill = (id: string, ts: number, extra: Partial<Fill> = {}): Fill => ({
-    id, symbol: 'SOL', side: 'Long', isIncrease: true, sizeUsd: '10000', price: '118.53831', feeUsd: '1', priceImpactUsd: '-0.012345',
+    id, symbol: 'SOL', side: 'Long', isIncrease: true, sizeUsd: '10000', price: '118.53831', feeUsd: '1', platformFeeUsd: '0.52', priceImpactUsd: '-0.012345',
     fundingUsd: '0', borrowUsd: '0', realizedPnl: '-1.000123', ts, venue: 'simulated', ...extra,
   });
 
   it('is the documented SHA-256 Merkle root, independent of input order', async () => {
     const list = [fill('b', 2), fill('a', 2, { isIncrease: false, realizedPnl: null }), fill('c', 1), fill('d', 3), fill('e', 3)];
-    const leaf = createHash('sha256').update('c|SOL|Long|increase|10000|118.53831|1|-0.012345|0|0|-1.000123|1').digest('hex');
+    const leaf = createHash('sha256').update('c|SOL|Long|increase|10000|118.53831|1|0.52|-0.012345|0|0|-1.000123|1').digest('hex');
     expect(await tradesRoot([fill('c', 1)])).toBe(leaf);
     expect(await tradesRoot(list)).toBe(recomputeRoot(list));
     expect(await tradesRoot([...list].reverse())).toBe(await tradesRoot(list));

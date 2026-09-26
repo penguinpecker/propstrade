@@ -95,22 +95,39 @@ export interface CandlesResponse { symbol: string; interval: CandleInterval; can
 export interface MarketTrade { id: string; symbol: string; side: 'Long' | 'Short'; isIncrease: boolean; price: Decimal; sizeUsd: Decimal; ts: Millis; signature?: string }
 
 /**
- * The order ticket's cost preview. Every figure is GMTrade's: Props.trade charges nothing per order (its only charges
- * are the evaluation fee and the profit share; `platformFeeUsd` stays '0' until AppConfig.orderFeeBps exists). Fees and
- * impact are priced on the pool without the account's own position in it, at the live price (at `limitPrice` for a
- * limit order); the resulting position is then valued as the positions table will value it (in the pool).
+ * The order ticket's cost preview for an order that opens or adds to a position. The exchange's figures (open and
+ * close fee, impact, rates) are priced on the pool without the account's own position in it, at the live price (at
+ * `limitPrice` for a limit order); the resulting position is then valued as the positions table will value it (in the
+ * pool). Props.trade's own fee per order (`platformFeeUsd`, `platformCloseFeeUsd`) is the AppConfig rate on the order's
+ * size, computed with @props/sdk `orderFee` exactly as the program and the simulator compute it; both are '0' while the
+ * rate is 0.
  */
 export interface PriceImpactQuote {
   symbol: string; side: 'Long' | 'Short'; sizeUsd: Decimal; priceImpactPct: number; openFeeUsd: Decimal; executionPrice: Decimal;
   orderValueUsd: Decimal;               // the order's notional (= sizeUsd)
   collateralUsd: Decimal | null;        // the margin the quote was priced at; null = 1x (the request gave none)
-  closeFeeUsd: Decimal;                 // GMTrade's fee to close the resulting position at the same price
-  roundTripFeeUsd: Decimal;             // openFeeUsd + closeFeeUsd
+  closeFeeUsd: Decimal;                 // the exchange's fee to close the resulting position at the same price
+  /** Every per-order fee of the round trip: openFeeUsd + closeFeeUsd + platformFeeUsd + platformCloseFeeUsd. */
+  roundTripFeeUsd: Decimal;
   fundingRateHourlyPct: number | null;  // the requested side's, as Market gives it (positive = this side pays)
   borrowRateHourlyPct: number | null;
   hourlyCostUsd: Decimal | null;        // (borrow + funding when paid) × size, per hour: received funding is never credited
   liquidationPrice: Decimal | null;     // of the resulting position at collateralUsd; null when the model cannot value it
-  platformFeeUsd: Decimal;              // Props.trade's fee per order: '0' today
+  /**
+   * Props.trade's fee on this order: flat + bps × size at the current rate (AppConfig.orderFeeUsd / orderFeeBps). Charged
+   * only if the order executes: on practice and evaluation accounts it is simulated (deducted from the virtual balance at
+   * the fill); on a funded account the program assesses exactly this amount when the order is placed.
+   */
+  platformFeeUsd: Decimal;
+  /**
+   * `platformFeeUsd` in USDC base units (a u64 as a decimal integer string): the `maxFee` the funded open passes to
+   * @props/sdk `openPosition`. The program refuses the order (OrderFeeChanged) if the rate gives more when it lands: then
+   * quote again and resend. A close, take profit or stop loss passes its maximum instead, the rate on the account's
+   * exposure cap: `orderFee(rate, CLOSE_ALL, usdToGm(rules.maxExposureUsd))` (the program assesses decreases on that cap).
+   */
+  maxFeeMicro: string;
+  /** Props.trade's fee to close the resulting position (this order's size) at the same rate, charged when a close executes. */
+  platformCloseFeeUsd: Decimal;
   maxSizeUsd: Decimal | null;           // the requested side's Market.maxSizeLong / maxSizeShort, as of the quote
   maxLeverage: number;                  // the requested side's Market.maxLeverageLong / maxLeverageShort
 }
@@ -129,10 +146,24 @@ export interface AppConfig {
   traderShareBps: number; minPayoutUsdc: Decimal;
   paused: { newEvaluations: boolean; trading: boolean; payouts: boolean };
   feeVault: Pubkey; capitalVault: Pubkey;
-  /** A Props fee per order in bps. Absent today: nothing charges or shows one; when it exists the quote's
-   *  platformFeeUsd and the ticket's Props row follow it (it is not applied by any engine until it is also onchain). */
-  orderFeeBps?: number;
+  /**
+   * Props.trade's fee per order: `orderFeeUsd` flat (USDC, '0' when off) plus `orderFeeBps` of the order's size, both 0
+   * until the admin sets them (at most $2 and 10 bps). The same rate on every stage and every account, applied to orders
+   * placed or updated from then on: @props/sdk `orderFee` computes an order's fee from it (a close, take profit or stop
+   * loss counts at most the account's exposure cap). `orderFeeSource`: 'program' = the onchain Config (once the program is
+   * live, practice and evaluation read it too), 'server' = the server's settings (ORDER_FEE_USDC / ORDER_FEE_BPS) before
+   * then, which only /v1/order-fee (`OrderFeeInfo`) can serve. Practice and evaluation fees are simulated: they lower the
+   * virtual balance, no USDC moves.
+   */
+  orderFeeUsd: Decimal;
+  orderFeeBps: number;
+  orderFeeSource: 'program' | 'server';
 }
+/**
+ * GET /v1/order-fee: the rate alone, answered on every stage before the program is live too (then from the server's
+ * settings, `orderFeeSource` 'server'), while /v1/config answers 503 `not_initialized` until the program is live.
+ */
+export type OrderFeeInfo = Pick<AppConfig, 'orderFeeUsd' | 'orderFeeBps' | 'orderFeeSource'>;
 
 // ---------- auth / me ----------
 /**
@@ -194,7 +225,17 @@ export interface AccountSummary {
   shortId: string;             // display id, e.g. "PT-9Kq3…"
   rules: AccountRules;
   equity: Decimal; realizedPnl: Decimal; unrealizedPnl: Decimal;
-  allowanceRemaining: Decimal; availableMargin: Decimal; openNotional: Decimal;
+  allowanceRemaining: Decimal;
+  /** Margin a new order may commit, its own Props fee included: net of `platformFees.heldUsd`. */
+  availableMargin: Decimal;
+  openNotional: Decimal;
+  /**
+   * Props.trade order fees (on practice and evaluation accounts simulated). `dueUsd`: of orders that left the book, not
+   * settled yet (funded only; payouts and closure wait for it to be 0). `paidUsd`: charged so far (funded: USDC moved to
+   * the fee vault; demo: deducted from the virtual balance at the fills). `heldUsd`: kept out of `availableMargin`: the
+   * fees due plus the fees of pending orders that add exposure (charged when they execute).
+   */
+  platformFees: { dueUsd: Decimal; paidUsd: Decimal; heldUsd: Decimal };
   targetProgressPct: number | null;
   eligiblePayout: Decimal | null;          // funded: trader share of realized profit now
   createdAt: Millis; activatedAt: Millis | null; resolvedAt: Millis | null;
@@ -215,6 +256,9 @@ export interface Position {
   /** pendingBorrowUsd + pendingFundingUsd + closeFeeUsd: what the next fill of this position settles. */
   pendingFeesUsd: Decimal;
   pendingBorrowUsd: Decimal; pendingFundingUsd: Decimal; closeFeeUsd: Decimal;
+  /** Props.trade's fee to close the whole position at the current rate, charged when a close executes (not in
+   *  pendingFeesUsd or unrealizedPnl: like every Props fee it counts once its order executes). */
+  platformFeeUsd: Decimal;
   /** A market order closing the whole position is pending: the row is on its way out. */
   closing: boolean;
   takeProfit: { price: Decimal; orderId: string; status: OrderStatus } | null;
@@ -226,20 +270,26 @@ export interface Order {
   id: string; symbol: string; side: 'Long' | 'Short'; kind: OrderKind; isIncrease: boolean;
   sizeUsd: Decimal; collateralUsd: Decimal | null; triggerPrice: Decimal | null; acceptablePrice: Decimal | null;
   status: OrderStatus; statusDetail?: string; createdAt: Millis; updatedAt: Millis;
+  /** Props.trade's fee assessed on the order, charged only if it executes: an increase exactly this; a close, take
+   *  profit or stop loss at most this (the rate on the account's exposure cap), charged on the size it closes. */
+  platformFeeUsd: Decimal;
   signature?: string; gmOrder?: Pubkey;
 }
 export interface Fill {
   id: string; symbol: string; side: 'Long' | 'Short'; isIncrease: boolean;
   sizeUsd: Decimal; price: Decimal; feeUsd: Decimal; priceImpactUsd: Decimal; fundingUsd: Decimal; borrowUsd: Decimal;
+  /** Props.trade's fee on this fill (simulated): in realizedPnl like the exchange's fee; 0 for a liquidation. */
+  platformFeeUsd: Decimal;
   realizedPnl: Decimal | null;  // on decreases; simulated fills also give an increase's costs (≤ 0), so realized P&L = Σ fills
   ts: Millis; venue: 'simulated' | 'exchange'; signature?: string;
 }
 export interface ClosedTrade {
   id: string; symbol: string; side: 'Long' | 'Short'; openedAt: Millis; closedAt: Millis;
   sizeUsd: Decimal; entryPrice: Decimal; exitPrice: Decimal;
-  /** Every cost of the round trip: feesUsd = orderFeesUsd + fundingUsd + borrowUsd (order fees include a liquidation
-   *  fee). Price impact is inside the prices and the P&L, shown for the record. netPnl is after all of them. */
-  feesUsd: Decimal; orderFeesUsd: Decimal; fundingUsd: Decimal; borrowUsd: Decimal; priceImpactUsd: Decimal;
+  /** Every cost of the round trip: feesUsd = orderFeesUsd + platformFeeUsd + fundingUsd + borrowUsd (the exchange's
+   *  order fees include a liquidation fee; platformFeeUsd is Props.trade's fee on the trip's orders that executed).
+   *  Price impact is inside the prices and the P&L, shown for the record. netPnl is after all of them. */
+  feesUsd: Decimal; orderFeesUsd: Decimal; platformFeeUsd: Decimal; fundingUsd: Decimal; borrowUsd: Decimal; priceImpactUsd: Decimal;
   netPnl: Decimal;
   venue: 'simulated' | 'exchange'; signatures: string[];
 }
@@ -253,7 +303,8 @@ export interface PerformancePoint { ts: Millis; equity: Decimal; netPnl: Decimal
 export interface Performance {
   period: '1W' | '1M' | 'All';
   series: PerformancePoint[];
-  netPnl: Decimal; grossRealized: Decimal; feesUsd: Decimal; fundingBorrowUsd: Decimal; unrealizedPnl: Decimal;
+  /** feesUsd: the exchange's order fees; platformFeesUsd: Props.trade's fees on the period's fills. */
+  netPnl: Decimal; grossRealized: Decimal; feesUsd: Decimal; platformFeesUsd: Decimal; fundingBorrowUsd: Decimal; unrealizedPnl: Decimal;
   trades: number; winRatePct: number | null; profitFactor: number | null; averageTradeUsd: Decimal | null;
   byMarket: { symbol: string; netPnl: Decimal; sharePct: number }[];
 }
@@ -339,7 +390,9 @@ export interface VaultStats {
   programId: Pubkey; capitalVault: Pubkey; feeVault: Pubkey; solTreasury: Pubkey;
   capitalUsdc: Decimal; allocatedPrincipal: Decimal; unallocated: Decimal; feeVaultUsdc: Decimal;
   pendingPayouts: Decimal; fundedAccounts: number; solTreasurySol: Decimal;
-  totals: { feesCollected: Decimal; payoutsPaid: Decimal; profitToVault: Decimal };
+  /** feesCollected: evaluation fees (Config.fees_collected); orderFeesCharged: Props order fees charged to funded
+   *  accounts (their settlements); both land in the fee vault. */
+  totals: { feesCollected: Decimal; orderFeesCharged: Decimal; payoutsPaid: Decimal; profitToVault: Decimal };
   series: { ts: Millis; capitalUsdc: Decimal }[];
   ledger: VaultLedgerItem[];
   freshness: DataFreshness; updatedAt: Millis;

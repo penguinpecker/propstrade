@@ -1,6 +1,6 @@
 import type {
   AccountDetail, AccountStatus, AccountSummary, ActivityItem, ApiError, AppConfig, CandleInterval, CandlesResponse, ClosedTrade, Decimal, Fill,
-  KycStartRequest, Market, MarketTrade, Me, Millis, NonceResponse, Notification, Order, Payout, PayoutEligibility, PayoutStatus, Performance,
+  KycStartRequest, Market, MarketTrade, Me, Millis, NonceResponse, Notification, Order, OrderFeeInfo, Payout, PayoutEligibility, PayoutStatus, Performance,
   Position, PriceImpactQuote, Pubkey, ReferralCodeCheck, ReferralProgram, ReferralSummary, SimCloseRequest, SimOrderRequest, SimOrderResponse,
   SimProtectionRequest, Stage, VaultStats, VerifyRequest, VerifyResult,
 } from '@props/shared';
@@ -70,6 +70,8 @@ const query = (params: Record<string, string | number | undefined>) => {
 
 export const api = {
   config: () => request<AppConfig>('GET', '/v1/config'),
+  /** Props' fee rate, answered on every stage (before the program is live too: then the server's demo rate). */
+  orderFee: () => request<OrderFeeInfo>('GET', '/v1/order-fee'),
 
   markets: () => request<Market[]>('GET', '/v1/markets'),
   market: (symbol: string) => request<Market>('GET', `/v1/markets/${id(symbol)}`),

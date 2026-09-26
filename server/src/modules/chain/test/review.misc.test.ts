@@ -126,7 +126,7 @@ test('vault: total capital right after an activation matches the chain (balance 
     configReads++;
     return client.decode('config', configData());
   };
-  const reader = createProgramReader({ db: t.db, rpc: rpc as never, client, programId: PROPS_VAULT_PROGRAM_ID, cluster: 'localnet' });
+  const reader = createProgramReader({ db: t.db, rpc: rpc as never, client, programId: PROPS_VAULT_PROGRAM_ID, cluster: 'localnet', serverRate: { feeUsdc: 0n, feeBps: 0, source: 'server' } });
   await reader.state(); // the /v1/config cache is warm, as it is under traffic
 
   assert.equal((await reader.vault()).capitalUsdc, '1000');
@@ -150,7 +150,7 @@ test('config cache: only an indexed settings change drops it, and only a tier ch
     reads.tiers++;
     return [];
   };
-  const reader = createProgramReader({ db: t.db, rpc: {} as never, client, programId: PROPS_VAULT_PROGRAM_ID, cluster: 'localnet' });
+  const reader = createProgramReader({ db: t.db, rpc: {} as never, client, programId: PROPS_VAULT_PROGRAM_ID, cluster: 'localnet', serverRate: { feeUsdc: 0n, feeBps: 0, source: 'server' } });
   const event = <N extends VaultEvent['name']>(name: N, data: object) => ({ name, data }) as VaultEvent;
   await reader.state();
   reader.changed([event('orderRequested', {}), event('synced', {}), event('fundedActivated', {}), event('ownerToppedUp', {})]);

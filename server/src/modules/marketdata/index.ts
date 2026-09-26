@@ -10,9 +10,10 @@ import {
   priceString, priceTick, sessionOf, usdString, type FeedState, type KeeperMarket, type NativeInterval, type Pair, type PropsLimits,
 } from '@props/gmtrade';
 import { model } from '@props/gmsol-wasm';
-import { toUnitPrice } from '@props/sdk';
+import { fromMicro, orderFee, toUnitPrice } from '@props/sdk';
 import { z } from 'zod';
 import { parse } from '../../errors.ts';
+import { orderFeeRateOf } from '../../lib/order-fee.ts';
 import { adminAuth } from '../../routes/admin.ts';
 import { plainRefusal, withPosition } from '../sim/model.ts';
 import type { MarketDataService, MarketState, ModuleContext } from '../types.ts';
@@ -29,6 +30,7 @@ const DEFAULT_LIMITS: Record<MarketCategory, { maxLeverage: number; closedMaxLev
   Stocks: { maxLeverage: 8, closedMaxLeverage: 8 },
 };
 const NOT_ENABLED_YET = 'Not yet enabled for funded trading';
+const MICRO_TO_USD = 10n ** 14n; // USDC base units → GMTrade USD (1e20)
 const NOT_ALLOWLISTED = 'Not available for funded trading';
 
 const PRICE_FLUSH_MS = 100; // at most 10 'price' events per second, each carrying only the symbols whose price moved
@@ -760,7 +762,8 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
    * on the pool as it is (the account's own position is not in it, as at a fresh open), then the resulting position
    * valued as the positions table will value it once filled — in the pool (sim/model.ts withPosition, pure pools),
    * which gives the close fee and the liquidation price from the same positionStatus the book runs. Two model calls,
-   * both in-process: cheap enough for a debounced quote on every keystroke.
+   * both in-process: cheap enough for a debounced quote on every keystroke. Props.trade's fee is the current rate on the
+   * order's size (@props/sdk orderFee, as the program assesses a funded open and the simulator a practice one).
    */
   async function quote(symbol: string, side: 'Long' | 'Short', sizeUsd: string, collateralUsd?: string, limitPrice?: string): Promise<PriceImpactQuote> {
     const decimal = (v: string, name: string, decimals: number) => {
@@ -811,6 +814,8 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
       ctx.log.warn({ err, symbol: row.symbol }, 'marketdata: the quote could not value the resulting position');
     }
     const closeFee = status ? status.closeOrderFeeValue : (size * decodeMarket(input.market).config.order_fee_factor_for_negative_impact) / USD_UNIT;
+    // The resulting position is this order's size, so its close costs the same Props fee as its open.
+    const platformFee = orderFee(await orderFeeRateOf(ctx), size);
     const [fundingRate, borrowRate] = side === 'Long' ? [row.fundingRateHourlyLong, row.borrowRateHourlyLong] : [row.fundingRateHourlyShort, row.borrowRateHourlyShort];
     // Received funding (a negative rate) is never credited here (claimables are not counted), so it costs nothing.
     const hourlyPct = fundingRate === null || borrowRate === null ? null : Math.max(fundingRate, 0) + borrowRate;
@@ -818,12 +823,13 @@ export async function createMarketData(ctx: ModuleContext, opts: MarketDataOptio
       symbol: row.symbol, side, sizeUsd: formatFixed(size, USD_DECIMALS, 6), orderValueUsd: formatFixed(size, USD_DECIMALS, 6),
       collateralUsd: collateral === null ? null : formatFixed(collateral, 6, 6),
       priceImpactPct: (Number(result.priceImpactValue) / Number(size)) * 100,
-      openFeeUsd: usdString(result.fees.orderFeeValue), closeFeeUsd: usdString(closeFee), roundTripFeeUsd: usdString(result.fees.orderFeeValue + closeFee),
+      openFeeUsd: usdString(result.fees.orderFeeValue), closeFeeUsd: usdString(closeFee),
+      roundTripFeeUsd: usdString(result.fees.orderFeeValue + closeFee + 2n * platformFee * MICRO_TO_USD),
       executionPrice: priceString(result.executionPrice, meta.decimals, meta.precision),
       fundingRateHourlyPct: fundingRate, borrowRateHourlyPct: borrowRate,
       hourlyCostUsd: hourlyPct === null ? null : usdString((size * BigInt(Math.round(hourlyPct * 1e12))) / (100n * 10n ** 12n)),
       liquidationPrice: status?.liquidationPrice == null ? null : priceString(status.liquidationPrice, meta.decimals, meta.precision),
-      platformFeeUsd: '0', // Props.trade charges no fee per order (AppConfig.orderFeeBps, when it exists, goes here)
+      platformFeeUsd: fromMicro(platformFee), maxFeeMicro: platformFee.toString(), platformCloseFeeUsd: fromMicro(platformFee),
       maxSizeUsd: side === 'Long' ? row.maxSizeLong : row.maxSizeShort,
       maxLeverage: side === 'Long' ? row.maxLeverageLong : row.maxLeverageShort,
     };

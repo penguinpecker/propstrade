@@ -17,7 +17,7 @@ import type { ProgramReader } from '../program.ts';
 import type { Notice } from '../projector.ts';
 import type { ChainReader } from '../reader.ts';
 import { createVenue, eventIndexOf, fillRow, orderFeeUsd, readFundedState, roundTrip, valueFunded, type GmIndexer, type Valuation } from '../venue.ts';
-import { encodeAccount, freshDb, offlineClient, silentLog } from './support.ts';
+import { encodeAccount, freshDb, indexedOrders, offlineClient, silentLog } from './support.ts';
 
 const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const SOL_MARKET = '6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc';
@@ -62,7 +62,7 @@ function venueWith(gm: GmIndexer, notices: Notice[] = []) {
 test('a GMTrade round trip nets exactly what the owner\'s USDC did', () => {
   assert.equal(eventIndexOf('000449474290-DnUCQ-000059-000003-000006'), 30_006);
   assert.throws(() => eventIndexOf('garbage'), /unexpected GMTrade event id/);
-  const fills = trip.map((e) => ({ ...fillRow(e, 'F', sol, e.signature), fundedAccount: 'F' }));
+  const fills = trip.map((e) => ({ ...fillRow(e, 'F', sol, e.signature), fundedAccount: 'F', platformFeeUsd: '0' }));
   assert.deepEqual(fills.map((f) => [f.isIncrease, f.sizeUsd, f.sizeAfterUsd]), [
     [true, '42000', '42000'], [true, '10000', '52000'], [true, '9030', '61030'], [false, '28529.588013', '32500.411987'],
     [true, '15000', '47500.411987'], [false, '47500.411987', '0'],
@@ -97,6 +97,7 @@ test('a GMTrade round trip nets exactly what the owner\'s USDC did', () => {
 
 test('fills sync: resumes where GMTrade\'s indexer stops, writes the round trip once', async () => {
   const { funded, owner, trader } = await fundedAccount();
+  await indexedOrders(t.db, funded, trip.map((e) => ({ order: e.order, isIncrease: e.isIncrease })));
   const signatures = new Map(trip.map((e) => [e.id, e.signature]));
   signatures.delete(trip[3]!.id); // the indexer has not linked the 4th fill to its transaction yet
   const asked: (string | undefined)[] = [];
@@ -240,7 +241,7 @@ test('funded valuation: equity = size − allowance + value, with the GMTrade mo
   const position = decodeGmPosition(Buffer.from(open.position.account, 'base64'));
   const v: Valuation = {
     funded, at: Date.now(), status: 'active', ownerUsdc: 0n, pendingCollateral: 0n, pendingOrders: 0, flat: false, freshness: 'live',
-    positions: [{ address: key(), market: sol, isLong: true, position, status, mark: up.prices.index.min }],
+    fees: { owed: 0n, due: 0n, paid: 0n, held: 0n }, positions: [{ address: key(), market: sol, isLong: true, position, status, mark: up.prices.index.min }],
   };
 
   const principal = 500_000_000n;
@@ -252,7 +253,8 @@ test('funded valuation: equity = size − allowance + value, with the GMTrade mo
   assert.ok(cash.realized < 0n && cash.realized > -5n * USD);
   assert.ok(status.pendingPnl > 90n * USD && status.pendingPnl < 110n * USD, 'a 1% move on $10k');
 
-  const provider = createFundedProvider({ db: t.db, venue: venueWith({ trades: async () => [], signatures: async () => new Map(), removals: async () => [] }), program: {} as ProgramReader });
+  const program = { orderFeeRate: async () => ({ feeUsdc: 500_000n, feeBps: 2, source: 'program' }) } as unknown as ProgramReader;
+  const provider = createFundedProvider({ db: t.db, venue: venueWith({ trades: async () => [], signatures: async () => new Map(), removals: async () => [] }), program });
   const [row] = await t.db.select().from(accounts).innerJoin(fundedAccounts, eq(fundedAccounts.address, accounts.id)).where(eq(accounts.id, funded));
   const s = await provider.summaryOf(row!.accounts, row!.funded_accounts, v);
   const usd = (x: bigint) => Number(x) / 1e20;
@@ -278,6 +280,7 @@ test('funded valuation: equity = size − allowance + value, with the GMTrade mo
       gmUsd(status.pendingBorrowingFeeValue + status.pendingFundingFeeValue + status.closeOrderFeeValue), false],
   );
   assert.ok(Number(p!.closeFeeUsd) > 0.9);
+  assert.equal(p!.platformFeeUsd, '2.5', 'the Props fee to close it at the current rate: $0.50 + 2 bps of $10,000');
   // A pending market decrease of the whole size marks the row as closing.
   await t.db.insert(gmOrders).values({
     address: key(), fundedAccount: funded, marketToken: SOL_MARKET, symbol: 'SOL', side: 'Long', kind: 'Market', isIncrease: false, sizeUsd: '10000',
@@ -291,7 +294,7 @@ test('a breached funded account still holding positions or orders reads closure_
   const provider = createFundedProvider({ db: t.db, venue: venueWith({ trades: async () => [], signatures: async () => new Map(), removals: async () => [] }), program: {} as ProgramReader });
   const [row] = await t.db.select().from(accounts).innerJoin(fundedAccounts, eq(fundedAccounts.address, accounts.id)).where(eq(accounts.id, funded));
   const status = async (v: Pick<Valuation, 'status' | 'flat'>) => (await provider.summaryOf(row!.accounts, row!.funded_accounts, {
-    funded, at: Date.now(), ownerUsdc: 0n, pendingCollateral: 0n, positions: [], pendingOrders: 0, freshness: 'live', ...v,
+    funded, at: Date.now(), ownerUsdc: 0n, pendingCollateral: 0n, positions: [], pendingOrders: 0, freshness: 'live', fees: { owed: 0n, due: 0n, paid: 0n, held: 0n }, ...v,
   })).status;
   assert.equal(await status({ status: 'breached', flat: false }), 'closure_pending', 'its forced closes or GMTrade\'s liquidation are still to come');
   assert.equal(await status({ status: 'breached', flat: true }), 'breached');

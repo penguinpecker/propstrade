@@ -1,10 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import BN from 'bn.js';
 import { ComputeBudgetProgram, Connection, Keypair, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
-import { CLOSE_ALL, PROPS_VAULT_IDL, PROPS_VAULT_PROGRAM_ID, PropsVaultClient, gmOrderPda, gmPositionPda, orderNonce, ownerPda, toUnitPrice, usdToGm } from '@props/sdk';
+import { CLOSE_ALL, GMTRADE_PROGRAM_ID, PROPS_VAULT_IDL, PROPS_VAULT_PROGRAM_ID, PropsVaultClient, gmOrderPda, gmPositionPda, orderFee, orderNonce, ownerPda, toUnitPrice, usdToGm } from '@props/sdk';
 // @ts-expect-error test-only JavaScript module
 import { TIERS, marketRef, startStub } from '../../tests/stub.mjs';
-import { TxError, confirm, describeFailure, prepareCancel, prepareClose, prepareEvaluation, prepareOpen, prepareProtection, signAndSend, unitPrice, watchExecution } from './chain';
+import { ORDER_FEE_CHANGED, TxError, confirm, describeFailure, prepareCancel, prepareClose, prepareEvaluation, prepareOpen, prepareProtection, signAndSend, unitPrice, watchExecution } from './chain';
 
 interface Stub { url: string; close(): void; walletData(wallet: string): { wallet: string; funded: string; orderSeq: number; slots?: unknown[]; tracked?: unknown[] }; state: { sent: { name: string; data: any }[]; blockHeight: number; simulationLogs: string[] | null; statuses: Map<string, unknown> } }
 let stub: Stub;
@@ -24,12 +24,17 @@ const computeLimit = (tx: VersionedTransaction) => {
   return Buffer.from(ix.data).readUInt32LE(1);
 };
 const fake = (methods: Record<string, unknown>) => methods as unknown as Connection;
+/** The Props fee rate the trader reviewed: $0.50 + 7 bps. */
+const rate = { feeUsdc: 500_000n, feeBps: 7 };
+/** The stub's funded account: 25K terms at 100% exposure, a $25,000 cap. */
+const CAP = 25_000n * 10n ** 20n;
+const maxFee = (ix: { data: { args: { maxFee: { toString(): string } } } }) => BigInt(ix.data.args.maxFee.toString());
 
 describe('funded transactions', () => {
   it('opens a position with a stop-loss for the whole position in one transaction, at the account\'s next order addresses', async () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());
-    const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, kind: 'Market', price: '64482.123456789', sizeUsd: 5000, collateralUsd: 1000, slippageBps: 50, stopLoss: '62000' });
+    const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, kind: 'Market', price: '64482.123456789', sizeUsd: 5000, collateralUsd: 1000, slippageBps: 50, stopLoss: '62000', rate });
     const [open, stop] = decode(p.tx) as { name: string; data: { args: Record<string, any> } }[];
     expect([open!.name, stop!.name]).toEqual(['openPosition', 'setProtection']);
     expect(open!.data.args.orderType).toEqual({ market: {} });
@@ -49,7 +54,7 @@ describe('funded transactions', () => {
   it('signs, sends and follows the order until the keeper executes it', async () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());
-    const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: false, kind: 'Market', price: '64482', sizeUsd: 2000, collateralUsd: 400, slippageBps: 50 });
+    const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: false, kind: 'Market', price: '64482', sizeUsd: 2000, collateralUsd: 400, slippageBps: 50, rate });
     const signature = await signAndSend(connection, p, signer(key));
     expect(stub.state.sent.at(-1)).toMatchObject({ name: 'openPosition', data: { args: { isLong: false } } });
     await confirm(connection, signature, p.lastValidBlockHeight, 10);
@@ -59,7 +64,7 @@ describe('funded transactions', () => {
   it('reports a keeper cancellation when the position did not change', async () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());
-    const p = await prepareClose(connection, key.publicKey, { funded: w.funded, slippageBps: 50, positions: [{ market: btc, isLong: true, markPrice: '64482', sizeUsd: 5000, percent: 100 }] });
+    const p = await prepareClose(connection, key.publicKey, { funded: w.funded, slippageBps: 50, positions: [{ market: btc, isLong: true, markPrice: '64482', sizeUsd: 5000, percent: 100 }], rate });
     expect(await watchExecution(connection, p.follows[0]!, { pollMs: 50, timeoutMs: 200 })).toBe('cancelled');
   });
 
@@ -67,7 +72,7 @@ describe('funded transactions', () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());
     const eth = marketRef('ETH');
-    const p = await prepareClose(connection, key.publicKey, { funded: w.funded, slippageBps: 50, positions: [btc, eth].map(market => ({ market, isLong: false, markPrice: '100', sizeUsd: 100, percent: 100 })) });
+    const p = await prepareClose(connection, key.publicKey, { funded: w.funded, slippageBps: 50, positions: [btc, eth].map(market => ({ market, isLong: false, markPrice: '100', sizeUsd: 100, percent: 100 })), rate });
     const owner = ownerPda(new PublicKey(w.funded));
     expect(p.follows.map(f => [f.position, f.increase])).toEqual([btc, eth].map(m => [gmPositionPda(owner, new PublicKey(m.marketToken), false).toBase58(), false]));
     expect(new Set(p.follows.map(f => f.order)).size).toBe(2);
@@ -76,7 +81,7 @@ describe('funded transactions', () => {
   it('sizes the compute limit from the simulation, so an open with take-profit and stop-loss is not cut off', async () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());
-    const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, kind: 'Market', price: '64482', sizeUsd: 500, collateralUsd: 50, slippageBps: 50, takeProfit: '90000', stopLoss: '40000' });
+    const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, kind: 'Market', price: '64482', sizeUsd: 500, collateralUsd: 50, slippageBps: 50, takeProfit: '90000', stopLoss: '40000', rate });
     // The stub meters 150k CU per props_vault instruction: 450k here, more than the SDK's 400k default.
     const fixed = TransactionMessage.decompile(p.tx.message);
     fixed.instructions[0] = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
@@ -88,13 +93,62 @@ describe('funded transactions', () => {
     expect(stub.state.sent.at(-1)).toMatchObject({ name: 'setProtection' });
   });
 
-  it('fits an open with take-profit and stop-loss, and two closes, in one transaction', async () => {
+  // Solana's limit is 1,232 bytes. The largest transactions the app builds: an open with take profit and stop loss, and
+  // two closes (every argument is fixed-width, so any market, kind, size or fee measures the same). Round 2 kept 100
+  // bytes free "for a wallet's own instructions"; the max_fee arguments (8 bytes an order) leave 79. That margin is not
+  // needed: production offers only the Google wallet, which Privy's embedded wallet signs byte for byte (react-auth
+  // 3.45.0 has no compute-budget or guard-instruction code), and browser wallets sign only in builds without a Privy app
+  // id. The real worst case adds one compute-price instruction (a wallet that adds a priority fee, or this app once it
+  // sets one): 12 bytes, as the compute-budget program is already in the message. A second signer (a fee payer: 96
+  // bytes) or a third close does not fit: those need the address lookup table first (sdk sharedLookupAddresses).
+  it('fits an open with take-profit and stop-loss, and two closes, in one transaction, also with a compute price', async () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());
     const other = marketRef('SOL');
-    const open = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, kind: 'Limit', price: '60000', sizeUsd: 1000, collateralUsd: 100, slippageBps: 50, takeProfit: '70000', stopLoss: '58000' });
-    const close = await prepareClose(connection, key.publicKey, { funded: w.funded, slippageBps: 50, positions: [btc, other].map(market => ({ market, isLong: true, markPrice: '100', sizeUsd: 100, percent: 100 })) });
-    for (const p of [open, close]) expect(p.tx.serialize().length).toBeLessThanOrEqual(1232 - 100); // room for a wallet's own instructions
+    const open = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, kind: 'Limit', price: '60000', sizeUsd: 1000, collateralUsd: 100, slippageBps: 50, takeProfit: '70000', stopLoss: '58000', rate });
+    const close = await prepareClose(connection, key.publicKey, { funded: w.funded, slippageBps: 50, positions: [btc, other].map(market => ({ market, isLong: true, markPrice: '100', sizeUsd: 100, percent: 100 })), rate });
+    const withComputePrice = (tx: VersionedTransaction) => {
+      const message = TransactionMessage.decompile(tx.message);
+      message.instructions.splice(1, 0, ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1 }));
+      return new VersionedTransaction(message.compileToV0Message());
+    };
+    const sizes = [open.tx, close.tx].flatMap(tx => [tx, withComputePrice(tx)]).map(tx => tx.serialize().length);
+    expect(sizes).toEqual([1153, 1165, 1054, 1066]); // measured: the margins above are read from these
+    expect(Math.max(...sizes)).toBeLessThanOrEqual(1232);
+  });
+
+  it('carries the Props fee the trader reviewed as each order\'s max_fee: an increase its fee, a decrease its maximum on the account\'s exposure cap', async () => {
+    const key = Keypair.generate();
+    const w = stub.walletData(key.publicKey.toBase58());
+    const open = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, kind: 'Market', price: '64482', sizeUsd: 1234.5, collateralUsd: 123.45, slippageBps: 50, takeProfit: '70000', stopLoss: '60000', rate });
+    const [increase, tp, sl] = decode(open.tx);
+    expect(maxFee(increase!)).toBe(orderFee(rate, usdToGm('1234.5')));
+    expect(maxFee(increase!)).toBe(1_364_150n); // $0.50 + 7 bps of $1,234.50
+    // A take profit or stop loss closes whatever the position has grown to by then, never more than the cap.
+    expect([tp, sl].map(ix => maxFee(ix!))).toEqual([18_000_000n, 18_000_000n]); // $0.50 + 7 bps of $25,000
+    const close = await prepareClose(connection, key.publicKey, { funded: w.funded, slippageBps: 50, positions: [{ market: btc, isLong: true, markPrice: '64482', sizeUsd: 1000, percent: 50 }, { market: marketRef('SOL'), isLong: true, markPrice: '150', sizeUsd: 1000, percent: 100 }], rate });
+    expect(decode(close.tx).map(maxFee)).toEqual([orderFee(rate, usdToGm('500')), orderFee(rate, CLOSE_ALL, CAP)]);
+    // A moved take profit is re-assessed at the current rate: it carries its maximum again.
+    const order = Keypair.generate().publicKey;
+    const market = new PublicKey(btc.marketToken);
+    w.slots = [{ marketToken: market, gmPosition: gmPositionPda(ownerPda(new PublicKey(w.funded)), market, true), isLong: true, collateral: new BN(1), sizeUsd: new BN(1), pendingUsd: new BN(0), lastSync: new BN(0) }];
+    w.tracked = [{ order, slot: 0, orderType: { takeProfit: {} }, sizeUsd: new BN(CLOSE_ALL.toString()), collateral: new BN(0), placedByRisk: false }];
+    const moved = await prepareProtection(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, takeProfit: { order: order.toBase58(), price: '71000' }, stopLoss: { order: null, price: '59000' }, rate });
+    expect(decode(moved.tx).map(ix => [ix.name, maxFee(ix)])).toEqual([['updateOrder', 18_000_000n], ['setProtection', 18_000_000n]]);
+    w.slots = w.tracked = undefined;
+  });
+
+  it('names the vault\'s OrderFeeChanged refusal by its code, so the order can be re-quoted; the exchange\'s error with the same number is not it', async () => {
+    const key = Keypair.generate();
+    const w = stub.walletData(key.publicKey.toBase58());
+    const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, kind: 'Market', price: '64482', sizeUsd: 1000, collateralUsd: 100, slippageBps: 50, rate });
+    const vault = PROPS_VAULT_PROGRAM_ID.toBase58(), gm = GMTRADE_PROGRAM_ID.toBase58(), hex = ORDER_FEE_CHANGED.toString(16);
+    stub.state.simulationLogs = [`Program ${vault} invoke [1]`, `Program ${vault} failed: custom program error: 0x${hex}`];
+    let asked = false;
+    const refused = await signAndSend(connection, p, async tx => { asked = true; return tx; }).catch(e => e);
+    expect([refused.message, refused.code, asked]).toEqual(['The order fee changed since it was reviewed.', 6046, false]);
+    stub.state.simulationLogs = [`Program ${vault} invoke [1]`, `Program ${gm} invoke [2]`, `Program ${gm} failed: custom program error: 0x${hex}`, `Program ${vault} failed: custom program error: 0x${hex}`];
+    expect((await signAndSend(connection, p, async tx => tx).catch(e => e)).code).toBeUndefined();
   });
 
   it('moves an existing take-profit, cancels a stop-loss and places a new one, each against the tracked order', async () => {
@@ -104,27 +158,27 @@ describe('funded transactions', () => {
     const market = new PublicKey(btc.marketToken);
     w.slots = [{ marketToken: market, gmPosition: gmPositionPda(ownerPda(new PublicKey(w.funded)), market, true), isLong: true, collateral: new BN(1), sizeUsd: new BN(1), pendingUsd: new BN(0), lastSync: new BN(0) }];
     w.tracked = [tp, sl].map((order, i) => ({ order, slot: 0, orderType: i ? { stopLoss: {} } : { takeProfit: {} }, sizeUsd: new BN(1), collateral: new BN(0), placedByRisk: false }));
-    const change = await prepareProtection(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, takeProfit: { order: tp.toBase58(), price: '70000' }, stopLoss: { order: sl.toBase58(), price: null } });
+    const change = await prepareProtection(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, takeProfit: { order: tp.toBase58(), price: '70000' }, stopLoss: { order: sl.toBase58(), price: null }, rate });
     const [update, cancel] = decode(change.tx);
     expect([update!.name, cancel!.name]).toEqual(['updateOrder', 'cancelOrder']);
     expect(BigInt(update!.data.args.triggerPrice.toString())).toBe(toUnitPrice('70000', 8));
-    const add = await prepareProtection(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, takeProfit: { order: tp.toBase58(), price: null }, stopLoss: { order: null, price: '60000' } });
+    const add = await prepareProtection(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, takeProfit: { order: tp.toBase58(), price: null }, stopLoss: { order: null, price: '60000' }, rate });
     expect(decode(add.tx).map(ix => ix.name)).toEqual(['cancelOrder', 'setProtection']);
     expect(decode((await prepareCancel(connection, key.publicKey, w.funded, sl.toBase58())).tx).map(ix => ix.name)).toEqual(['cancelOrder']);
-    await expect(prepareProtection(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, takeProfit: { order: null, price: null }, stopLoss: { order: null, price: null } })).rejects.toThrow('Nothing changed.');
+    await expect(prepareProtection(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, takeProfit: { order: null, price: null }, stopLoss: { order: null, price: null }, rate })).rejects.toThrow('Nothing changed.');
     w.slots = w.tracked = undefined;
   });
 
   it('refuses a partial close below GMTrade\'s $1 minimum', async () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());
-    await expect(prepareClose(connection, key.publicKey, { funded: w.funded, slippageBps: 50, positions: [{ market: btc, isLong: true, markPrice: '64482', sizeUsd: 5, percent: 10 }] })).rejects.toThrow('at least $1');
+    await expect(prepareClose(connection, key.publicKey, { funded: w.funded, slippageBps: 50, positions: [{ market: btc, isLong: true, markPrice: '64482', sizeUsd: 5, percent: 10 }], rate })).rejects.toThrow('at least $1');
   });
 
   it('does not ask the wallet to sign a transaction that fails simulation, and names the rule', async () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());
-    const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, kind: 'Market', price: '64482', sizeUsd: 30_000, collateralUsd: 1500, slippageBps: 50 });
+    const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, kind: 'Market', price: '64482', sizeUsd: 30_000, collateralUsd: 1500, slippageBps: 50, rate });
     stub.state.simulationLogs = [`Program ${PROPS_VAULT_PROGRAM_ID.toBase58()} invoke [1]`, `Program ${PROPS_VAULT_PROGRAM_ID.toBase58()} failed: custom program error: 0x1786`];
     let asked = false;
     await expect(signAndSend(connection, p, async tx => { asked = true; return tx; })).rejects.toThrow('Total exposure above the account limit.');
@@ -137,7 +191,7 @@ describe('the market an order goes to', () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());
     const order = (market: { marketToken: string; symbol: string }) =>
-      prepareOpen(connection, key.publicKey, { funded: w.funded, market, isLong: true, kind: 'Limit', price: '150', sizeUsd: 100, collateralUsd: 10, slippageBps: 50, stopLoss: '140' });
+      prepareOpen(connection, key.publicKey, { funded: w.funded, market, isLong: true, kind: 'Limit', price: '150', sizeUsd: 100, collateralUsd: 10, slippageBps: 50, stopLoss: '140', rate });
     // An API that shows SOL but sends the order to BTC's market, or to a market the program does not know: nothing is built.
     await expect(order({ ...marketRef('BTC'), symbol: 'SOL' })).rejects.toThrow('The SOL market could not be confirmed onchain');
     await expect(order({ marketToken: Keypair.generate().publicKey.toBase58(), symbol: 'SOL' })).rejects.toThrow('could not be confirmed onchain');
@@ -220,7 +274,7 @@ describe('unit prices and failure reasons', () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());
     const collateral = async (collateralUsd: number) => {
-      const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, kind: 'Market', price: '64482', sizeUsd: 1000, collateralUsd, slippageBps: 50 });
+      const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, kind: 'Market', price: '64482', sizeUsd: 1000, collateralUsd, slippageBps: 50, rate });
       return BigInt(decode(p.tx)[0]!.data.args.collateral.toString());
     };
     expect([await collateral(1001 / 15), await collateral(1000.5 / 5), await collateral(100)]).toEqual([66_733_334n, 200_100_000n, 100_000_000n]);

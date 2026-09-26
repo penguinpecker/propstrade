@@ -44,7 +44,7 @@ If implementation proves a statement here wrong, fix the code to the facts AND u
 | Practice | free, 25K virtual, same engine and rules, reset anytime, never paid out | |
 | Acceptable price | every order carries one; default slippage 0.5% (user-editable ≤ 5%) | protects against GMTrade's scheduled price-impact windows |
 | Geo | block US persons and sanctioned regions (edge middleware + KYC country and region) | GMTrade terms bar US persons |
-| Costs | GMTrade's, in every stage: order fee on each open and close (the market's factor by impact direction: lower when the order improves the long/short balance, higher when it worsens it), price impact (in the execution price), borrowing (the larger side pays), funding (the paying side only: received funding is never credited), liquidation fee. Props.trade: the evaluation fee and the profit share only — no fee per order (`AppConfig.orderFeeBps` is reserved for one, absent today) | The order ticket previews open, close and round-trip fees, the side's hourly rates and cost, and the liquidation price (`GET /v1/quote`); every trip's breakdown is in `ClosedTrade` |
+| Costs | GMTrade's, in every stage: order fee on each open and close (the market's factor by impact direction: lower when the order improves the long/short balance, higher when it worsens it), price impact (in the execution price), borrowing (the larger side pays), funding (the paying side only: received funding is never credited), liquidation fee. Props.trade: the evaluation fee, the profit share and its own fee per order (`Config.order_fee_usdc` + `order_fee_bps` of the size, at most $2 + 10 bps, 0 = off, the same on every stage; charged only when the order executes, on the size it executes: see §8 "Props order fee"; on practice and evaluation accounts simulated) | The order ticket previews open, close and round-trip fees (the Props fee included), the side's hourly rates and cost, and the liquidation price (`GET /v1/quote`); every trip's breakdown is in `ClosedTrade` |
 
 Evaluation and funded use **identical** risk semantics so passing an evaluation predicts funded behaviour.
 
@@ -100,7 +100,7 @@ checks the offsets against cloned mainnet Position accounts.
 
 | Account | Seeds | Key fields |
 |---|---|---|
-| `Config` | `["config"]` | admin, pending_admin, risk_authorities (≤4), kyc_authority, usdc_mint, gmtrade_program, gmtrade_store (pinned at init), trader_share_bps, min_payout, owner_sol_target, owner_sol_min, max_daily_principal (+ the current activation window's start and total), pause flags (new_evaluations, trading, payouts), totals (fees_collected, allocated_principal, payouts_paid, profit_to_vault), counters, bumps |
+| `Config` | `["config"]` | admin, pending_admin, risk_authorities (≤4), kyc_authority, usdc_mint, gmtrade_program, gmtrade_store (pinned at init), trader_share_bps, min_payout, owner_sol_target, owner_sol_min, max_daily_principal (+ the current activation window's start and total), pause flags (new_evaluations, trading, payouts), totals (fees_collected = evaluation fees, allocated_principal, payouts_paid, profit_to_vault), counters, bumps, order_fee_usdc + order_fee_bps (the Props fee per order, `set_order_fee`) |
 | vault authority | `["vault"]` | data-less signer that owns the three USDC token accounts below |
 | `capital_vault` | ATA(vault authority, USDC) | seed capital; source of principal |
 | `fee_vault` | `["fee_vault"]` token account (owner = vault authority) | evaluation fees |
@@ -110,7 +110,7 @@ checks the offsets against cloned mainnet Position accounts.
 | `TraderProfile` | `["trader", wallet]` | wallet, identity_hash[32] (zero = unverified), verified_at, active_funded:u8, evaluation_count:u32 |
 | `IdentityLock` | `["identity", identity_hash]` | profile — `init` only, so one wallet per person |
 | `Evaluation` | `["evaluation", wallet, index:u32]` | trader, tier_id, terms snapshot (size, target_bps, dd_bps, exposure_bps, share_bps, terms_hash), fee_paid, status (Active, Passed, Failed, Funded, Refunded), created_at, resolved_at, final_equity:i64, trades_root[32] |
-| `FundedAccount` | `["funded", evaluation]` | trader, evaluation, owner_bump, terms snapshot, principal, status (Active, Restricted, PayoutPending, Breached, Closed), slots[8] {market_token, is_long, gm_position, collateral, size_usd, last_sync}, orders[8] (tracked GMTrade order pubkeys), payouts_paid, payout_seq, created_at, last_sync_at |
+| `FundedAccount` | `["funded", evaluation]` | trader, evaluation, owner_bump, terms snapshot, principal, status (Active, Restricted, PayoutPending, Breached, Closed), slots[8] {market_token, is_long, gm_position, collateral, size_usd, last_sync}, orders[8] (tracked GMTrade order pubkeys), payouts_paid, payout_seq, created_at, last_sync_at, order_fees[8] (the fee assessed on each tracked order), order_fees_due, order_fees_paid, order_fee_settlements |
 | owner PDA | `["owner", funded_account]` | **data-less, system-owned** signer; owns all GMTrade user/position/order accounts and the account's USDC ATA |
 | `PayoutRequest` | `["payout", funded_account, seq:u32]` | balance_at_request, profit, trader_amount, vault_amount, status (Requested, Paid, Rejected, Cancelled), reason_code, created_at, resolved_at |
 
@@ -120,7 +120,8 @@ Admin (signer = `Config.admin`):
 `initialize` (only the program's upgrade authority, checked via ProgramData; pins USDC mint + GMTrade program/store),
 `propose_admin` / `accept_admin`, `set_authorities` (risk ≤4, kyc), `set_params`, `set_pauses`, `upsert_tier`,
 `upsert_market`, `deposit_capital`, `withdraw_capital` (≤ capital_vault balance; never touches principal already
-posted), `sweep_fees` (fee_vault → capital_vault), `withdraw_sol_treasury`.
+posted), `sweep_fees` (fee_vault → capital_vault), `withdraw_sol_treasury`, `set_order_fee(fee_usdc ≤ $2, fee_bps ≤ 10)`
+(the Props fee per order, for orders placed or updated afterwards; never paused).
 
 Trader (signer = trader wallet):
 - `buy_evaluation(tier_id, index, expected_fee_usdc, expected_tier_version)` — tier enabled, not paused, fee and tier
@@ -147,8 +148,14 @@ Trader (signer = trader wallet):
   change can make it fill at once).
 - `cancel_order(order)` — trader or risk authority; `close_order_v2` with executor = owner = receiver = rent_receiver =
   owner PDA; drops the order from tracking.
-- `request_payout()` — account Active; last sync shows all slots flat and no tracked orders; profit =
-  owner ATA balance − principal; trader_amount = profit × share ≥ min_payout; status → PayoutPending (blocks opens).
+- `request_payout()` — account Active; last sync shows all slots flat and no tracked orders; no Props order fees due
+  (`FeesDue`); profit = owner ATA balance − principal; trader_amount = profit × share ≥ min_payout; status →
+  PayoutPending (blocks opens).
+- Every order instruction (`open_position`, `close_position`, `set_protection`, `update_order`) carries `max_fee`: the
+  program assesses the order's Props fee at the Config rate (an increase on its size, a decrease on min(size, the
+  account's exposure cap); a risk authority's close of a breached account free) and refuses more than `max_fee`
+  (`OrderFeeChanged`). An increase must leave its collateral, its fee, the fees due and the fees of pending increases in
+  the owner ATA (`CollateralExceedsBalance`). Nothing moves at placement.
 - `cancel_payout(request)` — trader, while Requested.
 
 Risk authority (signer ∈ `Config.risk_authorities`):
@@ -157,8 +164,12 @@ Risk authority (signer ∈ `Config.risk_authorities`):
   accounts, verified by seeds, must be size 0 or absent); pays trader_amount → trader's USDC ATA (init-if-needed,
   payer sol_treasury) and vault_amount → capital_vault; status back to Active.
 - `reject_payout(request, reason_code)`.
-- `restrict(funded, restricted: bool)`, `mark_breached(funded)`, `close_funded(funded)` (flat only: remaining USDC →
-  capital_vault, remaining SOL → sol_treasury, principal released from totals).
+- `restrict(funded, restricted: bool)`, `mark_breached(funded)`, `close_funded(funded)` (flat only, no Props fees due:
+  remaining USDC → capital_vault, remaining SOL → sol_treasury, principal released from totals).
+- `settle_order_fees(charge, waive, expected_due, expected_settlements)` — `charge` from the owner ATA to fee_vault,
+  `waive` forgiven, together ≤ the fees due; both expectations must equal the account's `order_fees_due` and
+  `order_fee_settlements` (every settlement advances the count, so a stale or replayed one fails); any open status, never
+  paused.
 - `force_close` = `close_position` signed by risk authority.
 
 KYC authority: `set_identity(profile, identity_hash)` — inits `IdentityLock` (fails if the person already has a wallet).
@@ -180,15 +191,18 @@ Permissionless cranks:
   GMTrade keeper) to the owner ATA, or to `capital_vault` once the account is closed.
 
 Events for every state change (`EvaluationPurchased`, `EvaluationResolved`, `FundedActivated`, `OrderRequested`,
-`OrderCancelled`, `ProtectionSet`, `Synced`, `PayoutRequested`, `PayoutPaid`, `PayoutRejected`, `AccountRestricted`,
-`AccountBreached`, `AccountClosed`, `CapitalDeposited`, `CapitalWithdrawn`, `FeesSwept`, `ConfigChanged`) so the
+`OrderCancelled`, `ProtectionSet`, `OrderUpdated` (the three carry the order's Props fee and the rate that produced it),
+`CompletedOrderClosed` (`cancelled`: the fee was released, else it is due), `Synced`, `OrderFeesSettled`,
+`PayoutRequested`, `PayoutPaid`, `PayoutRejected`, `AccountRestricted`, `AccountBreached`, `AccountClosed`,
+`CapitalDeposited`, `CapitalWithdrawn`, `FeesSwept`, `ConfigChanged` (`OrderFee` for `set_order_fee`)) so the
 indexer and the Verify page can reconstruct everything from chain data alone. Events are emitted with Anchor
 `emit_cpi!` (a self-CPI signed by the `["__event_authority"]` PDA), never as log lines: Solana keeps only the first
 10,000 bytes of a transaction's logs, and anyone can fill them.
 
 Invariants (tests must assert each; security review must try to break each):
-- No instruction moves USDC out of an owner ATA except GMTrade order creation (to a GMTrade escrow), approve_payout
-  (to the registered trader wallet + capital_vault) and close_funded (to capital_vault).
+- No instruction moves USDC out of an owner ATA except GMTrade order creation (to a GMTrade escrow),
+  `settle_order_fees` (to fee_vault, at most the fees due), approve_payout (to the registered trader wallet +
+  capital_vault) and close_funded (to capital_vault).
 - Receiver of every GMTrade order = owner PDA. No trader-supplied receiver, referrer, builder-fee or token-account.
 - Owner PDA stays data-less and system-owned; its lamports never go to a trader.
 - Sum of principal posted ≤ capital deposited; `allocated_principal` tracks it exactly.
@@ -255,6 +269,9 @@ Per funded account, every tick (≤ 5 s) and on account change:
    closed-market cap.
 4. Cancel TP/SL orders whose position is gone; `close_completed_order` for stuck orders; `top_up_owner` (active
    accounts, trading not paused).
+4a. Props order fees due (before any breach decision): `settle_order_fees` charging executed orders what they owe
+   (the rate of their latest assessment on the size executed, up to the account's USDC) and waiving the rest; at
+   closure `[settle_order_fees, close_funded]` in one transaction (§8 "Props order fee").
 5. Payout review: flat, no linked opposite/correlated positions across accounts in the review window, identity
    verified → `approve_payout`, else hold for manual review (admin API) and alert.
 6. Watch the GMTrade program's upgrade slot; on change → set trading pause, alert.
@@ -262,7 +279,8 @@ Alerts: Telegram (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`), heartbeat URL (`HEA
 
 ### 4.6 HTTP API
 The contract lives in `packages/shared/src/api.ts`. Summary:
-`GET /v1/health` · `GET /v1/config` (program id, tiers, share, pauses) · `GET /v1/markets` · `GET /v1/markets/:symbol` ·
+`GET /v1/health` · `GET /v1/config` (program id, tiers, share, pauses, the Props order fee) · `GET /v1/order-fee` (that fee
+alone, before the program is live too) · `GET /v1/markets` · `GET /v1/markets/:symbol` ·
 `GET /v1/candles` · `GET /v1/markets/:symbol/trades` · `GET /v1/stream` (SSE: prices, market status, account updates,
 notifications) · auth routes · `GET /v1/me` · `GET /v1/accounts` · `GET /v1/accounts/:id` (+ `/positions`,
 `/orders`, `/history`, `/activity`, `/performance`) · `POST /v1/sim/:id/orders` · `DELETE /v1/sim/:id/orders/:orderId` ·
@@ -395,7 +413,7 @@ quote's execution price for a market order, the limit price for a limit order. T
 margin and limit (`collateralUsd`, `limitPrice`), and the ticket lists every GMTrade cost in order (entry, order value,
 margin, open/close/round-trip fee, impact, borrow + funding per hour and day for the side, liquidation price, slippage,
 the network fee for funded orders from `useTxCost`) with the note that Props.trade charges nothing per order (a Props
-row appears only when `AppConfig.orderFeeBps` exists). Chart price lines: each open position's entry (neutral),
+row appears only when `AppConfig.orderFeeBps` exists; until 2026-09-26, see "Props order fee"). Chart price lines: each open position's entry (neutral),
 liquidation (amber) and TP/SL orders (green/red), and the ticket's previews (dashed); `.price-chart[data-guides]`
 lists their labels for the browser checks. Intervals: all 13 (`INTERVALS` in `lib/candles.ts`, week and month buckets
 by the calendar as the server's), pinned ones in the toolbar and the rest in a grouped menu whose star pins them;
@@ -417,7 +435,7 @@ ticket's whole cost preview (`PriceImpactQuote`): the open fee and impact from o
 then the resulting position valued in the pool as the positions table will value it (`positionStatus` on
 `withPosition`), which gives `closeFeeUsd`, `roundTripFeeUsd` and `liquidationPrice`; the requested side's hourly
 funding and borrowing rates from the market row and `hourlyCostUsd` = (borrowing + funding when this side pays) × size;
-`platformFeeUsd` is '0' (Props charges nothing per order). `Position.unrealizedPnl` is net in every stage (net value −
+`platformFeeUsd` was '0' then (Props charged nothing per order; since 2026-09-26 see "Props order fee"). `Position.unrealizedPnl` is net in every stage (net value −
 collateral; the funded rows were gross), `pendingFeesUsd` = `pendingBorrowUsd` + `pendingFundingUsd` + `closeFeeUsd`
 in both, and `closing` says a market close of the whole position is pending. `closed_trades` carries the trip's
 `order_fees_usd`, `funding_usd`, `borrow_usd` and `price_impact_usd` (migration 0006 backfilled them from `sim_fills`
@@ -733,6 +751,74 @@ masked to first 4 … last 4); `GET /v1/referrals` answers the rate (public); `G
 `{ valid }` (public, 60 a minute, `no-store`). Known: because a code is the start of a wallet, the public check tells
 whether a given wallet has signed in (60 a minute per client); only random codes would hide that. Two different people
 referring each other each earn on the other's funded fees, as on any referral program.
+
+Props order fee (2026-09-26, `docs/design/order-fee.md`; the program part is built and audited there, this is the
+server's; the rate stays 0 until the owner names it, `docs/runbooks/launch.md` §10.1):
+- One rate for every stage: the onchain Config's `order_fee_usdc` / `order_fee_bps` once the program is live (the chain
+  module's program reader, `orderFeeRate()`: cached 30 s, served at once from the last read while a newer one loads,
+  refreshed after an indexed `ConfigChanged`, kept through a failed read), before that the server's `ORDER_FEE_USDC` /
+  `ORDER_FEE_BPS` (`lib/order-fee.ts`; `orderFeeSource` says which). `/v1/config` carries it once the program is live
+  (it answers 503 `not_initialized` before); `GET /v1/order-fee` (`OrderFeeInfo`) always, so practice and evaluation
+  show the settings' rate before launch. Every fee is `@props/sdk orderFee`: flat +
+  ⌊⌊min(size, cap) / 10^14⌋ × bps / 10^4⌋ micro-USDC, a decrease capped at the account's exposure cap.
+- Quote (`GET /v1/quote`): `platformFeeUsd` = the order's fee, `maxFeeMicro` = the same as the u64 a funded open passes
+  as `maxFee`, `platformCloseFeeUsd` = closing the resulting position (the same size), `roundTripFeeUsd` counts both.
+  A funded close, take profit or stop loss passes its maximum instead (the rate on `rules.maxExposureUsd`).
+- Simulator (practice, evaluation): each order stores the fee assessed at placement and the rate it used
+  (`sim_orders.platform_fee_usd`, `fee_rate_usd`, `fee_rate_bps`: an increase on its size, a close / TP / SL on the
+  exposure cap, the session guard's close like the trader's); an increase must leave its collateral, its fee and the
+  pending increases' fees in the margin (the program's hold); at a fill it is charged min(assessed, that rate on the
+  executed size) from realized P&L (`sim_fills.platform_fee_usd`, `accounts.platform_fees_usd`, the round trip's
+  `closed_trades.platform_fee_usd`, `fees_usd` including it). Liquidations and cancelled or expired orders pay nothing;
+  the demo has no breach closes (its breach is the liquidations). Nothing moves, nothing is revenue, no referral reward.
+  Trades-root leaves carry `platformFeeUsd` after `feeUsd` (`packages/shared/src/merkle.ts`).
+- Funded fee ledger (migration 0010): `order_fees`, one row per order from the events (assessed with its rate,
+  re-assessed on `OrderUpdated`, then released by `OrderCancelled` / `CompletedOrderClosed{cancelled}` or due by
+  `Synced.orders_dropped` / `CompletedOrderClosed`), with `charged_usd` / `waived_usd`; Σ of what the due rows hold is
+  the account's `order_fees_due`. Each funded fill carries its order's fee (`venue_fills.platform_fee_usd`: min(assessed,
+  the rate of the latest assessment on what the order's fills executed) less what earlier fills carried; a fill of one
+  of the account's recent order numbers the indexer has not projected yet waits up to 30 min; any other order is not
+  the account's, e.g. deleveraging, and counts none at once), and the funded round trip nets it
+  (`venue_fills.realized_pnl` stays the exchange's). Fills are read while an account trades, 3 min after, and while it
+  has fees due (a close owes its fee on the size its fill shows, however late the exchange's indexer reports it).
+- Keeper settlement (`chain/fees.ts` plans, `keeper/rules.ts` step `settle` before `breach`): an executed increase owes
+  its assessment, an executed decrease min(assessed, the rate of its latest assessment on the size its fills executed),
+  worked out when the settlement is planned; an order the exchange cancelled is waived at once, one whose
+  outcome is unknown waits (alert after 10 min, waived after 24 h); charges stop at the account's USDC (the rest stays
+  due); the settlement goes alone in its transaction with the `orderFeesDue` / `orderFeeSettlements` of that same read.
+  It is planned only when the ledger accounts for everything the chain shows: the fees due, the number of settlements
+  and the charges in all (`orderFeesDue`, `orderFeeSettlements`, `orderFeesPaid`; alert when it has not for 5 min), so
+  a settlement that landed without reaching the ledger (the fallback script, before the indexer applies it) is never
+  charged again; and no earlier settlement awaits its outcome. Idempotent: `order_fee_settlements` (one row per
+  transaction and account) gets the settlement with each order's share and its blockhash's last valid height in the
+  database transaction that stores its signature; the indexed `OrderFeesSettled` applies the shares, once (one this
+  server did not send, e.g. `scripts/admin/settle-order-fees.ts`, is spread over the due rows oldest first); one refused
+  is `failed`; one still unconfirmed is `failed` only once the confirmed block height (read before its status) has
+  passed its last valid height and it is not found. Fee bookkeeping that fails skips the settlement for that tick, never
+  the account's breach, session or upgrade checks (`fee-view` alert). Closure: a
+  breached flat account with fees due gets `[settle_order_fees(charge ≤ USDC, waive the rest), close_funded]` in one
+  transaction, so does the operator's close job. Payout review waits while fees are due (the program refuses a request
+  then, and nothing can add to them while PayoutPending) and subtracts the fees charged since the last paid payout from
+  the fills' realized P&L. Alerts: fees due over 30 min, unknown outcomes, the ledger out of step, failed settlements.
+- Funded valuation: V = owner USDC + escrowed collateral + Σ net value − the fees executed orders owe and nothing has
+  charged or waived yet (whether or not a sync has made them due; never a cancelled or unknown one): the one value the
+  keeper's breach check, the summary and the payout review use. `availableMargin` = owner USDC − what the program holds
+  (fees due + the fees of pending increases); `AccountSummary.platformFees` {due, paid, held}; eligibility says "Order
+  fees are being settled" while any are due. The ledger is read only for an account whose fees are in motion (some due,
+  or a tracked order no longer pending), so a keeper tick's database load does not grow with idle accounts.
+- `VaultStats.totals.orderFeesCharged` sums the indexed settlements; `feesCollected` is evaluation fees. Referrals are
+  unchanged: 10 % of the exchange's fee on funded fills; Props fees earn no reward yet (owner decision pending).
+- Not built: the design's immediate waive of what several decreases finishing between two syncs cannot owe (until the
+  exchange's indexer reports their sizes, about 35 s, a close's whole assessment stays held against new exposure), and
+  waiving unknown outcomes at once when a flat trader asks for a payout (a refused request never reaches the server;
+  the 24 h fallback applies).
+- Tests: `test/sim/order-fee.test.ts` (the demo rule), `chain/test/fees.test.ts` (ledger, plans, fills, rate source,
+  valuation), `keeper/test/rules.test.ts` (settle and closure steps, payout review), the validator e2e suites (a nonzero
+  rate: assessed, held, released; the session guard's close assessed), and `keeper/test/fees.e2e.test.ts`: the real
+  program in LiteSVM served to the real indexer, venue loop, job executor and keeper (an executed open charged, a TP
+  charged on its execution and the exchange-cancelled SL waived, a payout refused with `FeesDue` then approved and paid,
+  a breached account with fees due and no USDC closed with `[settle_order_fees, close_funded]`). A local validator cannot
+  make an order leave the book but by a cancel, so fees never become due there.
 
 Deployment (2026-09-23): app on Vercel (`propstrade.vercel.app`), server + Postgres 18 on Railway. With no custom domain
 yet, the app's `vercel.json` proxies `/v1/*` to the Railway service (uncached, except `/v1/candles` which the edge

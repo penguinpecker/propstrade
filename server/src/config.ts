@@ -16,6 +16,13 @@ export const EnvSchema = z.object({
   TRUST_PROXY_HOPS: z.coerce.number().int().min(0).default(1),
   /** Referrers' share of the exchange fee on each funded fill of the traders they referred, in bps (10% by default). */
   REFERRAL_REWARD_BPS: z.coerce.number().int().min(0).max(5000).default(1000),
+  /**
+   * Props.trade's fee per order on practice and evaluation accounts until the program is live (then every stage reads
+   * the onchain Config rate): a flat USDC amount ('0.50') plus bps of the order's size, within the program's caps.
+   */
+  ORDER_FEE_USDC: z.string().regex(/^\d+(\.\d{1,6})?$/, 'a USDC amount with at most 6 decimal places')
+    .refine((v) => Number(v) <= 2, 'at most 2 (the program caps the flat fee at $2)').default('0'),
+  ORDER_FEE_BPS: z.coerce.number().int().min(0).max(10).default(0),
 });
 
 export type Config = z.infer<typeof EnvSchema>;

@@ -92,3 +92,26 @@ test('a simulation that fails for lack of SOL says so (the system program gives 
   await assert.rejects(program.send(), (err: unknown) => err instanceof Rejected && !(err instanceof NotEnoughSol) && err.code === 'NotFlat' && err.message === 'simulation failed: NotFlat');
   assert.deepEqual([...short.prices, ...rent.prices, ...program.prices], [], 'nothing is sent');
 });
+
+test('a transaction confirmed in its last valid block is landed, not expired, when its block confirms between the height and the status reads', async () => {
+  const LAST_VALID = 100;
+  // First seen as 'processed', or not seen yet: its block (height 100) is confirmed during that first status read, and
+  // the cluster moves on to 101.
+  for (const first of ['processed', null] as const) {
+    let confirmed = false;
+    const rpc = {
+      getLatestBlockhash: async () => ({ blockhash: PublicKey.default.toBase58(), lastValidBlockHeight: LAST_VALID }),
+      simulateTransaction: async () => ({ context: { slot: 1 }, value: { err: null, logs: [], unitsConsumed: 10_000 } }),
+      sendRawTransaction: async () => 'sig',
+      getBlockHeight: async () => (confirmed ? LAST_VALID + 1 : LAST_VALID),
+      getSignatureStatuses: async () => {
+        const status = confirmed ? { slot: 1, confirmations: 0, err: null, confirmationStatus: 'confirmed' } : first && { slot: 1, confirmations: 0, err: null, confirmationStatus: first };
+        confirmed = true;
+        return { context: { slot: 1 }, value: [status] };
+      },
+    };
+    let recorded: number | undefined;
+    await sendTransaction(rpc as never, { instructions, signer, beforeSend: async (_s, lastValid) => void (recorded = lastValid) });
+    assert.equal(recorded, LAST_VALID, 'the sender learns the height it can land until');
+  }
+});

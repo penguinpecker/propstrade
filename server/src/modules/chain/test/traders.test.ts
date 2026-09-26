@@ -51,16 +51,16 @@ const ids = { evaluation: key().toBase58(), funded: key().toBase58(), owner: key
 const practice = `practice:${trader}`;
 const position: Position = {
   id: 'p1', symbol: 'SOL', side: 'Long', sizeUsd: '1000', sizeTokens: '8.4', collateralUsd: '100', leverage: 10, entryPrice: '118.5', markPrice: '119',
-  liquidationPrice: '108', unrealizedPnl: '3.2', pendingFeesUsd: '1.3', pendingBorrowUsd: '0.2', pendingFundingUsd: '0.1', closeFeeUsd: '1', closing: false,
+  liquidationPrice: '108', unrealizedPnl: '3.2', pendingFeesUsd: '1.3', pendingBorrowUsd: '0.2', pendingFundingUsd: '0.1', closeFeeUsd: '1', platformFeeUsd: '0', closing: false,
   takeProfit: null, stopLoss: null, openedAt: 1, venue: 'simulated',
 };
 const trade = (id: string, closedAt: number, venue: ClosedTrade['venue']): ClosedTrade => ({
   id, symbol: 'SOL', side: 'Long', openedAt: closedAt - 1_000, closedAt, sizeUsd: '1000', entryPrice: '118', exitPrice: '119',
-  feesUsd: '2.5', orderFeesUsd: '2', fundingUsd: '0.3', borrowUsd: '0.2', priceImpactUsd: '-0.05', netPnl: '5.9', venue, signatures: [],
+  feesUsd: '2.5', orderFeesUsd: '2', platformFeeUsd: '0', fundingUsd: '0.3', borrowUsd: '0.2', priceImpactUsd: '-0.05', netPnl: '5.9', venue, signatures: [],
 });
 const detail = (id: string, stage: AccountDetail['stage'], equity: string, positions: Position[]): AccountDetail => ({
   id, stage, status: 'active', label: stage, shortId: 'PT-x', equity, realizedPnl: '0', unrealizedPnl: '0', allowanceRemaining: '0', availableMargin: '0',
-  openNotional: '0', targetProgressPct: null, eligiblePayout: null, createdAt: 1_700_000_000_000, activatedAt: null, resolvedAt: null, evidence: {}, freshness: 'live',
+  openNotional: '0', platformFees: { dueUsd: '0', paidUsd: '0', heldUsd: '0' }, targetProgressPct: null, eligiblePayout: null, createdAt: 1_700_000_000_000, activatedAt: null, resolvedAt: null, evidence: {}, freshness: 'live',
   rules: { sizeUsd: stage === 'practice' ? '25000' : '10000', lossAllowanceUsd: '1250', floorUsd: '23750', profitTargetUsd: null, maxExposureUsd: '25000', traderShareBps: 8000, drawdownType: 'static', includesOpenPnl: true, dailyLossLimit: null, timeLimit: null, termsHash: null, version: null },
   positions, orders: [],
 } as AccountDetail);

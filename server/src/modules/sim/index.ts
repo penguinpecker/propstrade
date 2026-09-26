@@ -3,6 +3,7 @@
 import { z } from 'zod';
 import { createSealer } from '../../lib/integrity.ts';
 import { LOCK_KEYS, runAsLeader } from '../../lib/leader.ts';
+import { orderFeeRateOf } from '../../lib/order-fee.ts';
 import type { ModuleContext, SimService } from '../types.ts';
 import { createEngine } from './engine.ts';
 import { createReader } from './read.ts';
@@ -19,11 +20,14 @@ export default async function register(ctx: ModuleContext) {
   const marketdata = ctx.services.marketdata;
   if (!marketdata) throw new Error('sim needs the marketdata module');
   const { SIM_FILL_DELAY_MS } = Env.parse({ SIM_FILL_DELAY_MS: ctx.env.SIM_FILL_DELAY_MS || undefined });
+  // Props.trade's fee rate: the chain module's (the program's once it is live), asked at each use since the chain module
+  // registers after this one.
+  const orderFeeRate = () => orderFeeRateOf(ctx);
   const engine = createEngine({
     db: ctx.db, log: ctx.log, marketdata, publish: ctx.publish, notify: ctx.notify, fillDelayMs: SIM_FILL_DELAY_MS,
-    sealer: createSealer(ctx.config.SESSION_SECRET),
+    sealer: createSealer(ctx.config.SESSION_SECRET), orderFeeRate,
   });
-  const reader = createReader(ctx.db, marketdata, engine.ensurePractice);
+  const reader = createReader(ctx.db, marketdata, engine.ensurePractice, orderFeeRate);
   registerRoutes(ctx.app, engine, reader);
   const leader = runAsLeader({ databaseUrl: ctx.config.DATABASE_URL, key: LOCK_KEYS.sim, signal: ctx.signal, log: ctx.log, run: engine.lead });
 

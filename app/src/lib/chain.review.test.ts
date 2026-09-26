@@ -78,13 +78,14 @@ describe('order amounts', () => {
   beforeAll(async () => { stub = await startStub(); connection = new Connection(`${stub.url}/rpc`, 'confirmed'); });
   afterAll(() => stub.close());
   const coder = new PropsVaultClient(new Connection('http://127.0.0.1:1')).program.coder as unknown as { instruction: { decode(data: Buffer): { name: string; data: any } | null } };
+  const rate = { feeUsdc: 0n, feeBps: 0 }; // no Props fee: these are about amounts and compute
 
   it('keeps an order at the market\'s maximum leverage within the program\'s leverage check (XAU 15×, $1,001)', async () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());
     const xau = marketRef('XAU');
     // What the order ticket passes at 15× (Trading.jsx: collateralUsd: sizeNum / lev).
-    const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: xau, isLong: true, kind: 'Market', price: '2674.3', sizeUsd: 1001, collateralUsd: 1001 / 15, slippageBps: 50 });
+    const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: xau, isLong: true, kind: 'Market', price: '2674.3', sizeUsd: 1001, collateralUsd: 1001 / 15, slippageBps: 50, rate });
     const ix = p.tx.message.compiledInstructions.find(i => p.tx.message.staticAccountKeys[i.programIdIndex]!.equals(PROPS_VAULT_PROGRAM_ID))!;
     const { args } = coder.instruction.decode(Buffer.from(ix.data))!.data;
     const size = BigInt(args.sizeDeltaUsd.toString()), collateralGm = BigInt(args.collateral.toString()) * 10n ** 14n;
@@ -96,7 +97,7 @@ describe('order amounts', () => {
     const key = Keypair.generate();
     const w = stub.walletData(key.publicKey.toBase58());
     const btc = marketRef('BTC');
-    const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, kind: 'Market', price: '64482', sizeUsd: 500, collateralUsd: 50, slippageBps: 50, takeProfit: '90000', stopLoss: '40000' });
+    const p = await prepareOpen(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, kind: 'Market', price: '64482', sizeUsd: 500, collateralUsd: 50, slippageBps: 50, takeProfit: '90000', stopLoss: '40000', rate });
     const budget = p.tx.message.compiledInstructions.find(i => p.tx.message.staticAccountKeys[i.programIdIndex]!.equals(ComputeBudgetProgram.programId) && i.data[0] === 2)!;
     // LiteSVM, tests/program env, 16 funded accounts, open + TP + SL on BTC: 377,371–444,876 CU (11 of 16 above 400k).
     expect(Buffer.from(budget.data).readUInt32LE(1)).toBeGreaterThanOrEqual(445_000);

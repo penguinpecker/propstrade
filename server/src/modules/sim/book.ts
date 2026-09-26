@@ -1,14 +1,16 @@
 // The simulated book: row types, loaders, API forms, and valuation with live marks from GMTrade's model.
 // ARCHITECTURE.md §1 definitions, in USDC micro units (m = 1e-6 USDC):
 //   equity = S + realized + unrealized; allowance = equity − (S − L);
-//   available margin = L + realized − Σ collateral of open positions − Σ collateral of pending increase orders.
+//   available margin = L + realized − Σ collateral of open positions − Σ collateral and Props fee of pending increase orders.
 // realized moves only on fills: an increase realizes its costs (collateral in minus collateral credited), a decrease
-// or liquidation realizes what it pays out minus the collateral it releases. So realized = Σ fills' realizedPnl.
+// or liquidation realizes what it pays out minus the collateral it releases, each less the order's Props fee. So
+// realized = Σ fills' realizedPnl.
 import { and, asc, desc, eq, inArray, isNull, not, or, type SQL } from 'drizzle-orm';
 import type { PgDatabase } from 'drizzle-orm/pg-core';
 import type { PostgresJsQueryResultHKT } from 'drizzle-orm/postgres-js';
 import type { AccountRules, AccountSummary, Fill, Order, OrderStatus, Position, PriceTick } from '@props/shared';
 import { model, type PositionStatus } from '@props/gmsol-wasm';
+import { orderFee, reservedFees, type OrderFeeRate } from '@props/sdk';
 import type * as schema from '../../db/schema.ts';
 import { accounts, evaluations, simFills, simOrders, simPositions, simResults } from '../../db/schema.ts';
 import type { MarketDataService, MarketState } from '../types.ts';
@@ -74,7 +76,7 @@ export function toOrder(o: OrderRow): Order {
     triggerPrice: o.triggerPrice === null ? null : trim(o.triggerPrice),
     acceptablePrice: o.acceptablePrice === null ? null : trim(o.acceptablePrice),
     status: o.status, ...(o.statusDetail ? { statusDetail: o.statusDetail } : {}),
-    createdAt: o.createdAt.getTime(), updatedAt: o.updatedAt.getTime(),
+    createdAt: o.createdAt.getTime(), updatedAt: o.updatedAt.getTime(), platformFeeUsd: trim(o.platformFeeUsd),
   };
 }
 
@@ -82,7 +84,7 @@ export function toFill(f: FillRow): Fill {
   return {
     id: f.id, symbol: f.symbol, side: f.side, isIncrease: f.isIncrease, sizeUsd: trim(f.sizeUsd), price: trim(f.price),
     feeUsd: trim(f.feeUsd), priceImpactUsd: trim(f.priceImpactUsd), fundingUsd: trim(f.fundingUsd), borrowUsd: trim(f.borrowUsd),
-    realizedPnl: f.realizedPnl === null ? null : trim(f.realizedPnl), ts: f.ts.getTime(), venue: 'simulated',
+    platformFeeUsd: trim(f.platformFeeUsd), realizedPnl: f.realizedPnl === null ? null : trim(f.realizedPnl), ts: f.ts.getTime(), venue: 'simulated',
   };
 }
 
@@ -121,7 +123,10 @@ export function rulesOf(a: AccountRow): AccountRules {
   };
 }
 
-export function toPosition(m: Mark, orders: OrderRow[]): Position {
+/** The rate no fee is charged at: what a caller that has no rate at hand shows. */
+const NO_FEE: OrderFeeRate = { feeUsdc: 0n, feeBps: 0 };
+
+export function toPosition(m: Mark, orders: OrderRow[], rate: OrderFeeRate = NO_FEE): Position {
   const p = m.position;
   const protection = (kind: 'TakeProfit' | 'StopLoss') => {
     const o = orders.find((x) => x.positionId === p.id && x.kind === kind && PENDING.includes(x.status));
@@ -139,6 +144,7 @@ export function toPosition(m: Mark, orders: OrderRow[]): Position {
     unrealizedPnl: unrealized === undefined ? null : microText(unrealized),
     pendingFeesUsd: pending(s && s.pendingBorrowingFeeValue + s.pendingFundingFeeValue + s.closeOrderFeeValue),
     pendingBorrowUsd: pending(s?.pendingBorrowingFeeValue), pendingFundingUsd: pending(s?.pendingFundingFeeValue), closeFeeUsd: pending(s?.closeOrderFeeValue),
+    platformFeeUsd: microText(orderFee(rate, usd(p.sizeUsd))),
     closing: orders.some((o) => o.positionId === p.id && o.kind === 'Market' && !o.isIncrease && o.closeAll && PENDING.includes(o.status)),
     takeProfit: protection('TakeProfit'), stopLoss: protection('StopLoss'),
     openedAt: p.openedAt.getTime(), venue: 'simulated',
@@ -154,7 +160,7 @@ export interface Valuation {
   complete: boolean;
 }
 
-export function value(a: AccountRow, marks: Mark[], orders: OrderRow[], now = Date.now()): Valuation {
+export function value(a: AccountRow, marks: Mark[], orders: OrderRow[], now = Date.now(), rate: OrderFeeRate = NO_FEE): Valuation {
   const size = micro(a.sizeUsd);
   const allowance = micro(a.lossAllowanceUsd);
   const target = a.profitTargetUsd === null ? null : micro(a.profitTargetUsd);
@@ -169,6 +175,8 @@ export function value(a: AccountRow, marks: Mark[], orders: OrderRow[], now = Da
     if (m.tick?.session === 'open' && now - m.tick.ts > STALE_MS) stale = true;
   }
   const reserved = orders.reduce((sum, o) => sum + (o.isIncrease && o.collateralUsd ? micro(o.collateralUsd) : 0n), 0n);
+  // Props fees of pending increases, charged when they fill: held as the program holds a funded account's (none is due).
+  const held = reservedFees(0n, orders.map((o) => ({ fee: micro(o.platformFeeUsd), isIncrease: o.isIncrease })));
   const equity = size + realized + unrealized;
   const summary: AccountSummary = {
     id: a.id, stage: a.stage, status: a.status, label: a.label,
@@ -176,8 +184,9 @@ export function value(a: AccountRow, marks: Mark[], orders: OrderRow[], now = Da
     rules: rulesOf(a),
     equity: microText(equity), realizedPnl: microText(realized), unrealizedPnl: microText(unrealized),
     allowanceRemaining: microText(equity - size + allowance),
-    availableMargin: microText(allowance + realized - collateral - reserved),
+    availableMargin: microText(allowance + realized - collateral - reserved - held),
     openNotional: usdText(notional),
+    platformFees: { dueUsd: '0', paidUsd: trim(a.platformFeesUsd), heldUsd: microText(held) },
     targetProgressPct: target ? Math.max(0, round2((Number(realized + unrealized) / Number(target)) * 100)) : null,
     eligiblePayout: null,
     createdAt: a.createdAt.getTime(), activatedAt: a.activatedAt?.getTime() ?? null, resolvedAt: a.resolvedAt?.getTime() ?? null,
@@ -186,11 +195,11 @@ export function value(a: AccountRow, marks: Mark[], orders: OrderRow[], now = Da
       : {},
     freshness: !complete ? 'unavailable' : stale ? 'stale' : 'live',
   };
-  return { summary, positions: marks.map((m) => toPosition(m, orders)), equity, realized, unrealized, complete };
+  return { summary, positions: marks.map((m) => toPosition(m, orders, rate)), equity, realized, unrealized, complete };
 }
 
-/** Everything a reader or the stream needs about one account right now. */
-export async function snapshot(q: Q, md: MarketDataService, a: AccountRow) {
+/** Everything a reader or the stream needs about one account right now; `rate`: Props.trade's fee rate now. */
+export async function snapshot(q: Q, md: MarketDataService, a: AccountRow, rate: OrderFeeRate) {
   const book = await loadBook(q, a.id);
-  return { book, valuation: value(a, await markPositions(md, book.positions), book.orders) };
+  return { book, valuation: value(a, await markPositions(md, book.positions), book.orders, Date.now(), rate) };
 }

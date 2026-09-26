@@ -26,6 +26,7 @@ const EVENT_TITLES: Record<string, string> = {
   accountClosed: 'Funded account closed', capitalDeposited: 'Capital deposited', capitalWithdrawn: 'Capital withdrawn', feesSwept: 'Fees moved to capital',
   configChanged: 'Program settings changed', identitySet: 'Identity verified', solTreasuryWithdrawn: 'SOL treasury withdrawal',
   emptyPositionClosed: 'Empty exchange position closed', claimableCollected: 'Exchange claimable USDC collected',
+  orderFeesSettled: 'Props order fees settled',
 };
 
 export function createVerify(d: { db: Db; rpc: Pick<Connection, 'getAccountInfo' | 'getTransaction'>; programId: PublicKey; cluster: AppConfig['cluster'] }) {

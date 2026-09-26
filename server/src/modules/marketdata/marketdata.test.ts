@@ -18,11 +18,12 @@ import {
   IdlCoder, INTERVAL_SECONDS, NATIVE_INTERVALS, NO_ACCOUNT, USDC_MINT, base58Encode, decodeMarket, findProgramAddress, getMultipleAccounts,
   parseFixed, priceString, pubkeyBytes, storeIdl, usdString, venueLimits, type Idl, type KeeperMarket, type KeeperToken,
 } from '@props/gmtrade';
-import { PropsVaultClient } from '@props/sdk';
+import { PropsVaultClient, orderFee } from '@props/sdk';
 import { createDb, type Sql } from '../../db/client.ts';
 import { runMigrations } from '../../db/migrate.ts';
 import { recreateDatabase, testDatabaseUrl } from '../../../test/db.ts';
-import type { ModuleContext } from '../types.ts';
+import type { OrderFeeRateInfo } from '../../lib/order-fee.ts';
+import type { ChainService, ModuleContext } from '../types.ts';
 import register, { candleCacheTtl, candleWindow, changedForDisplay, createMarketData, type MarketDataOptions } from './index.ts';
 import { withPosition } from '../sim/model.ts';
 import { fetchAllowlist, marketConfigAddress } from './allowlist.ts';
@@ -223,16 +224,18 @@ function recordingLog(warnings: string[]): ModuleContext['log'] {
 /** The module on the mock clock as it stands, the stand-in feed and candle service, the RPC stub, and the candle
  *  history table when `sql` is a real database (else its writes fail quietly, as they would with the database down;
  *  `warnings` collects what is logged). */
-async function stubbedModule(t: TestContext, opts: { sql?: Sql; warnings?: string[] } = {}) {
+async function stubbedModule(t: TestContext, opts: { sql?: Sql; warnings?: string[]; orderFeeRate?: () => Promise<OrderFeeRateInfo> } = {}) {
   const { url, server } = await rpcStub(await allowlistAccounts());
   const app = Fastify({ logger: false });
   const abort = new AbortController();
   const candles = stubCandles();
   const events: StreamEvent[] = [];
   const ctx: ModuleContext = {
-    app, log: opts.warnings ? recordingLog(opts.warnings) : app.log, env: { PROGRAM_ID, RPC_URL: url }, services: {}, signal: abort.signal,
+    app, log: opts.warnings ? recordingLog(opts.warnings) : app.log, env: { PROGRAM_ID, RPC_URL: url }, signal: abort.signal,
+    // The Props order fee: the chain module's rate when the test gives one, else the server's settings (off).
+    services: opts.orderFeeRate ? { chain: { orderFeeRate: opts.orderFeeRate } as unknown as ChainService } : {},
     publish: (event) => events.push(event),
-    config: {} as never, db: {} as never, sql: opts.sql ?? ({} as never), rpc: {} as never, notify: async () => {},
+    config: { ORDER_FEE_USDC: '0', ORDER_FEE_BPS: 0 } as never, db: {} as never, sql: opts.sql ?? ({} as never), rpc: {} as never, notify: async () => {},
   };
   const { feed, tick } = stubFeed(Math.floor(Date.now() / 1000));
   const service = await createMarketData(ctx, { feed, gm: candles.gm });
@@ -1034,8 +1037,9 @@ function loadSolMarket(feed: NonNullable<MarketDataOptions['feed']>) {
   return { image: image.toString('base64'), virtualInventories: { [vi]: f.virtualInventories[vi]! }, prices: f.prices };
 }
 
-test('quote: the ticket\'s cost preview from GMTrade\'s model on the real SOL pool — close fee, round trip, hourly cost, liquidation price', { timeout: 30_000 }, async (t) => {
-  const { feed, get, service } = await stubbedModule(t);
+test('quote: the ticket\'s cost preview from GMTrade\'s model on the real SOL pool — close fee, round trip, hourly cost, liquidation price, Props fee', { timeout: 30_000 }, async (t) => {
+  let rate: OrderFeeRateInfo = { feeUsdc: 0n, feeBps: 0, source: 'program' };
+  const { feed, get, service } = await stubbedModule(t, { orderFeeRate: async () => rate });
   const sol = loadSolMarket(feed);
   await new Promise((r) => setTimeout(r, 1_100)); // the catalog rebuilds after a second: SOL's row now carries the rates
   const row = service.market('SOL')!;
@@ -1055,6 +1059,18 @@ test('quote: the ticket\'s cost preview from GMTrade\'s model on the real SOL po
     [usdString(open.fees.orderFeeValue), usdString(status.closeOrderFeeValue), usdString(open.fees.orderFeeValue + status.closeOrderFeeValue),
       priceString(status.liquidationPrice!, 9, 4), '1000', '10000', '10000', '0'],
   );
+  assert.deepEqual([q.body.maxFeeMicro, q.body.platformCloseFeeUsd], ['0', '0'], 'no Props fee while the rate is 0');
+  // At $0.50 + 2 bps, the order's Props fee (the program's formula, @props/sdk orderFee) is quoted, its u64 is the
+  // funded open's maxFee, and the round trip counts it twice (the close of the resulting position pays it too).
+  rate = { feeUsdc: 500_000n, feeBps: 2, source: 'program' };
+  const priced = await get<PriceImpactQuote>('/v1/quote?symbol=SOL&side=Short&sizeUsd=10000&collateralUsd=1000');
+  assert.equal(orderFee(rate, 10_000n * 10n ** 20n), 2_500_000n);
+  assert.deepEqual([priced.body.platformFeeUsd, priced.body.maxFeeMicro, priced.body.platformCloseFeeUsd, priced.body.openFeeUsd, priced.body.closeFeeUsd],
+    ['2.5', '2500000', '2.5', q.body.openFeeUsd, q.body.closeFeeUsd]);
+  assert.equal(priced.body.roundTripFeeUsd, usdString(open.fees.orderFeeValue + status.closeOrderFeeValue + 5n * 10n ** 20n));
+  const odd = await get<PriceImpactQuote>('/v1/quote?symbol=SOL&side=Short&sizeUsd=1234.567891&collateralUsd=1000');
+  assert.equal(odd.body.maxFeeMicro, String(orderFee(rate, 1_234_567_891n * 10n ** 14n)), 'the size in micro-USD, rounded down as the program does');
+  rate = { feeUsdc: 0n, feeBps: 0, source: 'program' };
   // Shorts are the larger side of this pool: opening one worsens the balance (1.2 bp), closing it improves it (1 bp).
   const [openFee, closeFee] = [Number(q.body.openFeeUsd), Number(q.body.closeFeeUsd)];
   assert.ok(Math.abs(openFee - 1.2) < 0.01 && Math.abs(closeFee - 1) < 0.01 && closeFee < openFee, `open ${openFee} close ${closeFee}`);

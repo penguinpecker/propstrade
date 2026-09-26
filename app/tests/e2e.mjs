@@ -40,9 +40,10 @@ const site = await preview({ root: appDir, logLevel: 'error', build: { outDir },
 const siteUrl = site.resolvedUrls.local[0].replace(/\/$/, '');
 
 // Expected console noise, all caused on purpose by the stub: anonymous /v1/me (401), the stream outage (503), the
-// candles of a saved market that is not in the catalog (404), the exchange refusing a quoted order (422) and a
-// referral code the service refuses to bind (4xx).
+// candles of a saved market that is not in the catalog (404), the exchange refusing a quoted order (422), a
+// referral code the service refuses to bind (4xx) and /v1/config before the program is live (503, the Props fee check).
 const expected = msg => /status of 401/.test(msg.text()) && msg.location().url.endsWith('/v1/me')
+  || /status of 503/.test(msg.text()) && msg.location().url.endsWith('/v1/config')
   || /503|ERR_INCOMPLETE_CHUNKED_ENCODING/.test(msg.text()) && (msg.location().url.endsWith('/v1/stream') || /EventSource/.test(msg.text()))
   || /status of 404/.test(msg.text()) && (msg.location().url.includes('/v1/candles?symbol=ZZZ') || msg.location().url.includes('/v1/traders/'))
   || /status of 422/.test(msg.text()) && msg.location().url.includes('/v1/quote?')
@@ -1466,6 +1467,170 @@ try {
       await page.locator('.markets-table tbody tr').first().waitFor();
       await sweep('markets');
       assert.deepEqual(found, [], `the venue is named:\n${found.join('\n')}`);
+    });
+
+    // Props' fee per order: the stub serves state.orderFee in /v1/config and its quotes, and its program refuses an order
+    // whose fee at that rate is above the max_fee it carries (OrderFeeChanged). A reload reads the config again.
+    /** Sets the rate the stub serves and assesses; the page keeps the rate it last read until it reads the config again. */
+    const setFee = (usd, bps) => { state.orderFee = { usd, bps }; };
+    const clearLegs = async ticket => { for (const clear of await ticket.getByRole('button', { name: 'Clear' }).all()) if (await clear.isEnabled()) await clear.click(); };
+
+    await check('Props fee: none while the rate is 0; with one, the ticket names the rate and this order\'s fee, the Fees row sums its breakdown, a take profit or stop loss shows its fee and maximum, buying power leaves the fee beside the margin, and the rules name the rate', async () => {
+      const ticket = page.locator('.order-panel');
+      const details = ticket.locator('.order-details');
+      const breakdown = () => ticket.getByRole('button', { name: 'Fee breakdown' }).getAttribute('title');
+      const fillTicket = async () => {
+        await showMarket('BTC');
+        await openDetails();
+        await clearLegs(ticket);
+        await page.getByLabel('Order size in USD').fill('1000');
+        await ticket.getByRole('button', { name: '5×', exact: true }).click();
+        await ticket.getByLabel('Take profit price').fill('70000');
+        await page.waitForFunction(() => /\$\d/.test(document.querySelector('.order-summary')?.innerText.split('Fees')[1] ?? ''), null, { timeout: 5_000 });
+      };
+      try {
+        setFee('0', 0);
+        await page.goto(`${siteUrl}/#/trade/evaluation`);
+        await fillTicket();
+        await details.getByText('Props.trade charges no fee per order').waitFor();
+        assert.equal(await ticket.getByText(/^Props fee/).count(), 0, 'a Props fee shows at rate 0');
+        assert.match(await breakdown(), /while open · No Props\.trade fee per order$/);
+        const powerOff = await ticket.locator('.size-equivalent b').innerText();
+        // $0.50 + 2 bps: on $1,000 that is $0.70 an order; a take profit's maximum is the rate on the 25K account's $25,000 cap.
+        setFee('0.5', 2);
+        await page.reload();
+        await fillTicket();
+        const propsRow = details.locator('.data-row').filter({ hasText: /^Props fee/ });
+        await propsRow.getByText('$0.70').waitFor();
+        assert.match(await propsRow.locator('span').innerText(), /^Props fee · \$0\.50 \+ 0\.02%\s*Simulated · charged only if the order executes$/);
+        assert.equal(await details.getByText('Props.trade charges no fee per order').count(), 0);
+        const help = await breakdown();
+        assert.match(help, /^Open fee \$0\.60 · Est\. close fee \$0\.60 · Props fee \$0\.70 to open, \$0\.70 to close · Borrow \+ funding/);
+        const parts = [...help.matchAll(/\$([\d.]+)(?![\d.]|\/h)/g)].map(m => Number(m[1])); // open, close, Props to open, Props to close (not the hourly carry)
+        const feesRow = Number((await ticket.locator('.order-summary .data-row').nth(2).locator('strong').innerText()).replace(/[$,]/g, ''));
+        assert.equal(parts.length, 4, help);
+        assert.ok(Math.abs(parts.reduce((a, b) => a + b, 0) - feesRow) < 0.011, `${parts.join(' + ')} is not the Fees row ${feesRow}: ${help}`);
+        assert.equal(feesRow, 2.6);
+        await ticket.getByText('Props fee ≈ $0.70, at most $5.50: charged only if it executes, on the size it closes.').waitFor();
+        await ticket.getByLabel('Stop loss price').fill('60000');
+        await ticket.getByText('Props fee ≈ $0.70 each, at most $5.50: only the one that executes is charged, on the size it closes.').waitFor();
+        // 2,242.73 available at 5×: (2,242.73 − 0.50) × 5 / (1 + 0.0002 × 5) ≈ $11,200 instead of $11,214.
+        assert.deepEqual([powerOff, await ticket.locator('.size-equivalent b').innerText()], ['$11,214', '$11,200']);
+        assert.deepEqual(await brandLeaks(page), []);
+        await ticket.getByRole('button', { name: 'View account rules' }).click();
+        await page.getByRole('dialog').locator('.data-row').filter({ hasText: 'Props fee per executed order' }).getByText('$0.50 + 0.02%').waitFor();
+        await page.keyboard.press('Escape');
+        await clearLegs(ticket);
+        // A take profit closes the whole position on its side: adding $1,000 to the $4,600 SOL long, it is assessed on
+        // $5,600 ($0.50 + 2 bps = $1.62), not on the new $1,000 alone.
+        await showMarket('SOL');
+        await page.getByLabel('Order size in USD').fill('1000');
+        await ticket.getByLabel('Take profit price').fill('500');
+        await ticket.getByText('Props fee ≈ $1.62, at most $5.50: charged only if it executes, on the size it closes.').waitFor();
+        await clearLegs(ticket);
+        // A pending order shows its fee (a decrease its maximum), and the fees held off the margin are named.
+        const evaluation = w.accounts.find(a => a.id === w.evalActive);
+        const [limit] = w.orders[w.evalActive];
+        Object.assign(limit, { platformFeeUsd: '1.1' });
+        evaluation.platformFees = { dueUsd: '0', paidUsd: '0', heldUsd: '1.1' };
+        await page.reload();
+        await page.getByRole('tab', { name: /^Open orders/ }).click();
+        await page.locator('.positions-panel tbody tr').filter({ hasText: 'ETH / USD' }).getByText('Props fee $1.10').waitFor();
+        await ticket.locator('.ticket-account .data-row').filter({ hasText: 'Props fees held' }).getByText('$1.10').waitFor();
+        delete limit.platformFeeUsd;
+        delete evaluation.platformFees;
+      } finally {
+        setFee('0', 0);
+      }
+    });
+
+    await check('Props fee before the program is live: the ticket, buying power and the rules take the demo rate from /v1/order-fee while /v1/config answers 503', async () => {
+      const ticket = page.locator('.order-panel');
+      const notLive = route => route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: { code: 'not_initialized', message: 'The program is not live yet' } }) });
+      try {
+        setFee('0.5', 2);
+        await page.route('**/v1/config', notLive);
+        await page.goto(`${siteUrl}/#/trade/evaluation`);
+        await page.reload();
+        await showMarket('BTC');
+        await openDetails();
+        await clearLegs(ticket);
+        await page.getByLabel('Order size in USD').fill('1000');
+        await ticket.getByRole('button', { name: '5×', exact: true }).click();
+        const propsRow = ticket.locator('.order-details .data-row').filter({ hasText: /^Props fee · \$0\.50 \+ 0\.02%/ });
+        await propsRow.getByText('$0.70').waitFor();
+        assert.equal(await ticket.getByText('Props.trade charges no fee per order').count(), 0);
+        assert.match(await ticket.getByRole('button', { name: 'Fee breakdown' }).getAttribute('title'), /Props fee \$0\.70 to open, \$0\.70 to close/);
+        assert.equal(await ticket.locator('.size-equivalent b').innerText(), '$11,200', 'buying power leaves the fee beside the margin');
+        await ticket.getByRole('button', { name: 'View account rules' }).click();
+        await page.getByRole('dialog').locator('.data-row').filter({ hasText: 'Props fee per executed order' }).getByText('$0.50 + 0.02%').waitFor();
+        await page.keyboard.press('Escape');
+      } finally {
+        await page.unroute('**/v1/config');
+        setFee('0', 0);
+      }
+    });
+
+    await check('Props fee: a funded order signs it as its max_fee (the open its fee, a take profit or stop loss its maximum); raised since the quote, the order is re-quoted and sent once more, with a notice', async () => {
+      const ticket = page.locator('.order-panel');
+      const maxFees = s => s.data.args.maxFee.toString();
+      try {
+        setFee('0.5', 2);
+        await page.goto(`${siteUrl}/#/trade/funded`);
+        await page.reload();
+        await showMarket('BTC');
+        await clearLegs(ticket);
+        await page.getByLabel('Order size in USD').fill('1000');
+        await ticket.getByRole('button', { name: '5×', exact: true }).click();
+        await ticket.getByLabel('Take profit price').fill('70000');
+        await ticket.getByLabel('Stop loss price').fill('60000');
+        const opens = sent('openPosition').length, protections = sent('setProtection').length;
+        await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
+        await ticket.getByText('BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
+        assert.equal(maxFees(sent('openPosition')[opens]), '700000'); // $0.50 + 2 bps of $1,000
+        assert.deepEqual(sent('setProtection').slice(protections).map(maxFees), ['5500000', '5500000']); // $0.50 + 2 bps of the $25,000 cap
+        // The rate goes up after the page read it: the program refuses the open, the app reads the rate again and resends.
+        await clearLegs(ticket);
+        setFee('0.6', 3);
+        const signatures = state.signatures;
+        await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
+        await ticket.getByText('The Props fee changed to $0.60 + 0.03% since your quote: the order was sent again at the new fee. BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
+        assert.equal(state.signatures, signatures + 1, 'the refused order was signed, or the resend was not');
+        assert.deepEqual(sent('openPosition').slice(opens + 1).map(maxFees), ['900000']); // $0.60 + 3 bps of $1,000
+        await openDetails();
+        await ticket.locator('.order-details .data-row').filter({ hasText: /^Props fee · \$0\.60 \+ 0\.03%/ }).getByText('$0.90').waitFor(); // re-quoted
+        // The server still serves the old rate (its copy lags the program's): the resend takes the program's own rate.
+        await clearLegs(ticket);
+        const stale = route => route.fulfill({ json: { orderFeeUsd: '0.6', orderFeeBps: 3, orderFeeSource: 'program' } });
+        await page.route('**/v1/order-fee', stale);
+        setFee('0.7', 4);
+        await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
+        await ticket.getByText('The Props fee changed to $0.70 + 0.04% since your quote: the order was sent again at the new fee. BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
+        assert.deepEqual(sent('openPosition').slice(opens + 2).map(maxFees), ['1100000']); // $0.70 + 4 bps of $1,000
+        await page.unroute('**/v1/order-fee', stale);
+      } finally {
+        setFee('0', 0);
+      }
+    });
+
+    await check('Props fee: trade history itemises it within the total costs (a trade without one shows none), and performance takes it off apart from the exchange\'s fees', async () => {
+      await page.goto(`${siteUrl}/#/trade/evaluation`);
+      await page.getByRole('tab', { name: 'Trade history' }).click();
+      const dialog = page.getByRole('dialog', { name: 'Record details' });
+      const recordRows = async id => {
+        await page.getByRole('button', { name: new RegExp(`^View trade ${id}$`) }).click();
+        const rows = (await dialog.locator('.data-row').allInnerTexts()).map(r => r.replace(/\s+/g, ''));
+        await page.keyboard.press('Escape');
+        return rows;
+      };
+      const withFee = await recordRows('trade-0');
+      for (const expected of ['Open+closefees$2.60', 'Propsfee$1.40', 'Funding$0.31', 'Borrowing$0.21', 'Totalcosts$4.52']) assert.ok(withFee.includes(expected), `missing ${expected}: ${withFee.join(' | ')}`);
+      assert.deepEqual(withFee.slice(withFee.indexOf('Open+closefees$2.60'), withFee.indexOf('Funding$0.31')), ['Open+closefees$2.60', 'Propsfee$1.40']);
+      assert.equal((await recordRows('trade-1')).filter(r => r.startsWith('Propsfee')).length, 0, 'a trade without a Props fee shows one');
+      await page.goto(`${siteUrl}/#/performance`);
+      const numbers = main.locator('section').filter({ hasText: 'Where the numbers come from' });
+      await numbers.locator('.data-row').first().waitFor();
+      assert.deepEqual((await numbers.locator('.data-row').allInnerTexts()).slice(1, 4).map(r => r.replace(/\s+/g, ' ')), ['Trading fees −$48.30', 'Props fees −$1.40', 'Funding & borrowing −$14.21']);
     });
 
     await check('no unexpected console errors during the data and transaction flows', async () => {
