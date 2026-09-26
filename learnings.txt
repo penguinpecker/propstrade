@@ -1125,3 +1125,65 @@ Pinocchio evaluated (2026-09-23; measured in a scratch copy, 59/59 LiteSVM tests
 - Program tests need litesvm 1.4.1 but node_modules has 0.8.0 (the lock pins 1.4.1): agents used the scratch hook
   order-fee/build/hook.mjs; an `npm install` in the repo would fix it for good.
 - Full fuzz campaign on the fee binaries: 338,550 tx, 0 differences, 0 violations (PORTING.md).
+
+2026-09-25 DEPLOYED 5920cca (app only): compact design (owner: "i dont like huge paddings around all the boxes, the
+           design has to be sleek and compact"; "reduce the information here and increase the size of buy button";
+           "increase the font size of whole platform a bit"). Paddings/gaps -35-45 % everywhere, type +1 px up to 13 px
+           (+6 % above), market heading one row at >= 1051 px (metrics scroll with a fade, never wrap), header 66->52,
+           account strip 76->54, heading 76->58, table rows ~40 px, the chart takes the freed height (391->510 px at
+           1440x900). Ticket = side, Market/Limit, leverage, size, TP/SL, then three rows (Liq. price, Margin, Fees) and
+           a 50 px button (sticky on short laptops) with blocking messages right above it; everything else in a
+           collapsed, remembered 'Order details'; explanations became info buttons (tap = toast on touch).
+           aa929b3 then added the Fees info button (open + close fee, holding cost, Props fee).
+- The CSS pass was generated from the committed files by a script (scratch compact.py) so a rerun starts from the
+  base; overrides that matched no rule stopped the script (the "assert the edit applied" rule, applied to CSS).
+- Moving controls into a collapsed disclosure broke a browser test that clicked them (review.e2e slippage): grep
+  every test for the moved label before shipping a layout change.
+- The positions footer showed +$0.00 in stub screenshots while rows showed P&L: the stub's account row is static;
+  production computes it (the owner's screenshot summed correctly). Check the data source before calling it a bug.
+
+2026-09-26 DEPLOYED 986f347 (server 4b6c2d8f…, migration 0009): referral program. Code = the first 8 characters of
+           the wallet, upper-cased (longer on a clash), matched case-insensitively; ?ref=CODE kept 30 days and removed
+           from the address; an optional field on the Connect page and the sign-in dialog; bound once, within 7 days of
+           the first sign-in, before any evaluation, never one's own; Referrals page (code, link, counts, earned/paid/
+           pending, masked referees); admin balances + payout records (signature checked onchain, KYC-verified
+           referrers only). At deploy the boot backfill gave codes to 2 users = every wallet that had signed in.
+           Reward base changed on 2026-09-26 (407c4d6): 10 % of the Props fee charged on funded orders.
+- The exchange's own referral pays referrers GT points (not USDC) and gives referees 10 % off order fees; builder
+  fees (an integrator's cut) exist only in unreleased code with the cap at 0. So Props pays referrers from its own
+  revenue, which is why the base is the Props fee (exact per order, onchain) and demo fees earn nothing.
+- A wallet-prefix code makes the public code check reveal whether a wallet has signed in: accepted as the cost of the
+  owner's "code from the wallet" rule (documented).
+
+2026-09-26 Two clock-dependent tests fixed (test-only, d0ce637 + c6f2e5b): the black-swan keeper test 4 failed only
+           15:45-16:00 New York time (the session guard's pre-close window closed the crashed stock position); the
+           keeper e2e missed its failed-job alert whenever the next NYSE close was >= 24 h away (its keeper clock is
+           shifted to a session close while the inserted job was stamped with the database clock). A test that moves
+           the keeper's clock must stamp its fixtures on the same clock.
+
+2026-09-26 Owner questions answered (for the next conversation):
+- "Building on GM, not a GMX vault?" Yes: GMTrade = the GMX-DAO-authorised Solana deployment of GMX v2 (ex GMX-Solana;
+  DefiLlama lists it as "GMX Solana", previously GMTrade, parent GMX, TVL ~$28 M on 09-26). Traders trade against
+  isolated GM pools (we use the pure USDC ones); GLV vaults are an LP product that owns 40-83 % of those pools and
+  moves liquidity (why size limits are live); GMX v1's single GLP vault is not involved. Props' own vault only posts
+  margin and never takes the other side.
+- "Fee guidelines?" No published integrator fee rules; the code licence (BSL 1.1, non-production until at least
+  2027-12-01) means asking GMTrade in writing before a real-money launch that links their crates and charges fees.
+- "Decentralised?" Partly: our funded orders go straight onchain, but prices/candles/market info/fills come from
+  GMTrade's own (undocumented, no-SLA) services, only 8 GMTrade-approved addresses execute trades and liquidations,
+  and a 4-of-7 multisig can upgrade their program with a 10-minute delay. Evaluations run on our servers. Pitch:
+  "a prop firm where the money is onchain".
+- Sign-ups: 2 wallets as of 2026-09-26 01:50 IST. Production database reads by the agent (railway ssh) are refused by
+  the session's permission rules and no public database URL exists: use the Railway dashboard (Postgres -> Data) or
+  run the query yourself.
+
+2026-09-26 How the parallel work was kept safe (process notes):
+- Independent workstreams ran in copy-on-write clones (cp -c -R: 30 s for 4.4 GB, node_modules symlinks are relative
+  so they resolve inside the clone); their diffs were ported with git apply -3 (clean every time), and the clones
+  deleted afterwards. A shared mkdir lock (scratch validator.lock) serialised solana-test-validator runs.
+- When one working tree held two workstreams, only one was committed (by path) and that commit was tested ALONE in a
+  clean clone before pushing (server 223, app 210 + e2e 199), because the gate had run on the mixed tree.
+- A workflow killed by a usage limit was resumed by pointing the new agents at their predecessors' transcripts and
+  files; they re-ran and fixed the half-written tests instead of starting over.
+- Railway variables can be set without a redeploy (railway variables --set K=V --skip-deploys) so the next
+  railway up boots with them; print only the keys you set (--kv | grep ^KEY=), never the rest.
