@@ -8,7 +8,7 @@ import BN from 'bn.js';
 import { ComputeBudgetProgram, Connection, PublicKey, VersionedTransaction } from '@solana/web3.js';
 import {
   MARKET_DISCRIMINATOR, MARKET_LAYOUT, POSITION_DISCRIMINATOR, POSITION_LAYOUT, PROPS_VAULT_IDL, PROPS_VAULT_PROGRAM_ID, PropsVaultClient, USDC_MINT, capitalVaultAddress,
-  evaluationPda, feeVaultPda, fundedPda, marketConfigPda, payoutPda, tierPda, traderProfilePda,
+  configPda, evaluationPda, feeVaultPda, fundedPda, marketConfigPda, orderFee, payoutPda, tierPda, toMicro, traderProfilePda, usdToGm,
 } from '@props/sdk';
 
 export const MAINNET_GENESIS = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
@@ -25,7 +25,37 @@ function encodeAccount(name, value) {
   const data = Buffer.alloc(4096);
   return Buffer.concat([Buffer.from(discriminator), data.subarray(0, layout.encode(value, data))]);
 }
+/** The Config account the app reads the rate from after OrderFeeChanged: zeroes but the stub's program rate. */
+function configAccount(fee) {
+  const { discriminator } = client.program.coder.accounts.accountLayouts.get('config');
+  const zero = client.program.coder.accounts.decode('config', Buffer.concat([Buffer.from(discriminator), Buffer.alloc(1024)]));
+  return encodeAccount('config', { ...zero, orderFeeUsdc: new BN(toMicro(fee.usd).toString()), orderFeeBps: fee.bps });
+}
 const accountIndex = (ix, name) => PROPS_VAULT_IDL.instructions.find(i => i.name === ix).accounts.findIndex(a => a.name === name);
+
+// ---------- Props fee (state.orderFee: the rate /v1/config serves and the stub's program assesses) ----------
+const feeRate = ({ usd, bps }) => ({ feeUsdc: toMicro(usd), feeBps: bps });
+/** An order's Props fee in USDC base units, as the server and the program compute it (a decrease: at most `capGm`). */
+const propsFee = (state, sizeGm, capGm) => orderFee(feeRate(state.orderFee), sizeGm, capGm);
+const propsFeeUsd = (state, sizeUsd) => (Number(propsFee(state, usdToGm(Number(sizeUsd).toFixed(6)))) / 1e6).toFixed(6);
+/** The fixture funded account's exposure cap: 25K terms at 100% (fundedAccount below). */
+const FUNDED_CAP = 25_000n * 10n ** 20n;
+/**
+ * The program's OrderFeeChanged: the logs of a simulation refused because an order's Props fee at the current rate is
+ * above the max_fee it carries (an increase on its size, a decrease on at most the account's exposure cap), else null.
+ */
+function feeRefusal(state, tx) {
+  const keys = tx.message.staticAccountKeys.map(k => k.toBase58());
+  for (const ix of tx.message.compiledInstructions) {
+    if (keys[ix.programIdIndex] !== PROGRAM_ID) continue;
+    const { name, data } = client.program.coder.instruction.decode(Buffer.from(ix.data));
+    if (!data.args?.maxFee) continue;
+    const size = name === 'updateOrder' ? 2n ** 128n - 1n : BigInt(data.args.sizeDeltaUsd.toString()); // the ticket's TP/SL close all
+    const fee = name === 'openPosition' ? propsFee(state, size) : propsFee(state, size, FUNDED_CAP);
+    if (fee > BigInt(data.args.maxFee.toString())) return [`Program ${PROGRAM_ID} invoke [1]`, `Program log: ${name}: fee ${fee} above max_fee ${data.args.maxFee}`, `Program ${PROGRAM_ID} failed: custom program error: 0x179e`];
+  }
+  return null;
+}
 
 // ---------- tiers (the API's /v1/config and the onchain Tier accounts agree) ----------
 const TERMS_HASH = 'a1b2c3d4'.repeat(8);
@@ -166,8 +196,8 @@ function createWallet(state, wallet) {
   w.positions[evalActive].push({ id: 'pos-sol', symbol: 'SOL', side: 'Long', sizeUsd: '4600', sizeTokens: '30.2944', collateralUsd: '1533.33', leverage: 3, entryPrice: '145.49', markPrice: sol.price, liquidationPrice: '98.12', unrealizedPnl: '192.52', pendingFeesUsd: '3.60', pendingBorrowUsd: '0.62', pendingFundingUsd: '0.22', closeFeeUsd: '2.76', closing: false, takeProfit: { price: '168', orderId: 'tp-sol', status: 'awaiting_price' }, stopLoss: null, openedAt: now - 5 * HOUR, venue: 'simulated' });
   w.orders[evalActive].push({ id: 'ord-eth', symbol: 'ETH', side: 'Long', kind: 'Limit', isIncrease: true, sizeUsd: '3000', collateralUsd: '1000', triggerPrice: '2580', acceptablePrice: null, status: 'awaiting_price', createdAt: now - 3 * HOUR, updatedAt: now - 3 * HOUR });
   for (const [i, [symbol, side, pnl]] of [['BTC', 'Long', '73.25'], ['XAU', 'Short', '36.20'], ['ETH', 'Long', '-49.86']].entries())
-    w.history[evalActive].push({ id: `trade-${i}`, symbol, side, openedAt: now - (i + 2) * DAY, closedAt: now - (i + 1) * DAY, sizeUsd: '5200', entryPrice: '100', exitPrice: '101', ...costs('3.12', '2.60', '0.31', '0.21', '-0.45'), netPnl: pnl, venue: 'simulated', signatures: [] });
-  w.history[funded].push({ id: 'funded-trade-0', symbol: 'BTC', side: 'Long', openedAt: now - 3 * DAY, closedAt: now - 2 * DAY, sizeUsd: '8200', entryPrice: '63842.5', exitPrice: '64412.8', ...costs('4.92', '4.10', '0.50', '0.32', '0.18'), netPnl: '312.50', venue: 'exchange', signatures: [fakeSignature('funded-open'), fakeSignature('funded-close')] });
+    w.history[evalActive].push({ id: `trade-${i}`, symbol, side, openedAt: now - (i + 2) * DAY, closedAt: now - (i + 1) * DAY, sizeUsd: '5200', entryPrice: '100', exitPrice: '101', ...(i ? costs('3.12', '2.60', '0', '0.31', '0.21', '-0.45') : costs('4.52', '2.60', '1.40', '0.31', '0.21', '-0.45')), netPnl: pnl, venue: 'simulated', signatures: [] });
+  w.history[funded].push({ id: 'funded-trade-0', symbol: 'BTC', side: 'Long', openedAt: now - 3 * DAY, closedAt: now - 2 * DAY, sizeUsd: '8200', entryPrice: '63842.5', exitPrice: '64412.8', ...costs('7.06', '4.10', '2.14', '0.50', '0.32', '0.18'), netPnl: '312.50', venue: 'exchange', signatures: [fakeSignature('funded-open'), fakeSignature('funded-close')] });
   w.payouts.push(payout(w, 0, 'paid', now - 2 * DAY));
   w.payoutSeq = 1;
   // Referrals: three traders signed up with this wallet's code; the funded one's fills paid these rewards (10% of each fee).
@@ -227,8 +257,8 @@ function payout(w, seq, status, requestedAt) {
   };
 }
 
-/** A closed trade's costs: feesUsd = orderFeesUsd + fundingUsd + borrowUsd; price impact is inside the prices. */
-const costs = (feesUsd, orderFeesUsd, fundingUsd, borrowUsd, priceImpactUsd) => ({ feesUsd, orderFeesUsd, fundingUsd, borrowUsd, priceImpactUsd });
+/** A closed trade's costs: feesUsd = orderFeesUsd + platformFeeUsd + fundingUsd + borrowUsd; price impact is inside the prices. */
+const costs = (feesUsd, orderFeesUsd, platformFeeUsd, fundingUsd, borrowUsd, priceImpactUsd) => ({ feesUsd, orderFeesUsd, platformFeeUsd, fundingUsd, borrowUsd, priceImpactUsd });
 const gmPositionData = sizeUsd => {
   const data = Buffer.alloc(POSITION_LAYOUT.length);
   Buffer.from(POSITION_DISCRIMINATOR).copy(data, 0);
@@ -243,8 +273,10 @@ export async function startStub() {
     genesis: MAINNET_GENESIS, streamUp: true, streamDelayMs: 0, closeDelayMs: 1000, cancelNextClose: null, sessions: new Map(), nonces: new Map(), streams: new Set(), logouts: 0, signatures: 0,
     markets: MARKETS.map(m => market(m)), wallets: new Map(), accounts: new Map(), statuses: new Map(), sent: [], simulationLogs: null, simulations: 0, blockHeight: 10, trustKeys: new Map(),
     referralCodes: new Map(), referrerPosts: 0,
+    orderFee: { usd: '0', bps: 0 }, // Props' fee per order: /v1/config serves it and the stub's program assesses it (0 = off)
   };
   for (const t of TIERS) state.accounts.set(tierPda(t.id).toBase58(), { owner: PROGRAM_ID, encode: () => tierAccount(t) });
+  state.accounts.set(configPda().toBase58(), { owner: PROGRAM_ID, encode: () => configAccount(state.orderFee) });
   for (const m of state.markets) for (const [address, account] of onchainMarket(m)) state.accounts.set(address, account);
   const walletData = wallet => state.wallets.get(wallet) ?? createWallet(state, wallet);
   const publish = (event, wallet) => { for (const s of state.streams) if (!wallet || s.wallet === wallet) s.res.write(`data: ${JSON.stringify(event)}\n\n`); };
@@ -320,7 +352,10 @@ export async function startStub() {
       case 'simulateTransaction': {
         state.simulations += 1;
         if (state.simulationLogs) { const logs = state.simulationLogs; state.simulationLogs = null; return { context, value: { err: { InstructionError: [1, { Custom: 0 }] }, logs, accounts: null, unitsConsumed: 20_000, returnData: null } }; }
-        const { units, limit } = compute(VersionedTransaction.deserialize(Buffer.from(first, 'base64')));
+        const simulated = VersionedTransaction.deserialize(Buffer.from(first, 'base64'));
+        const refused = feeRefusal(state, simulated);
+        if (refused) return { context, value: { err: { InstructionError: [1, { Custom: 6046 }] }, logs: refused, accounts: null, unitsConsumed: 20_000, returnData: null } };
+        const { units, limit } = compute(simulated);
         if (units > limit) return { context, value: { ...overBudget(limit), accounts: null, unitsConsumed: limit, returnData: null } };
         return { context, value: { err: null, logs: [`Program ${PROGRAM_ID} success`], accounts: null, unitsConsumed: units, returnData: null } };
       }
@@ -379,7 +414,10 @@ export async function startStub() {
           cluster: 'mainnet-beta', programId: PROGRAM_ID, usdcMint: USDC_MINT.toBase58(), venueStore: 'CTDLvGGXnoxvqLyTpGzdGLg9pD6JexKxKXSV8tqqo8bN',
           tiers: TIERS,
           traderShareBps: 8000, minPayoutUsdc: '50', paused: { newEvaluations: false, trading: false, payouts: false }, feeVault: feeVaultPda().toBase58(), capitalVault: capitalVaultAddress().toBase58(),
+          orderFeeUsd: state.orderFee.usd, orderFeeBps: state.orderFee.bps, orderFeeSource: 'server',
         });
+      case 'GET /v1/order-fee':
+        return send(res, 200, { orderFeeUsd: state.orderFee.usd, orderFeeBps: state.orderFee.bps, orderFeeSource: 'server' });
       case 'POST /v1/auth/nonce': {
         const nonce = randomBytes(8).toString('hex');
         state.nonces.set(nonce, body.wallet);
@@ -454,6 +492,7 @@ export async function startStub() {
         const limit = url.searchParams.get('limitPrice');
         const entry = limit ? Number(limit) : Number(m.price) * (1 + size / 1e9);
         const fee = size * 0.0006;
+        const platform = propsFeeUsd(state, size);
         const funding = side === 'Long' ? m.fundingRateHourlyLong : m.fundingRateHourlyShort, borrow = side === 'Long' ? m.borrowRateHourlyLong : m.borrowRateHourlyShort;
         const liquidation = collateral ? entry * (1 + (side === 'Long' ? -1 : 1) * Number(collateral) * 0.9 / size) : null;
         // As the exchange's model does: its minimum margin counts after the open and close fees.
@@ -462,9 +501,10 @@ export async function startStub() {
         }
         return send(res, 200, {
           symbol: m.symbol, side, sizeUsd: size.toFixed(6), priceImpactPct: size / 1e7, openFeeUsd: fee.toFixed(6), executionPrice: entry.toFixed(m.priceDecimals),
-          orderValueUsd: size.toFixed(6), collateralUsd: collateral ?? null, closeFeeUsd: fee.toFixed(6), roundTripFeeUsd: (fee * 2).toFixed(6),
+          orderValueUsd: size.toFixed(6), collateralUsd: collateral ?? null, closeFeeUsd: fee.toFixed(6), roundTripFeeUsd: (fee * 2 + Number(platform) * 2).toFixed(6),
           fundingRateHourlyPct: funding, borrowRateHourlyPct: borrow, hourlyCostUsd: (size * (borrow + Math.max(0, funding)) / 100).toFixed(6),
-          liquidationPrice: liquidation === null ? null : liquidation.toFixed(m.priceDecimals), platformFeeUsd: '0',
+          liquidationPrice: liquidation === null ? null : liquidation.toFixed(m.priceDecimals), platformFeeUsd: platform, platformCloseFeeUsd: platform,
+          maxFeeMicro: propsFee(state, usdToGm(size.toFixed(6))).toString(),
           maxSizeUsd: side === 'Long' ? m.maxSizeLong : m.maxSizeShort, maxLeverage: side === 'Long' ? m.maxLeverageLong : m.maxLeverageShort,
         });
       }
@@ -557,7 +597,7 @@ export async function startStub() {
         ].sort((x, y) => y.ts - x.ts));
         case 'performance': return send(res, 200, {
           period: url.searchParams.get('period'), series: Array.from({ length: 20 }, (_, i) => ({ ts: now - (19 - i) * DAY, equity: String(Number(a.rules.sizeUsd) + i * 50), netPnl: String(i * 50 + (i % 3) * 20) })),
-          netPnl: String(Number(a.equity) - Number(a.rules.sizeUsd)), grossRealized: '1055.24', feesUsd: '48.30', fundingBorrowUsd: '14.21', unrealizedPnl: a.unrealizedPnl,
+          netPnl: String(Number(a.equity) - Number(a.rules.sizeUsd)), grossRealized: '1055.24', feesUsd: '48.30', platformFeesUsd: '1.40', fundingBorrowUsd: '14.21', unrealizedPnl: a.unrealizedPnl,
           trades: 3, winRatePct: 66.7, profitFactor: 2.34, averageTradeUsd: '19.86',
           byMarket: [{ symbol: 'BTC', netPnl: '73.25', sharePct: 67 }, { symbol: 'XAU', netPnl: '36.20', sharePct: 33 }],
         });
@@ -597,7 +637,8 @@ export async function startStub() {
         else {
           order.status = 'executed';
           w.positions[id] = w.positions[id].filter(p => p !== position);
-          w.history[id].unshift({ id: `closed-${position.id}`, symbol: position.symbol, side: position.side, openedAt: position.openedAt, closedAt: Date.now(), sizeUsd: position.sizeUsd, entryPrice: position.entryPrice, exitPrice: position.markPrice, ...costs('1.20', '1.10', '0.06', '0.04', '-0.02'), netPnl: position.unrealizedPnl, venue: 'simulated', signatures: [] });
+          const platform = 2 * Number(propsFeeUsd(state, position.sizeUsd)); // Props' fee on the open and on this close, at the current rate
+          w.history[id].unshift({ id: `closed-${position.id}`, symbol: position.symbol, side: position.side, openedAt: position.openedAt, closedAt: Date.now(), sizeUsd: position.sizeUsd, entryPrice: position.entryPrice, exitPrice: position.markPrice, ...costs((1.2 + platform).toFixed(6), '1.10', platform.toFixed(6), '0.06', '0.04', '-0.02'), netPnl: position.unrealizedPnl, venue: 'simulated', signatures: [] });
         }
         publish({ type: 'orders', accountId: id, orders: w.orders[id] }, w.wallet);
         publish({ type: 'positions', accountId: id, positions: w.positions[id] }, w.wallet);

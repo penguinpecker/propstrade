@@ -26,6 +26,8 @@ type U64 = string;
 type Key = string;
 type OrderType = 'market' | 'limit' | 'close' | 'takeProfit' | 'stopLoss';
 interface SlotSnapshot { marketToken: Key; isLong: boolean; sizeUsd: U64; collateral: U64; pendingUsd: U64 }
+/** The order's Props fee after the call (USDC base units) and the Config rate that produced it. */
+interface Assessed { fee: U64; orderFeeUsdc: U64; orderFeeBps: number }
 
 /** Every event the program emits (programs/props_vault/src/events.rs), camelCase as Anchor names them. */
 export type VaultEvent =
@@ -41,13 +43,15 @@ export type VaultEvent =
   | { name: 'orderRequested'; data: {
     funded: Key; order: Key; marketToken: Key; isLong: boolean; orderType: OrderType; sizeDeltaUsd: U64; collateral: U64;
     triggerPrice: U64; acceptablePrice: U64; by: Key; ts: U64;
-  } }
+  } & Assessed }
   | { name: 'protectionSet'; data: {
     funded: Key; order: Key; marketToken: Key; isLong: boolean; orderType: OrderType; sizeDeltaUsd: U64; triggerPrice: U64; ts: U64;
-  } }
-  | { name: 'orderUpdated'; data: { funded: Key; order: Key; sizeDeltaUsd: U64 | null; triggerPrice: U64 | null; acceptablePrice: U64 | null; ts: U64 } }
+  } & Assessed }
+  | { name: 'orderUpdated'; data: { funded: Key; order: Key; sizeDeltaUsd: U64 | null; triggerPrice: U64 | null; acceptablePrice: U64 | null; ts: U64 } & Assessed }
   | { name: 'orderCancelled'; data: { funded: Key; order: Key; by: Key; ts: U64 } }
-  | { name: 'completedOrderClosed'; data: { funded: Key; order: Key; ts: U64 } }
+  /** `cancelled`: the exchange cancelled the order (its fee is released); otherwise it executed and its fee is due. */
+  | { name: 'completedOrderClosed'; data: { funded: Key; order: Key; ts: U64; cancelled: boolean } }
+  | { name: 'orderFeesSettled'; data: { funded: Key; charged: U64; waived: U64; orderFeesDue: U64; orderFeesPaid: U64; by: Key; ts: U64 } }
   | { name: 'synced'; data: { funded: Key; slots: SlotSnapshot[]; ordersDropped: Key[]; ts: U64 } }
   | { name: 'ownerToppedUp'; data: { funded: Key; lamports: U64; ts: U64 } }
   | { name: 'emptyPositionClosed'; data: { funded: Key; position: Key; lamports: U64; ts: U64 } }

@@ -14,7 +14,8 @@ import { runMigrations } from '../../src/db/migrate.js';
 import { notifications } from '../../src/db/schema.js';
 import { createConnection } from '../../src/lib/solana.js';
 import register from '../../src/modules/sim/index.js';
-import type { EvaluationResult, MarketDataService, MarketState, ModuleContext } from '../../src/modules/types.js';
+import type { OrderFeeRateInfo } from '../../src/lib/order-fee.js';
+import type { ChainService, EvaluationResult, MarketDataService, MarketState, ModuleContext } from '../../src/modules/types.js';
 import { createStreamHub } from '../../src/stream.js';
 import { recreateDatabase, testDatabaseUrl } from '../db.js';
 import { APP_ORIGIN, fixtureRpc, signIn } from '../helpers.js';
@@ -121,12 +122,16 @@ export class FixtureMarketData implements MarketDataService {
 }
 
 /** Starts the app with the sim module on its own database `<TEST_DATABASE_URL>_<name>`. */
-export async function startSim(name: string, { fillDelayMs = 2_000, databaseUrl, onResolved }: {
+export async function startSim(name: string, { fillDelayMs = 2_000, databaseUrl, onResolved, env = {}, orderFeeRate }: {
   fillDelayMs?: number;
   /** Reuse this database as it is (a restart) instead of creating a fresh one. */
   databaseUrl?: string;
   /** Subscribed before the engine leads, so results redelivered at leadership start are heard. */
   onResolved?: (result: EvaluationResult) => void;
+  /** More server settings (e.g. ORDER_FEE_USDC / ORDER_FEE_BPS). */
+  env?: Record<string, string>;
+  /** The chain module's order fee rate (the program's), asked at each use; without it the server's settings apply. */
+  orderFeeRate?: () => Promise<OrderFeeRateInfo>;
 } = {}) {
   const url = new URL(testDatabaseUrl());
   url.pathname = `${url.pathname}_${name}`;
@@ -136,7 +141,7 @@ export async function startSim(name: string, { fillDelayMs = 2_000, databaseUrl,
   }
   const config = loadConfig({
     DATABASE_URL: databaseUrl ?? url.toString(), APP_ORIGIN, SESSION_SECRET: 'x'.repeat(64), ADMIN_API_TOKEN: 'y'.repeat(64),
-    RPC_URL: 'http://127.0.0.1:8899', PROGRAM_ID: Keypair.generate().publicKey.toBase58(), TRUST_PROXY_HOPS: '0',
+    RPC_URL: 'http://127.0.0.1:8899', PROGRAM_ID: Keypair.generate().publicKey.toBase58(), TRUST_PROXY_HOPS: '0', ...env,
   });
   const { sql, db } = createDb(config.DATABASE_URL);
   const hub = createStreamHub();
@@ -145,7 +150,8 @@ export async function startSim(name: string, { fillDelayMs = 2_000, databaseUrl,
   const events: { event: StreamEvent; wallet?: string }[] = [];
   const stop = new AbortController();
   const ctx: ModuleContext = {
-    app, log: app.log, env: { SIM_FILL_DELAY_MS: String(fillDelayMs) }, services: { marketdata: md }, signal: stop.signal,
+    app, log: app.log, env: { SIM_FILL_DELAY_MS: String(fillDelayMs) }, signal: stop.signal,
+    services: { marketdata: md, ...(orderFeeRate && { chain: { orderFeeRate } as unknown as ChainService }) },
     config, db, sql, rpc: createConnection(config),
     publish(event, audience) {
       events.push({ event, wallet: audience?.wallet });

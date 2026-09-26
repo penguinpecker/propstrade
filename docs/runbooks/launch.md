@@ -36,6 +36,11 @@ build → deploy → initialize (all paused) → authorities → tiers → marke
   tiers before purchases; market configs before opens; capital before activations (`InsufficientCapital`); SOL treasury
   before activations (it pays each account's owner float); server and app before unpausing (the indexer and keeper must
   be watching when the first transaction lands).
+- The server built from the release commit is deployed **before the program** whenever the program's interface
+  changed since the server that is live (as with the order fee of 2026-09-26: new instruction arguments and accounts,
+  new and longer events). The indexer decodes events and the keeper builds instructions with the IDL bundled in
+  `@props/sdk`, read once per process, so redeploy the server (section 6, step 4) first, check `/v1/health`, then run
+  section 4 (or 14 for an upgrade). The Props order fee stays off (0) at launch: section 10.1 turns it on.
 
 ## 1. Prerequisites
 
@@ -102,7 +107,7 @@ block-height or timeout error, run `status.ts` before retrying: the transaction 
 
 | Key | Signs | Kept | SOL it needs |
 |---|---|---|---|
-| Operator (`OPERATOR_KEYPAIR`) | program deploy (upgrade authority), every admin instruction until section 13 | offline, encrypted; cold storage after handover | ≈ 0.97 SOL spent by the deploy at the default `--max-len` (section 15; ≈ 5.7 SOL when sized for an Anchor fallback, section 4); keep **≥ 2 SOL** (≥ 12 SOL for the fallback sizing) on it while deploying, plus what you send on to the treasury and authorities |
+| Operator (`OPERATOR_KEYPAIR`) | program deploy (upgrade authority), every admin instruction until section 13 | offline, encrypted; cold storage after handover | ≈ 1.02 SOL spent by the deploy at the default `--max-len` (section 15; ≈ 5.7 SOL when sized for an Anchor fallback, section 4); keep **≥ 2 SOL** (≥ 12 SOL for the fallback sizing) on it while deploying, plus what you send on to the treasury and authorities |
 | Program keypair (`PROGRAM_KEYPAIR`) | only the first deploy (it creates the program address) | offline | none |
 | Deploy buffer keypair | the deploy's write buffer (makes an interrupted deploy resumable) | next to the operator key; delete after the deploy | none |
 | Risk authority (`RISK_AUTHORITY_KEYPAIR`) | keeper transactions, `record_evaluation_result`, payouts, restrictions | **only** as a Railway variable (hot) | 0.2 SOL (≈ 0.00003 SOL per keeper transaction at the server's fixed priority fee) |
@@ -150,11 +155,11 @@ Railway. Keep `ADMIN_API_TOKEN` in the operators' password manager: every admin 
    ```sh
    solana-verify build "$PWD/programs-p/props_vault_p" --library-name props_vault_p
    solana-verify get-executable-hash programs-p/props_vault_p/target/deploy/props_vault_p.so  # record <EXECUTABLE_HASH>
-   wc -c programs-p/props_vault_p/target/deploy/props_vault_p.so                              # record <SO_SIZE>: ≈ 172.5 KB
+   wc -c programs-p/props_vault_p/target/deploy/props_vault_p.so                              # record <SO_SIZE>: ≈ 181.7 KB
    ```
 
    `<SO_SIZE>` and `<EXECUTABLE_HASH>` are what this build printed, and every size and rent figure below follows from
-   `<SO_SIZE>`: a local `cargo build-sbf` of the same source gave 172,536 bytes on 2026-09-24 and the pinned Docker
+   `<SO_SIZE>`: a local `cargo build-sbf` gave 172,536 bytes on 2026-09-24 (181,672 with the order fee, 2026-09-26) and the pinned Docker
    image a few bytes less in an earlier round, so never take either from a number written here.
 
 3. Run the suites **against that binary**. Every process that loads the program (the LiteSVM suite, the validator
@@ -162,7 +167,8 @@ Railway. Keep `ADMIN_API_TOKEN` in the operators' password manager: every admin 
    the compare scenarios and of the fuzzers) takes it from `PROPS_VAULT_SO`, an absolute path; without it they load the
    Anchor build, `target/deploy/props_vault.so`. The six compare scenarios run every instruction on both builds and
    diff every outcome, inner instruction and account byte for byte: at 0 differences they are the proof that this
-   binary implements the IDL the SDK ships (Anchor generates that IDL from the reference crate). They and the fuzzers
+   binary implements the IDL the SDK ships (Anchor generates that IDL from the reference crate); `fees` covers the
+   order fee (`set_order_fee`, `settle_order_fees` and the fee on every order path). They and the fuzzers
    need the Anchor reference binary, the one place `anchor build` still runs: it writes `target/deploy/props_vault.so`
    at the repo root, not the file being deployed.
 
@@ -175,7 +181,7 @@ Railway. Keep `ADMIN_API_TOKEN` in the operators' password manager: every admin 
    TEST_DATABASE_URL=postgres://…/props_server_test npm run test:modules --workspace server
    LOCAL_STACK_DATABASE_URL=postgres://…/props_fullstack_test node app/tests/fullstack.e2e.mjs   # runs scripts/local-stack.ts
    anchor build                                                          # the Anchor reference binary, for the two lines below only
-   for s in admin trader risk trading crank audit; do node programs-p/props_vault_p/compare/$s.ts; done   # each ends "<n> records, 0 differences"
+   for s in admin trader risk trading crank audit fees; do node programs-p/props_vault_p/compare/$s.ts; done   # each ends "<n> records, 0 differences"
    FUZZ_QUICK=1 node programs-p/props_vault_p/fuzz/run.ts                # ends "… 0 differences, 0 violations, 0 crashed, <n> min"; the full campaign takes an hour
    ```
 
@@ -200,7 +206,7 @@ Railway. Keep `ADMIN_API_TOKEN` in the operators' password manager: every admin 
 Rent is ≈ 5,080 lamports per byte on mainnet (2026-09-23): the program data costs (`MAX_LEN` + 173) × 5,080 lamports,
 and program data never shrinks. It is sized with `--max-len`; choose between:
 
-- the default, 10 % headroom (≈ 17 KB, ≈ +0.09 SOL of rent; ≈ 0.965 SOL in all at 172,536 B): later, slightly larger
+- the default, 10 % headroom (≈ 18 KB, ≈ +0.09 SOL of rent; ≈ 1.016 SOL in all at 181,672 B): later, slightly larger
   releases of this build upgrade without an `extend`;
 - sizing for a fallback to the Anchor build (`anchor build` gives 1,021,016 B on 2026-09-24; its +10 % is
   `MAX_LEN=1123117`, ≈ 5.7 SOL locked from the first day for a binary you may never deploy).
@@ -213,7 +219,7 @@ key), so choose `--max-len` for the largest release you expect to ship.
 SO=programs-p/props_vault_p/target/deploy/props_vault_p.so   # the solana-verify build of section 3.2, not the Anchor build
 SO_SIZE=$(wc -c < "$SO" | tr -d ' ')                         # = <SO_SIZE>
 MAX_LEN=$(( SO_SIZE + SO_SIZE / 10 ))                        # the default; MAX_LEN=1123117 for the Anchor fallback sizing
-solana rent $(( MAX_LEN + 45 )) --url "$RPC_URL"         # Rent-exempt minimum: ≈ 0.965 SOL (0.96500696 for 172,536 B; ≈ 5.7 for the fallback sizing)
+solana rent $(( MAX_LEN + 45 )) --url "$RPC_URL"         # Rent-exempt minimum: ≈ 1.016 SOL (1.01606096 for 181,672 B; ≈ 5.7 for the fallback sizing)
 solana balance "$(solana-keygen pubkey "$OPERATOR_KEYPAIR")" --url "$RPC_URL"   # ≥ 2 SOL (≥ 12 SOL for the fallback sizing)
 ```
 
@@ -422,8 +428,10 @@ the Node provider (without it Railpack sees the root `Cargo.toml` and builds the
    | `RAILPACK_NODE_NPM_INSTALL` | `npm ci` (build-time only: makes Railpack install exactly the lockfile instead of `npm install`) |
 
    Leave `PORT` (Railway sets it), `HOST`, `LOG_LEVEL`, `TRUST_PROXY_HOPS` (1 = Railway's edge; set 2 when the API is
-   reached through the app's Vercel rewrite, section 7), `SIM_FILL_DELAY_MS` and `REFERRAL_REWARD_BPS` (1000: referrers
-   earn 10 % of the exchange fee on their referees' funded fills) unset unless you mean to change their defaults. From the CLI, single-quote reference values and
+   reached through the app's Vercel rewrite, section 7), `SIM_FILL_DELAY_MS`, `REFERRAL_REWARD_BPS` (1000: referrers
+   earn 10 % of the exchange fee on their referees' funded fills) and `ORDER_FEE_USDC` / `ORDER_FEE_BPS` (Props.trade's
+   fee per order on practice and evaluation accounts until the program is live, 0 = off; section 10.1) unset unless you
+   mean to change their defaults. From the CLI, single-quote reference values and
    pipe secrets in, so no secret appears in a command line or shell history:
 
    ```sh
@@ -484,7 +492,7 @@ and adds the Content-Security-Policy (below). Node is pinned by `"engines": { "n
    | `VITE_RPC_URL` | `https://mainnet.helius-rpc.com/?api-key=<BROWSER_HELIUS_KEY>` (the domain-restricted key) |
    | `VITE_CLUSTER` | `mainnet-beta` |
    | `VITE_PROGRAM_ID` | `7qYRWwpmj3j3exVoBUJHzigcWmMN8ruPEdZdZrGzTJ7` (the app refuses an API that reports another program) |
-   | `VITE_PRIVY_APP_ID` | the Privy app id, for the Google wallet (optional; see below) |
+   | `VITE_PRIVY_APP_ID` | the Privy app id, for the Google wallet (set it on mainnet; see below) |
 
    ```sh
    printf '%s' 'https://api.<DOMAIN>' | vercel env add VITE_API_URL production
@@ -499,6 +507,11 @@ and adds the Content-Security-Policy (below). Node is pinned by `"engines": { "n
    the app then signs in with Sign-In With Solana like any other wallet, so no Privy secret or server-side Privy call
    exists. The Google wallet signs without Privy's confirmation window (the app turns it off): the trader's click in the
    app is the approval, so the app states the exact amount before every action.
+
+   Set it on mainnet. The funded open with take profit and stop loss is 1,165 of Solana's 1,232 bytes with a compute
+   price (`app/src/lib/chain.test.ts` pins the sizes); the Google wallet signs the transaction as built, but a build
+   without the id offers browser wallets, which may add their own instructions and accounts, and 67 bytes is not room
+   for that. Such a build needs the address lookup table (`sharedLookupAddresses` in `packages/sdk/src/tx.ts`) first.
 
 3. Domain: `vercel domains add <DOMAIN>` (and `www.<DOMAIN>` redirecting to it), add the DNS records Vercel prints.
 
@@ -662,6 +675,48 @@ curl -s https://api.<DOMAIN>/v1/config | jq '.paused'                # all false
 
 Then announce `<DOMAIN>`.
 
+### 10.1 Props order fee (off at launch)
+
+Props.trade charges its own fee on every order (`docs/design/order-fee.md`): a flat USDC amount and/or basis points of
+the order's size, at most 2 USDC and 10 bps, the same rate on every account and stage, applied to orders placed or
+updated after it is set. On funded accounts the program assesses it when an order is placed (the trader signs the most
+they accept: a raised rate fails their order with `OrderFeeChanged` and the app quotes again), holds an increase's fee
+in the account's USDC, and the keeper charges it only once the order executes (the rate on the size executed; an order
+the exchange cancelled, the trader cancelled or a breach close pays nothing). On practice and evaluation accounts it is
+simulated at the fills. It is 0 (off) until the owner names the rate.
+
+Before the program is live, a demo rate for practice and evaluation can be set on the server alone: Railway variables
+`ORDER_FEE_USDC` (e.g. `0.50`) and `ORDER_FEE_BPS` (e.g. `2`), redeploy. Once the program's Config exists the server
+reads the rate from it for every stage and ignores those two (set them back to 0 to avoid confusion).
+
+Before the first nonzero rate on the program (setting it back to 0 does not clear fees already due, and the program
+refuses every payout request and closure while any are due), check each:
+
+1. The server live from a commit with the keeper's settlement (this release): `settle_order_fees` for executed orders,
+   waives for the rest, `[settle_order_fees, close_funded]` at closure. `/v1/health` shows the keeper leading.
+2. A second risk authority key held by the operators, for `scripts/admin/settle-order-fees.ts` when the keeper cannot
+   settle (section 12). Add it with `set-authorities.ts --risk <KEEPER_RISK_PUBKEY>,<FALLBACK_RISK_PUBKEY> --kyc …`.
+3. The app live from a commit that passes `maxFee` on every funded order (open, close, take profit, stop loss and their
+   updates) and re-quotes on `OrderFeeChanged`.
+4. Published terms that name the fee: new tier terms through `upsert-tiers.ts` (its rules JSON, hashed into each tier,
+   says what the fee is) and the app's copy.
+5. The owner's decision on accounts bought before the change (the rate is global: a running evaluation's target gets
+   harder; nothing onchain pins the rate to the terms a trader bought).
+
+Then, with the admin key (`--print-for <SQUADS_VAULT>` after the handover; both values are always named):
+
+```sh
+node scripts/admin/set-order-fee.ts --usdc 0.50 --bps 2                 # dry run: prints current and new, and the fee on $1,000 / $10,000
+node scripts/admin/set-order-fee.ts --usdc 0.50 --bps 2 --execute
+node scripts/admin/status.ts | grep 'order fee'                          # order fee 0.5 USDC + 2 bps of the size, per order
+curl -s https://api.<DOMAIN>/v1/order-fee                               # {"orderFeeUsd":"0.5","orderFeeBps":2,"orderFeeSource":"program"} (cached up to 30 s)
+```
+
+Before the program is live, practice and evaluation charge the server's `ORDER_FEE_USDC` / `ORDER_FEE_BPS` (0 by
+default; section 16) and `/v1/order-fee` answers them with `"orderFeeSource":"server"`.
+
+`--usdc 0 --bps 0` turns it off again (fees already assessed or due stay until they are released or settled).
+
 ## 11. Monitoring and alerts
 
 | Signal | Where | Act when |
@@ -672,6 +727,7 @@ Then announce `<DOMAIN>`.
 | Onchain balances | `node scripts/admin/status.ts` daily (its `warnings` list) | Risk key < 0.05 SOL, KYC key < 0.02 SOL, treasury < one owner float, an enabled tier the capital cannot fund. |
 | Pool depth | GMTrade pools of every enabled market, daily (learnings §8) | Lower `--max-position-usd` / `--max-total-oi-usd` with `upsert-markets.ts`. |
 | RPC | Helius dashboard: credits and rate-limit errors | Upgrade the plan before the credits run out. |
+| Props order fees | keeper alerts: `fees-due:<funded>` (fees due over 30 min: the account's payouts and closure wait), `fee-outcome:<funded>` (the exchange's indexer has not said for 10 min whether an order whose fee is due executed; waived after 24 h), `fee-ledger:<funded>` (critical: for 5 min the fee ledger has not matched the account's onchain fees due, settlement count and fees charged, so settlements wait), `fee-view:<funded>` (the keeper could not work out a settlement this tick; the account's other checks ran), `failed:<funded>:settle:<cause>` (a settlement the chain refused; it is planned again from a fresh read). `status.ts` → `order fees` (charged, due) | Ledger out of step: the indexer is behind or stuck (its own alert says so), or a settlement sent by hand has not been indexed yet (it clears once it is). Fees due that the keeper cannot settle (its key is out of reach): section 12. |
 | Referral rewards owed | weekly: `curl -s -H "Authorization: Bearer $ADMIN_API_TOKEN" https://api.<DOMAIN>/v1/admin/referrals` (each referrer with its code, referees, `earnedUsd`, `paidUsd`, `pendingUsd`, most owed first) | A referrer is owed USDC: send it from the operations wallet, then record it with the transfer's signature: `curl -s -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" -H 'content-type: application/json' -d '{"referrer":"<WALLET>","amountUsd":"<AMOUNT>","signature":"<SIGNATURE>"}' https://api.<DOMAIN>/v1/admin/referrals/payouts` (409 `referrer_unverified` until the referrer has passed identity review, `exceeds_pending` above what it is owed, `payout_recorded` for a signature already recorded for it; 422 when that confirmed transaction does not move at least the amount into the referrer's USDC; logged in `admin_audit_log`). |
 | Vault reconciliation | weekly: `status.ts` allocated principal vs `select sum(principal) from funded_accounts where status <> 'closed';` (`railway connect Postgres`) | They differ, or the capital vault is not deposits − withdrawals − principal posted + closure returns + vault profit share + swept fees. |
 | Database | Railway metrics; a daily off-platform dump | `railway run --service Postgres -- sh -c 'PGHOST=$RAILWAY_TCP_PROXY_DOMAIN PGPORT=$RAILWAY_TCP_PROXY_PORT pg_dump --format=custom -f props-$(date -u +%F).dump'` (needs the Postgres service's public TCP proxy, and a `pg_dump` at least as new as the server). `railway run` puts the Postgres service's variables in the environment and `pg_dump` reads `PGUSER`, `PGPASSWORD` and `PGDATABASE` from there, so the password is on no command line and in no history. Railway volume backups have no point-in-time restore. |
@@ -714,6 +770,7 @@ that sets the same thing as soon as a new one is created; before approving or ex
 | GMTrade upgraded its program | The keeper alerts and restricts every active funded account. Restricted accounts get no SOL top-ups (nor does any account while trading is paused), so what the new release can take from an owner PDA is capped at its current float; if a keeper close then fails for lack of SOL, send that owner PDA some with a plain transfer (it goes back to the treasury at `close_funded`). Review the release (`scripts/fixtures.sh` fails on the new hash; update the pin and run the suites against the new binary), then acknowledge it: `curl -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" https://api.<DOMAIN>/v1/admin/gmtrade-deploys/<SLOT>/acknowledge` → `{"slot":…,"acknowledgedAt":…}`. Update `GMTRADE_DEPLOY_SLOT` in Railway. |
 | Lift restrictions | Per account, once its reason is gone: `curl -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" https://api.<DOMAIN>/v1/admin/funded/<FUNDED_ACCOUNT>/lift-restriction` → `{"id":…,"job":…}` (404 unknown account, 409 not restricted). Restricted accounts: `railway connect Postgres`, then `select address from funded_accounts where status = 'restricted';`. |
 | A chain job failed for good | Fix the cause, then `curl -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" https://api.<DOMAIN>/v1/admin/jobs/<JOB_ID>/retry` (id from the alert). |
+| Order fees due and the keeper cannot settle them | Payouts and closures of those accounts wait until the fees due are 0. Read what each due order still owes (`railway connect Postgres`, then `select o.order, g.status, o.assessed_usd - o.charged_usd - o.waived_usd as due, case when g.status = 'canceled' then 0 when g.status <> 'executed' or (not o.is_increase and x.size is null) then null when o.is_increase then o.assessed_usd - o.charged_usd - o.waived_usd else least(o.assessed_usd - o.charged_usd - o.waived_usd, least(o.assessed_usd, o.rate_usd + trunc(x.size * o.rate_bps / 10000, 6)) - o.charged_usd) end as charge from order_fees o join gm_orders g on g.address = o.order left join lateral (select sum(size_usd) as size from venue_fills f where f.order = o.order) x on true where o.funded_account = '<FUNDED_ACCOUNT>' and o.state = 'due';`: `charge` is what is left of each order's fee after earlier charges, the rate of its assessment on what it executed; empty while its outcome or its fill is not known yet: leave that order's `due` alone, or waive it once it is 24 h old). With the operators' fallback risk key (section 10.1) charge the sum of `charge` and waive the sum of `due − charge` over the rows with a charge: `OPERATOR_KEYPAIR=<FALLBACK_RISK_KEY_FILE> node scripts/admin/settle-order-fees.ts --funded <FUNDED_ACCOUNT> --charge <USDC> --waive <USDC>` (dry run), then `--execute`. It names the account's fees due and settlement count, so it fails rather than land twice; the server records it when indexed. |
 | RPC outage | Switch `RPC_URL` / `RPC_WS_URL` in Railway and `VITE_RPC_URL` in Vercel to another provider, redeploy both. |
 | Admin token or session secret exposed | Replace `ADMIN_API_TOKEN` / `SESSION_SECRET` in Railway (a new session secret signs everyone out). |
 
@@ -816,19 +873,19 @@ Onchain (mainnet rent on 2026-09-23, ≈ 5,080 lamports per byte; re-check with 
 
 | Item | Size | SOL | Paid by |
 |---|---|---|---|
-| Program data at `--max-len` = size + 10 % (`<SO_SIZE>` binary, ≈ 172,536 B; section 3.2) | ≈ 189,834 B | ≈ 0.965 (0.877 without headroom; ≈ 5.7 sized for an Anchor fallback, section 4) | operator, locked while deployed |
+| Program data at `--max-len` = size + 10 % (`<SO_SIZE>` binary, ≈ 181,672 B; section 3.2) | ≈ 199,839 B | ≈ 1.016 (0.924 without headroom; ≈ 5.7 sized for an Anchor fallback, section 4) | operator, locked while deployed |
 | Program account | 36 B | 0.0008 | operator |
 | Deploy writes (≈ 180 transactions at 100,000 µlamports/CU) | | ≈ 0.001 | operator |
-| Config + fee vault + capital vault (initialize) | 450 + 165 + 165 B | 0.0059 | operator |
+| Config + fee vault + capital vault (initialize) | 484 + 165 + 165 B | 0.0061 | operator |
 | Tier / market config | 70 / 147 B | 0.0010 / 0.0014 each | operator |
 | Risk / KYC authority float | | 0.2 / 0.1, refilled as used | operator |
 | SOL treasury | | 0.25 per active funded account (owner float, mostly returned at closure) + 0.0015 per payout USDC account + 0.5 buffer | operator |
 | Per verification (identity lock + trader profile if new) | 41 + 86 B | 0.0009 – 0.0019 | KYC key |
-| Per trader: profile, evaluation, funded account, payout request | 86 / 164 / 1,547 / 128 B | 0.0011 / 0.0015 / 0.0085 / 0.0013 | trader |
+| Per trader: profile, evaluation, funded account, payout request | 86 / 164 / 1,635 / 128 B | 0.0011 / 0.0015 / 0.0090 / 0.0013 | trader |
 
 Operator SOL: keep about twice what the deploy locks, ≥ 2 SOL at the default `--max-len` (the buffer's rent is the
-program's rent, ≈ 0.97; the margin covers a restarted buffer and fees) or ≥ 12 SOL when sized for an Anchor fallback;
-≈ 0.97 SOL (≈ 5.7) is spent and locked by the deploy, then the authorities and treasury.
+program's rent, ≈ 1.02; the margin covers a restarted buffer and fees) or ≥ 12 SOL when sized for an Anchor fallback;
+≈ 1.02 SOL (≈ 5.7) is spent and locked by the deploy, then the authorities and treasury.
 
 Monthly (list prices on 2026-09-23; check before buying):
 
@@ -862,6 +919,7 @@ variable that is not documented there and here):
 | `TRUST_PROXY_HOPS` | no | trusted reverse proxies (1 = Railway's edge; 2 when the app's Vercel rewrite fronts the API, see section 7) |
 | `SIM_FILL_DELAY_MS` | no | sim keeper delay (2000, minimum 1000) |
 | `REFERRAL_REWARD_BPS` | no | referrers' share of the exchange fee on each funded fill of the traders they referred, bps (1000 = 10 %, at most 5000; 0 stops new rewards) |
+| `ORDER_FEE_USDC`, `ORDER_FEE_BPS` | no | Props.trade's fee per order on practice and evaluation accounts until the program is live (flat USDC ≤ 2, bps ≤ 10; 0 = off); then every stage reads the program's rate (section 10.1) |
 | `RISK_AUTHORITY_KEYPAIR` | yes on mainnet | risk authority secret key (JSON byte array or base58) |
 | `KYC_AUTHORITY_KEYPAIR` | yes on mainnet | KYC authority secret key |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | no | keeper alerts to Telegram |
@@ -879,4 +937,4 @@ App (`app/.env.example`; `app/tests/env-docs.test.js` checks the same for the ap
 | `VITE_RPC_URL` | yes on mainnet | browser RPC endpoint (domain-restricted key); also the CSP's RPC origins |
 | `VITE_CLUSTER` | no | `mainnet-beta` (default) or `localnet` |
 | `VITE_PROGRAM_ID` | no (set it) | the app refuses to sign in against an API reporting another program |
-| `VITE_PRIVY_APP_ID` | no | Privy app id: offers the Google wallet (Privy's embedded Solana wallet) and allows auth.privy.io in the CSP |
+| `VITE_PRIVY_APP_ID` | no (set it on mainnet) | Privy app id: offers the Google wallet (Privy's embedded Solana wallet) and allows auth.privy.io in the CSP; without it browser wallets, which need the address lookup table first (section 7) |

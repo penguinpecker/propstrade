@@ -4,7 +4,8 @@ import { Connection, Keypair, PublicKey, TransactionMessage } from '@solana/web3
 import bs58 from 'bs58';
 import { PROPS_VAULT_IDL, PROPS_VAULT_PROGRAM_ID, PropsVaultClient } from '@props/sdk';
 import type { AccountDetail, AccountSummary, Performance } from '@props/shared';
-import { createDb } from '../../../db/client.ts';
+import { createDb, type Db } from '../../../db/client.ts';
+import { gmOrders, orderFees } from '../../../db/schema.ts';
 import { runMigrations } from '../../../db/migrate.ts';
 import { createSealer } from '../../../lib/integrity.ts';
 import { recreateDatabase, testDatabaseUrl } from '../../../../test/db.ts';
@@ -101,7 +102,7 @@ export function simStub(accounts: AccountDetail[] = []) {
     },
     async performance(wallet, id, period): Promise<Performance | undefined> {
       return mine(wallet, id) && {
-        period, series: [], netPnl: '0', grossRealized: '0', feesUsd: '0', fundingBorrowUsd: '0', unrealizedPnl: '0', trades: 0,
+        period, series: [], netPnl: '0', grossRealized: '0', feesUsd: '0', platformFeesUsd: '0', fundingBorrowUsd: '0', unrealizedPnl: '0', trades: 0,
         winRatePct: null, profitFactor: null, averageTradeUsd: null, byMarket: [],
       };
     },
@@ -110,6 +111,23 @@ export function simStub(accounts: AccountDetail[] = []) {
 }
 
 export const silentLog = { info() {}, warn() {}, error() {} };
+
+/**
+ * GMTrade orders of a funded account as the indexer leaves them once it has projected their OrderRequested /
+ * ProtectionSet: a gm_orders row and its Props fee row (`fee` assessed, USDC; `rate` the Config's then).
+ */
+export async function indexedOrders(db: Db, funded: string, orders: { order: string; isIncrease: boolean; fee?: string; rate?: { usd: string; bps: number } }[]) {
+  if (!orders.length) return;
+  await db.insert(gmOrders).values(orders.map((o) => ({
+    address: o.order, fundedAccount: funded, marketToken: '6UU9sF5fryafHDYPcmVcV7ucfnYs6iMVcvb8p7SBQgTc', symbol: 'SOL', side: 'Long' as const,
+    kind: o.isIncrease ? 'Market' as const : 'TakeProfit' as const, isIncrease: o.isIncrease, sizeUsd: '0', status: 'awaiting_execution' as const,
+    createSignature: 'create', createdAt: new Date(),
+  }))).onConflictDoNothing();
+  await db.insert(orderFees).values(orders.map((o) => ({
+    order: o.order, fundedAccount: funded, isIncrease: o.isIncrease, assessedUsd: o.fee ?? '0', rateUsd: o.rate?.usd ?? '0', rateBps: o.rate?.bps ?? 0,
+    state: 'assessed' as const, updatedSlot: 1,
+  }))).onConflictDoNothing();
+}
 
 export async function until<T>(check: () => Promise<T | undefined | false | null>, ms = 20_000, what = 'condition'): Promise<T> {
   const end = Date.now() + ms;

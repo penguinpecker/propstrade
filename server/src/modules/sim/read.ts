@@ -7,11 +7,12 @@ import { accountEvents, accounts, closedTrades, equitySnapshots, simFills } from
 import type { AccountsProvider, MarketDataService } from '../types.ts';
 import { loadAccount, orderList, practiceId, snapshot, toFill, visibleTo, type AccountRow } from './book.ts';
 import { canonicalOrder } from '@props/shared/merkle';
+import type { OrderFeeRate } from '@props/sdk';
 import { micro, microText, trim, usd, usdText } from './model.ts';
 
 const PERIOD_MS: Record<Performance['period'], number | null> = { '1W': 7 * 86_400_000, '1M': 30 * 86_400_000, All: null };
 
-export function createReader(db: Db, md: MarketDataService, ensurePractice: (wallet: string) => Promise<void>) {
+export function createReader(db: Db, md: MarketDataService, ensurePractice: (wallet: string) => Promise<void>, orderFeeRate: () => Promise<OrderFeeRate>) {
   async function find(wallet: string, id: string): Promise<AccountRow | undefined> {
     const account = await loadAccount(db, id, wallet);
     if (account || id !== practiceId(wallet)) return account;
@@ -20,14 +21,14 @@ export function createReader(db: Db, md: MarketDataService, ensurePractice: (wal
   }
   const live = async (wallet: string, id: string) => {
     const account = await find(wallet, id);
-    return account && { account, ...(await snapshot(db, md, account)) };
+    return account && { account, ...(await snapshot(db, md, account, await orderFeeRate())) };
   };
 
   async function performance(account: AccountRow, period: Performance['period']): Promise<Performance> {
     const span = PERIOD_MS[period];
     const since = new Date(span === null ? 0 : Date.now() - span);
     const [{ valuation }, points, trades, fills] = await Promise.all([
-      snapshot(db, md, account),
+      snapshot(db, md, account, await orderFeeRate()),
       db.select().from(equitySnapshots).where(and(eq(equitySnapshots.accountId, account.id), gte(equitySnapshots.ts, since))).orderBy(asc(equitySnapshots.ts)),
       db.select().from(closedTrades).where(and(eq(closedTrades.accountId, account.id), gte(closedTrades.closedAt, since))),
       db.select().from(simFills).where(and(eq(simFills.accountId, account.id), gte(simFills.ts, since))),
@@ -42,6 +43,7 @@ export function createReader(db: Db, md: MarketDataService, ensurePractice: (wal
     const lost = nets.filter((n) => n < 0n).reduce((a, n) => a - n, 0n);
     const total = nets.reduce((a, n) => a + n, 0n);
     const fees = fills.reduce((a, f) => a + usd(f.feeUsd), 0n);
+    const platformFees = fills.reduce((a, f) => a + micro(f.platformFeeUsd), 0n);
     const fundingBorrow = fills.reduce((a, f) => a + micro(f.fundingUsd) + micro(f.borrowUsd), 0n);
     const bySymbol = new Map<string, bigint>();
     for (const t of trades) bySymbol.set(t.symbol, (bySymbol.get(t.symbol) ?? 0n) + micro(t.netPnl));
@@ -50,7 +52,7 @@ export function createReader(db: Db, md: MarketDataService, ensurePractice: (wal
       period, series,
       netPnl: microText(valuation.equity - size),
       grossRealized: microText(total + trades.reduce((a, t) => a + micro(t.feesUsd), 0n)),
-      feesUsd: usdText(fees), fundingBorrowUsd: microText(fundingBorrow), unrealizedPnl: microText(valuation.unrealized),
+      feesUsd: usdText(fees), platformFeesUsd: microText(platformFees), fundingBorrowUsd: microText(fundingBorrow), unrealizedPnl: microText(valuation.unrealized),
       trades: trades.length,
       winRatePct: trades.length ? Math.round((wins.length / trades.length) * 10_000) / 100 : null,
       profitFactor: lost > 0n ? Math.round((Number(won) / Number(lost)) * 100) / 100 : null,
@@ -85,7 +87,8 @@ export function createReader(db: Db, md: MarketDataService, ensurePractice: (wal
       return rows.map((t) => ({
         id: t.id, symbol: t.symbol, side: t.side, openedAt: t.openedAt.getTime(), closedAt: t.closedAt.getTime(), sizeUsd: trim(t.sizeUsd),
         entryPrice: trim(t.entryPrice), exitPrice: trim(t.exitPrice), feesUsd: trim(t.feesUsd), orderFeesUsd: trim(t.orderFeesUsd),
-        fundingUsd: trim(t.fundingUsd), borrowUsd: trim(t.borrowUsd), priceImpactUsd: trim(t.priceImpactUsd), netPnl: trim(t.netPnl),
+        platformFeeUsd: trim(t.platformFeeUsd), fundingUsd: trim(t.fundingUsd), borrowUsd: trim(t.borrowUsd), priceImpactUsd: trim(t.priceImpactUsd),
+        netPnl: trim(t.netPnl),
         venue: t.venue === 'gmtrade' ? 'exchange' : t.venue, signatures: t.signatures,
       }));
     },

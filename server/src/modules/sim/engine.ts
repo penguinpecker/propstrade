@@ -16,6 +16,11 @@
 // them), and an account holds at most the 8 orders and 8 positions a funded account can (program MAX_ORDERS/MAX_SLOTS).
 // Evaluations also get the keeper's session guard (keeper/rules.ts sessionGuard): a stock or forex position above the
 // closed-session cap is closed from 15 minutes before the session ends, as on a funded account.
+// Props.trade's fee per order is simulated as the program charges it on funded accounts (docs/design/order-fee.md §9):
+// assessed when an order is placed (an increase on its size, a close, take profit or stop loss on the account's exposure
+// cap; the session guard's closes like the trader's, liquidations free), at the rate every stage reads (the onchain
+// Config's once the program is live), and charged at the fill: min(assessed, that rate on the executed size), from
+// realized P&L. An order that adds exposure must leave its own fee and those of the pending increases in the margin.
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { and, asc, eq, inArray, isNull, ne, sql } from 'drizzle-orm';
@@ -23,11 +28,12 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { AccountSummary, Market, Notification, PriceTick, SimCloseRequest, SimOrderRequest, SimOrderResponse, SimProtectionRequest, Position } from '@props/shared';
 import { USDC_MINT, decodePosition, formatFixed } from '@props/gmtrade';
 import { model, type DecreaseResult, type IncreaseResult } from '@props/gmsol-wasm';
-import { acceptablePrice } from '@props/sdk';
+import { CLOSE_ALL, acceptablePrice, orderFee, reservedFees, type OrderFeeRate } from '@props/sdk';
 import type { Db } from '../../db/client.ts';
 import { accountEvents, accounts, closedTrades, equitySnapshots, simFills, simOrders, simPositions, simResults } from '../../db/schema.ts';
 import { ApiError } from '../../errors.ts';
 import type { Sealer } from '../../lib/integrity.ts';
+import type { OrderFeeRateInfo } from '../../lib/order-fee.ts';
 import type { EvaluationResult, EvaluationTerms, MarketDataService, MarketState, ModuleContext } from '../types.ts';
 import { sessionGuard } from '../keeper/rules.ts';
 import { SCHEDULES } from '../keeper/sessions.ts';
@@ -83,6 +89,8 @@ export interface EngineDeps {
   fillDelayMs: number;
   /** Seals each result row; a row without a valid seal (not written by this server) is never redelivered for signing. */
   sealer: Sealer;
+  /** Props.trade's fee rate now (lib/order-fee.ts): the funded accounts' once the program is live. */
+  orderFeeRate: () => Promise<OrderFeeRateInfo>;
 }
 
 export type Engine = ReturnType<typeof createEngine>;
@@ -99,6 +107,16 @@ const money = (s: string) => `${Number(s) < 0 ? '−' : ''}$${fixed(Math.abs(Num
 const signedMoney = (s: string) => `${Number(s) < 0 ? '' : '+'}${money(s)}`;
 /** App route of one account: a wallet can hold several accounts of a stage, so every link names its account. */
 const hrefOf = (a: Pick<AccountRow, 'id' | 'stage'>) => `/account/${a.stage}?id=${encodeURIComponent(a.id)}`;
+/** The account's exposure cap in GMTrade USD, the program's `terms.max_exposure_gm()`: a decrease's fee counts at most it. */
+export const exposureCap = (a: Pick<AccountRow, 'sizeUsd' | 'maxExposureBps'>) => ((micro(a.sizeUsd) * BigInt(a.maxExposureBps)) / 10_000n) * MICRO_PER_USD;
+/** An order's Props fee columns: the fee assessed at `rate` and that rate. */
+const assessedAt = (rate: OrderFeeRate, fee: bigint) => ({ platformFeeUsd: microText(fee), feeRateUsd: microText(rate.feeUsdc), feeRateBps: rate.feeBps });
+/** What an executed order is charged: at most its assessment, the rate of that assessment on the size executed. */
+export function chargedFee(o: Pick<OrderRow, 'platformFeeUsd' | 'feeRateUsd' | 'feeRateBps'>, executedUsd: bigint): bigint {
+  const assessed = micro(o.platformFeeUsd);
+  const owed = orderFee({ feeUsdc: micro(o.feeRateUsd), feeBps: o.feeRateBps }, executedUsd);
+  return owed < assessed ? owed : assessed;
+}
 /** "Evaluation 10K PT-9Kq3…": tells a wallet's same-size accounts apart in notifications. */
 const nameOf = (a: Pick<AccountRow, 'id' | 'stage' | 'label'>) => (a.stage === 'practice' ? a.label : `${a.label} ${shortIdOf(a)}`);
 const sizeLabel = (sizeUsd: string) => `${Number(sizeUsd) / 1000}K`;
@@ -122,7 +140,7 @@ function venueBreach(market: Market, side: 'Long' | 'Short', size: bigint, colla
   return null;
 }
 
-export function createEngine({ db, log, marketdata: md, publish, notify, fillDelayMs, sealer }: EngineDeps) {
+export function createEngine({ db, log, marketdata: md, publish, notify, fillDelayMs, sealer, orderFeeRate }: EngineDeps) {
   /** A unit price at the market's display precision ("86,734.78"); fills and orders keep every digit. */
   const shownPrice = (unit: bigint, decimals: number, symbol: string) => fixed(Number(priceText(unit, decimals)), md.market(symbol)?.priceDecimals ?? 2);
   const queues = new Map<string, Promise<unknown>>();
@@ -235,7 +253,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
   async function publishAccount(accountId: string) {
     const account = await loadAccount(db, accountId);
     if (!account) return;
-    const [{ valuation }, orders] = await Promise.all([snapshot(db, md, account), orderList(db, accountId)]);
+    const [{ valuation }, orders] = await Promise.all([snapshot(db, md, account, await orderFeeRate()), orderList(db, accountId)]);
     publish({ type: 'orders', accountId, orders }, { wallet: account.wallet });
     lastPublished.delete(accountId);
     publishValuation(account.wallet, accountId, valuation);
@@ -293,7 +311,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
   }
 
   async function summary(accountId: string): Promise<AccountSummary> {
-    return (await snapshot(db, md, (await loadAccount(db, accountId))!)).valuation.summary;
+    return (await snapshot(db, md, (await loadAccount(db, accountId))!, await orderFeeRate())).valuation.summary;
   }
 
   async function createEvaluation(input: { evaluation: string; wallet: string; terms: EvaluationTerms; purchasedAt: number; signature: string }) {
@@ -330,7 +348,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       for (const table of [simPositions, simOrders, simFills, closedTrades, equitySnapshots, accountEvents]) {
         await tx.update(table).set({ accountId: archive }).where(eq(table.accountId, id));
       }
-      await tx.update(accounts).set({ status: 'active', realizedPnl: '0', createdAt: now, resolvedAt: null, updatedAt: now }).where(eq(accounts.id, id));
+      await tx.update(accounts).set({ status: 'active', realizedPnl: '0', platformFeesUsd: '0', createdAt: now, resolvedAt: null, updatedAt: now }).where(eq(accounts.id, id));
       await tx.insert(equitySnapshots).values({ accountId: id, ts: now, equity: account.sizeUsd, realizedPnl: '0', unrealizedPnl: '0' });
       await event(tx, id, 'account', 'Practice account reset', 'A fresh 25,000 USD practice account; the previous one is archived', { ts: now });
       fx.onCommit.push(() => lastSnapshot.delete(id));
@@ -397,9 +415,10 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
 
   /**
    * The program's open_position checks (§1): tracked orders (this one and its take profit / stop loss), position slots,
-   * per-market leverage, available margin, total exposure.
+   * per-market leverage, available margin (the order's collateral and Props fee next to the fees of the pending
+   * increases, the program's hold), total exposure.
    */
-  function checkLimits(account: AccountRow, market: Market, book: Book, req: SimOrderRequest, size: bigint, collateral: bigint) {
+  function checkLimits(account: AccountRow, market: Market, book: Book, req: SimOrderRequest, size: bigint, collateral: bigint, fee: bigint) {
     if (size <= 0n || collateral <= 0n) throw new ApiError(400, 'bad_request', 'Size and margin must be above zero');
     checkOrderCount(book, 1 + Number(req.takeProfit !== undefined) + Number(req.stopLoss !== undefined));
     const slots = new Set([...book.positions, ...book.orders.filter((o) => o.isIncrease)].map((x) => `${x.symbol}:${x.side}`));
@@ -411,9 +430,11 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     const inPositions = book.positions.reduce((s, p) => s + micro(p.collateralUsd), 0n);
     const increases = book.orders.filter((o) => o.isIncrease);
     const reserved = increases.reduce((s, o) => s + micro(o.collateralUsd ?? '0'), 0n);
-    const available = micro(account.lossAllowanceUsd) + micro(account.realizedPnl) - inPositions - reserved;
-    if (collateral > available) {
-      throw new ApiError(422, 'order_rejected', `Margin ${money(microText(collateral))} is more than the ${money(microText(available > 0n ? available : 0n))} available`);
+    const held = reservedFees(0n, book.orders.map((o) => ({ fee: micro(o.platformFeeUsd), isIncrease: o.isIncrease })));
+    const available = micro(account.lossAllowanceUsd) + micro(account.realizedPnl) - inPositions - reserved - held;
+    if (collateral + fee > available) {
+      const what = fee > 0n ? `Margin ${money(microText(collateral))} and the ${money(microText(fee))} Props fee are` : `Margin ${money(microText(collateral))} is`;
+      throw new ApiError(422, 'order_rejected', `${what} more than the ${money(microText(available > 0n ? available : 0n))} available`);
     }
     const exposure = [...book.positions, ...increases].reduce((s, x) => s + usd(x.sizeUsd), 0n);
     const cap = (usd(account.sizeUsd) * BigInt(account.maxExposureBps)) / 10_000n;
@@ -435,6 +456,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
 
   async function placeOrder(wallet: string, accountId: string, req: SimOrderRequest): Promise<SimOrderResponse> {
     await owned(wallet, accountId);
+    const rate = await orderFeeRate();
     const order = await inAccount(accountId, async (tx, account, fx) => {
       const existing = await byClientId(tx, accountId, req.clientId, sameOrder(req));
       if (existing) return existing;
@@ -448,7 +470,8 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       const tp = req.takeProfit === undefined ? null : priceArg(req.takeProfit, dec, 'takeProfit');
       const sl = req.stopLoss === undefined ? null : priceArg(req.stopLoss, dec, 'stopLoss');
       const book = await loadBook(tx, accountId);
-      checkLimits(account, market, book, req, size, collateral);
+      const fee = orderFee(rate, size);
+      checkLimits(account, market, book, req, size, collateral, fee);
 
       const quote = tickUnits(tick, dec);
       checkProtection(isLong, trigger ?? (quote.min + quote.max) / 2n, trigger === null ? 'current price' : 'limit price', tp, sl);
@@ -470,7 +493,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       const [row] = await tx.insert(simOrders).values({
         ...base, ...stamp, executableFrom: from, clientId: req.clientId, kind: req.kind, isIncrease: true, sizeUsd: usdText(size),
         collateralUsd: microText(collateral), triggerPrice: trigger === null ? null : priceText(trigger, dec), acceptablePrice: priceText(acceptable, dec),
-        status: req.kind === 'Market' ? 'awaiting_execution' : 'awaiting_price',
+        status: req.kind === 'Market' ? 'awaiting_execution' : 'awaiting_price', ...assessedAt(rate, fee),
       }).returning();
       // Protection covers the whole position this order fills into (CLOSE_ALL); the size shown follows the position.
       const protects = usdText(size + (open ? usd(open.sizeUsd) : 0n));
@@ -478,7 +501,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
         if (price === null) continue;
         await tx.insert(simOrders).values({
           ...base, ...stamp, executableFrom: from, clientId: `${req.clientId}:${kind}`, kind, isIncrease: false, closeAll: true, sizeUsd: protects,
-          triggerPrice: priceText(price, dec), status: 'awaiting_price', parentOrderId: row!.id,
+          triggerPrice: priceText(price, dec), status: 'awaiting_price', parentOrderId: row!.id, ...assessedAt(rate, orderFee(rate, CLOSE_ALL, exposureCap(account))),
         });
       }
       await event(tx, accountId, 'order', `${req.kind} ${req.side.toLowerCase()} ${market.symbol}`,
@@ -517,6 +540,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
   async function closePosition(wallet: string, accountId: string, positionId: string, req: SimCloseRequest): Promise<SimOrderResponse> {
     await owned(wallet, accountId);
     const closeAll = req.percent === 100;
+    const rate = await orderFeeRate();
     const order = await inAccount(accountId, async (tx, account, fx) => {
       const existing = await byClientId(tx, accountId, req.clientId,
         (o) => !o.isIncrease && o.kind === 'Market' && o.positionId === positionId && o.closeAll === closeAll);
@@ -533,6 +557,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
         ...stamp, executableFrom: executableFrom(account.stage, tick, stamp.createdAt), accountId, clientId: req.clientId, positionId, symbol: position.symbol,
         marketToken: position.marketToken, side: position.side, kind: 'Market', isIncrease: false, closeAll, sizeUsd: usdText(size),
         acceptablePrice: priceText(acceptable, state.indexDecimals), slippageBps: req.slippageBps, status: 'awaiting_execution',
+        ...assessedAt(rate, orderFee(rate, closeAll ? CLOSE_ALL : size, exposureCap(account))),
       }).returning();
       await event(tx, accountId, 'order', `Close ${position.side.toLowerCase()} ${position.symbol}`, `${req.percent}% of ${money(position.sizeUsd)}`,
         { amountUsd: usdText(size), symbol: position.symbol });
@@ -545,6 +570,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
 
   async function setProtection(wallet: string, accountId: string, positionId: string, req: SimProtectionRequest): Promise<Position> {
     await owned(wallet, accountId);
+    const rate = await orderFeeRate();
     await inAccount(accountId, async (tx, account, fx) => {
       const position = await openPosition(tx, accountId, positionId);
       if (!TRADING.has(account.status)) throw new ApiError(409, 'account_inactive', `This account is ${account.status}; it takes no new orders`);
@@ -575,6 +601,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
           ...stamp, executableFrom: executableFrom(account.stage, tick, stamp.createdAt), accountId, clientId: `protection:${randomUUID()}`, positionId,
           symbol: position.symbol, marketToken: position.marketToken, side: position.side, kind, isIncrease: false, closeAll: true,
           sizeUsd: position.sizeUsd, triggerPrice: priceText(price, dec), slippageBps: 0, status: 'awaiting_price',
+          ...assessedAt(rate, orderFee(rate, CLOSE_ALL, exposureCap(account))),
         }).returning();
         fx.watch.push(row!);
       }
@@ -584,7 +611,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       fx.changed = true;
     });
     const account = (await loadAccount(db, accountId))!;
-    const { valuation } = await snapshot(db, md, account);
+    const { valuation } = await snapshot(db, md, account, rate);
     return valuation.positions.find((p) => p.id === positionId)!;
   }
 
@@ -680,8 +707,8 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
   }
 
   /**
-   * Applies one executed fill: position, fill row, realized P&L, the order, protection, the round trip when the
-   * position closes, activity and notification.
+   * Applies one executed fill: position, fill row, realized P&L (net of the order's Props fee), the order, protection, the
+   * round trip when the position closes, activity and notification.
    */
   async function recordFill(tx: Tx, account: AccountRow, fx: Effects, f: {
     order: OrderRow | null; position: PositionRow | undefined; result: IncreaseResult | DecreaseResult;
@@ -694,9 +721,13 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     const after = result.position;
     const before = f.position ? micro(f.position.collateralUsd) : 0n;
     const remaining = after?.collateralAmount ?? 0n;
+    const sizeDelta = isIncrease ? usd(order!.sizeUsd) : result.sizeDeltaUsd;
+    // Props.trade's fee: an order of the account that executed pays it, a liquidation nothing.
+    const platformFee = order ? chargedFee(order, sizeDelta) : 0n;
     // Cash view: an increase realizes the costs taken from the collateral it adds; a decrease realizes what it pays
-    // out minus the collateral it releases. (Excess negative impact GMTrade parks as claimable is not paid out.)
-    const realized = isIncrease ? remaining - before - f.collateralIn : result.outputAmount + result.secondaryOutputAmount - (before - remaining);
+    // out minus the collateral it releases. (Excess negative impact GMTrade parks as claimable is not paid out.) Both
+    // less the Props fee.
+    const realized = (isIncrease ? remaining - before - f.collateralIn : result.outputAmount + result.secondaryOutputAmount - (before - remaining)) - platformFee;
     const values = after && {
       sizeUsd: usdText(after.sizeInUsd), sizeTokens: formatFixed(after.sizeInTokens, dec, dec), collateralUsd: microText(after.collateralAmount),
       entryPrice: priceText(after.sizeInUsd / after.sizeInTokens, dec), modelState: { account: stampPosition(after.account, isIncrease, now) },
@@ -711,15 +742,16 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       await tx.update(simPositions).set(values ?? { closedAt: now, updatedAt: now }).where(eq(simPositions.id, position.id));
     }
     const p = position!;
-    const sizeDelta = isIncrease ? usd(order!.sizeUsd) : result.sizeDeltaUsd;
     await tx.insert(simFills).values({
       accountId: account.id, orderId: order?.id ?? null, positionId: p.id, symbol: p.symbol, side: p.side, isIncrease,
       sizeUsd: usdText(sizeDelta), price: priceText(result.executionPrice, dec),
       feeUsd: usdText(result.fees.orderFeeValue + (result.fees.liquidationFeeValue ?? 0n)), priceImpactUsd: usdText(result.priceImpactValue),
       fundingUsd: microText(result.fees.fundingFeeAmount), borrowUsd: microText(result.fees.borrowingFeeAmount), realizedPnl: microText(realized),
-      tickTs: new Date(f.tick.ts), ts: now,
+      platformFeeUsd: microText(platformFee), tickTs: new Date(f.tick.ts), ts: now,
     });
-    await tx.update(accounts).set({ realizedPnl: sql`${accounts.realizedPnl} + ${microText(realized)}`, updatedAt: now }).where(eq(accounts.id, account.id));
+    await tx.update(accounts).set({
+      realizedPnl: sql`${accounts.realizedPnl} + ${microText(realized)}`, platformFeesUsd: sql`${accounts.platformFeesUsd} + ${microText(platformFee)}`, updatedAt: now,
+    }).where(eq(accounts.id, account.id));
     fx.filled = true;
 
     if (order) {
@@ -740,7 +772,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     }
     const verb = !order ? 'liquidated' : isIncrease ? (f.position ? 'increased' : 'opened') : after ? 'reduced' : 'closed';
     const title = `${p.side} ${p.symbol} ${verb}`;
-    const detail = `${money(usdText(sizeDelta))} at ${shownPrice(result.executionPrice, dec, p.symbol)}, P&L ${signedMoney(microText(realized))}`;
+    const detail = `${money(usdText(sizeDelta))} at ${shownPrice(result.executionPrice, dec, p.symbol)}, P&L ${signedMoney(microText(realized))}${platformFee > 0n ? ` after a ${money(microText(platformFee))} Props fee` : ''}`;
     await event(tx, account.id, order ? 'fill' : 'liquidation', title, detail, { amountUsd: usdText(sizeDelta), symbol: p.symbol, ts: now });
     fx.notices.push({ kind: order ? 'fill' : 'risk', title, body: `${nameOf(account)}: ${detail} (simulated)`, href: hrefOf(account) });
 
@@ -751,15 +783,16 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     }
   }
 
-  /** The round trip's costs summed from its fills (funding and borrowing are USDC amounts, taken as $1 each). */
+  /** The round trip's costs summed from its fills (funding, borrowing and Props fees are USDC amounts, taken as $1 each). */
   async function recordRoundTrip(tx: Tx, p: PositionRow, closedAt: Date) {
     const fills = await tx.select().from(simFills).where(eq(simFills.positionId, p.id));
-    let size = 0n, orderFees = 0n, funding = 0n, borrow = 0n, impact = 0n, net = 0n, exitSize = 0n, exitValue = 0n;
+    let size = 0n, orderFees = 0n, platformFees = 0n, funding = 0n, borrow = 0n, impact = 0n, net = 0n, exitSize = 0n, exitValue = 0n;
     for (const f of fills) {
       const delta = usd(f.sizeUsd);
       if (f.isIncrease) size += delta;
       else [exitSize, exitValue] = [exitSize + delta, exitValue + delta * usd(f.price)];
       orderFees += usd(f.feeUsd);
+      platformFees += micro(f.platformFeeUsd) * MICRO_PER_USD;
       funding += micro(f.fundingUsd) * MICRO_PER_USD;
       borrow += micro(f.borrowUsd) * MICRO_PER_USD;
       impact += usd(f.priceImpactUsd);
@@ -768,8 +801,8 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     await tx.insert(closedTrades).values({
       accountId: p.accountId, symbol: p.symbol, side: p.side, venue: 'simulated', openedAt: p.openedAt, closedAt,
       sizeUsd: usdText(size), entryPrice: p.entryPrice, exitPrice: formatFixed(exitSize ? exitValue / exitSize : 0n, 20, 18),
-      feesUsd: usdText(orderFees + funding + borrow), orderFeesUsd: usdText(orderFees), fundingUsd: usdText(funding), borrowUsd: usdText(borrow),
-      priceImpactUsd: usdText(impact), netPnl: microText(net),
+      feesUsd: usdText(orderFees + platformFees + funding + borrow), orderFeesUsd: usdText(orderFees), platformFeeUsd: usdText(platformFees),
+      fundingUsd: usdText(funding), borrowUsd: usdText(borrow), priceImpactUsd: usdText(impact), netPnl: microText(net),
     });
   }
 
@@ -790,6 +823,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
    * is retried every pass; the rest of the step goes ahead.
    */
   async function applyRules(tx: Tx, accountId: string, fx: Effects, now = Date.now(), prices?: ReadonlyMap<string, PriceTick>): Promise<Valuation> {
+    const rate = await orderFeeRate();
     const load = async () => {
       const account = (await loadAccount(tx, accountId))!;
       const book = await loadBook(tx, accountId);
@@ -811,15 +845,15 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     }
     if (dirty) ({ account, book, marks } = await load());
     const guarded = overCap(account, marks, now);
-    for (const m of guarded) await sessionClose(tx, account, fx, m);
+    for (const m of guarded) await sessionClose(tx, account, fx, m, rate);
     if (guarded.length) ({ account, book, marks } = await load());
-    let v = value(account, marks, book.orders, now);
+    let v = value(account, marks, book.orders, now, rate);
 
     const status = decide(account, marks, v, now);
     if (status !== account.status) {
       await statusChange(tx, account, status, fx, v, new Date(now));
       ({ account, book, marks } = await load());
-      v = value(account, marks, book.orders, now);
+      v = value(account, marks, book.orders, now, rate);
     }
     if (TERMINAL.has(account.status) && account.stage === 'evaluation' && book.positions.length === 0) await resolve(tx, account, fx, v);
     if (v.complete && (fx.filled || snapshotDue(accountId, marks, v, now))) {
@@ -849,13 +883,17 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     });
   }
 
-  /** The session guard's close: the whole position at any price, as the keeper's risk close (CLOSE_ALL, no acceptable price). */
-  async function sessionClose(tx: Tx, account: AccountRow, fx: Effects, m: Required<Mark> & { capBps: number }) {
+  /**
+   * The session guard's close: the whole position at any price, as the keeper's risk close (CLOSE_ALL, no acceptable
+   * price), with a Props fee assessed like the trader's own close (the program assesses a risk close of an account that
+   * is not breached).
+   */
+  async function sessionClose(tx: Tx, account: AccountRow, fx: Effects, m: Required<Mark> & { capBps: number }, rate: OrderFeeRate) {
     const p = m.position;
     const [order] = await tx.insert(simOrders).values({
       ...stamped(), executableFrom: new Date(m.tick.ts), accountId: account.id, clientId: `session-guard:${p.id}:${m.tick.ts}`, positionId: p.id,
       symbol: p.symbol, marketToken: p.marketToken, side: p.side, kind: 'Market', isIncrease: false, closeAll: true, sizeUsd: p.sizeUsd,
-      slippageBps: 0, status: 'awaiting_execution',
+      slippageBps: 0, status: 'awaiting_execution', ...assessedAt(rate, orderFee(rate, CLOSE_ALL, exposureCap(account))),
     }).returning();
     await execute(tx, account, fx, order!, m.tick, m.state);
     const [done] = await tx.select({ status: simOrders.status }).from(simOrders).where(eq(simOrders.id, order!.id));
@@ -962,6 +1000,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
    */
   async function rulesPass() {
     const now = Date.now();
+    const rate = await orderFeeRate();
     const added: OrderRow[] = [];
     rebuilding.add(added);
     const [positions, orders] = await Promise.all([
@@ -985,7 +1024,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     for (const account of await loadAccounts(db, active)) {
       const book = books.get(account.id)!;
       const marks = await markPositions(md, book.positions, prices);
-      const v = value(account, marks, book.orders, now);
+      const v = value(account, marks, book.orders, now, rate);
       const due = marks.some((m) => m.status?.liquidatable && fresh(m, now)) || book.orders.some((o) => expired(o, now))
         || overCap(account, marks, now).length > 0 || decide(account, marks, v, now) !== account.status || snapshotDue(account.id, marks, v, now);
       if (due) {

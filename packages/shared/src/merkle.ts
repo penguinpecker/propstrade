@@ -5,7 +5,7 @@
 // once the result is onchain; the round trips in GET /v1/accounts/:id/history are built from the same fills):
 //   1. Order the fills by `ts` ascending, then `id` ascending (the endpoint already returns them this way).
 //   2. Leaf of a fill = SHA-256 of the UTF-8 text of these fields exactly as the JSON strings/numbers read, joined by "|":
-//        id|symbol|side|increase-or-decrease|sizeUsd|price|feeUsd|priceImpactUsd|fundingUsd|borrowUsd|realizedPnl|ts
+//        id|symbol|side|increase-or-decrease|sizeUsd|price|feeUsd|platformFeeUsd|priceImpactUsd|fundingUsd|borrowUsd|realizedPnl|ts
 //      where increase-or-decrease is the word "increase" or "decrease", realizedPnl is "" when null, and ts is the
 //      decimal unix-millisecond number.
 //   3. Hash pairs left to right, parent = SHA-256(left 32 bytes ‖ right 32 bytes); an odd node at the end of a level
@@ -17,7 +17,7 @@ const sha256 = async (data: Uint8Array<ArrayBuffer>) => new Uint8Array(await cry
 const hex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 
 export const fillLeafText = (f: Fill) => [
-  f.id, f.symbol, f.side, f.isIncrease ? 'increase' : 'decrease', f.sizeUsd, f.price, f.feeUsd, f.priceImpactUsd,
+  f.id, f.symbol, f.side, f.isIncrease ? 'increase' : 'decrease', f.sizeUsd, f.price, f.feeUsd, f.platformFeeUsd, f.priceImpactUsd,
   f.fundingUsd, f.borrowUsd, f.realizedPnl ?? '', String(f.ts),
 ].join('|');
 

@@ -6,6 +6,7 @@ import { PROPS_VAULT_PROGRAM_ID, PropsVaultClient } from '@props/sdk';
 import { accounts, equitySnapshots, fundedAccounts } from '../../db/schema.ts';
 import { createSealer } from '../../lib/integrity.ts';
 import { LOCK_KEYS, runAsLeader } from '../../lib/leader.ts';
+import { serverOrderFeeRate } from '../../lib/order-fee.ts';
 import { loadKeypair } from '../../lib/solana.ts';
 import type { ChainService, ModuleContext } from '../types.ts';
 import { createFundedProvider } from './funded.ts';
@@ -33,7 +34,7 @@ export async function createChain(ctx: ModuleContext, opts: ChainOptions = {}) {
   const client = new PropsVaultClient(rpc);
   const reader = createReader(client, rpc);
   const notify = (n: Notice) => ctx.notify(n.wallet, n);
-  const program = createProgramReader({ db, rpc, client, programId, cluster: ctx.config.SOLANA_CLUSTER });
+  const program = createProgramReader({ db, rpc, client, programId, cluster: ctx.config.SOLANA_CLUSTER, serverRate: serverOrderFeeRate(ctx.config) });
   const venue = createVenue({
     db, rpc, client, reader, marketdata: services.marketdata, gm: opts.gm ?? subsquid, log, notify, referralRewardBps: ctx.config.REFERRAL_REWARD_BPS,
   });
@@ -101,7 +102,7 @@ export async function createChain(ctx: ModuleContext, opts: ChainOptions = {}) {
 
   const service: ChainService = {
     list: funded.list, detail: funded.detail, positions: funded.positions, orders: funded.orders, history: funded.history,
-    activity: funded.activity, performance: funded.performance, config: () => program.appConfig(),
+    activity: funded.activity, performance: funded.performance, config: () => program.appConfig(), orderFeeRate: program.orderFeeRate,
   };
   return { service, indexer, venue, jobs, funded, program, leader };
 }

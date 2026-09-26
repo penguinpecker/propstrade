@@ -10,6 +10,7 @@ import type {
 import type { Prices } from '@props/gmsol-wasm';
 import type { Config } from '../config.js';
 import type { Db, Sql } from '../db/client.js';
+import type { OrderFeeRateInfo } from '../lib/order-fee.js';
 import type { UpstreamStatus } from './marketdata/upstreams.js';
 
 export interface ModuleContext {
@@ -80,6 +81,9 @@ export interface SimService extends AccountsProvider {
  * Owns routes /v1/config, /v1/accounts* (merging sim + funded), /v1/payouts*, /v1/verify, /v1/vault. */
 export interface ChainService extends AccountsProvider {
   config(): Promise<AppConfig>;
+  /** The rate every stage assesses orders at now: the onchain Config's once the program is live, else the server's
+   *  settings (cached ~30 s; a failed read keeps the last rate known). */
+  orderFeeRate(): Promise<OrderFeeRateInfo>;
 }
 
 /** Raw GMTrade market state needed by the simulator and risk checks (decoded onchain Market + live prices). */

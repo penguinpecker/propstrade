@@ -1,7 +1,8 @@
 // Read-only report of everything the go-live steps change (docs/runbooks/launch.md): the program and its upgrade
-// authority, the Config (admin, authorities, pinned addresses, parameters, pauses), vault, fee vault and SOL treasury
-// balances, allocated principal and funded accounts, every tier and market config, and the SOL each authority holds.
-// Needs no key and sends nothing. Run it after every step and compare with what the step should have changed.
+// authority, the Config (admin, authorities, pinned addresses, parameters, the order fee rate, pauses), vault, fee vault
+// and SOL treasury balances, allocated principal and funded accounts with the order fees they paid and owe, every tier
+// and market config, and the SOL each authority holds. Needs no key and sends nothing. Run it after every step and
+// compare with what the step should have changed.
 import { PublicKey } from '@solana/web3.js';
 import {
   BPS,
@@ -87,6 +88,8 @@ main(async () => {
   ] as const) if (!actual.equals(expected)) warnings.push(`${name} is ${actual.toBase58()}, the SDK expects ${expected.toBase58()}`);
   console.log(`  pinned              USDC ${c.usdcMint.toBase58()}, GMTrade ${c.gmtradeProgram.toBase58()} store ${c.gmtradeStore.toBase58()}`);
   console.log(`  parameters          trader share ${pct(c.traderShareBps)}, min payout ${usdc(c.minPayout)}, owner float ${sol(BigInt(c.ownerSolTarget.toString()))} (top-up below ${sol(BigInt(c.ownerSolMin.toString()))}), max ${usdc(c.maxDailyPrincipal)} principal a day`);
+  const feeUsdc = BigInt(c.orderFeeUsdc.toString());
+  console.log(`  order fee           ${feeUsdc === 0n && c.orderFeeBps === 0 ? 'off' : `${fromMicro(feeUsdc)} USDC + ${c.orderFeeBps} bps of the size, per order`}`);
   console.log(`  pauses              new evaluations ${onOff(c.paused.newEvaluations)}, trading ${onOff(c.paused.trading)}, payouts ${onOff(c.paused.payouts)}`);
 
   const capital = tokenAmount(capitalInfo?.data);
@@ -96,7 +99,12 @@ main(async () => {
   console.log(`  allocated principal ${usdc(c.allocatedPrincipal)} in ${c.fundedActive} open funded accounts (${c.fundedActivated} activated in total)`);
   console.log(`  fee vault           ${feeVaultPda().toBase58()} ${tokenAmount(feeInfo?.data) === null ? 'missing' : usdc(tokenAmount(feeInfo?.data)!)}`);
   console.log(`  sol treasury        ${solTreasuryPda().toBase58()} ${sol(treasury)}`);
-  console.log(`  totals              ${c.evaluationsSold} evaluations sold, fees ${usdc(c.feesCollected)}, payouts ${usdc(c.payoutsPaid)}, vault profit share ${usdc(c.profitToVault)}`);
+  console.log(`  totals              ${c.evaluationsSold} evaluations sold, evaluation fees ${usdc(c.feesCollected)}, payouts ${usdc(c.payoutsPaid)}, vault profit share ${usdc(c.profitToVault)}`);
+  // Order fees are not in Config (a settlement would write-lock it): each funded account keeps what it paid and owes.
+  const funded = (await vault.program.account.fundedAccount.all()).map((f) => f.account);
+  const sum = (of: (f: (typeof funded)[number]) => { toString(): string }) => funded.reduce((s, f) => s + BigInt(of(f).toString()), 0n);
+  const owing = funded.filter((f) => BigInt(f.orderFeesDue.toString()) > 0n).length;
+  console.log(`  order fees          ${usdc(sum((f) => f.orderFeesPaid))} charged to the fee vault by ${sum((f) => f.orderFeeSettlements)} settlements, ${usdc(sum((f) => f.orderFeesDue))} due on ${owing} of ${funded.length} funded accounts`);
   if (treasury < BigInt(c.ownerSolTarget.toString())) warnings.push(`the SOL treasury holds less than one owner float (${sol(BigInt(c.ownerSolTarget.toString()))}): the next activation fails; run scripts/admin/fund-sol-treasury.ts`);
 
   // ---------- tiers ----------

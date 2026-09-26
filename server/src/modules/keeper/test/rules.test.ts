@@ -53,12 +53,15 @@ const order = (o: Partial<OrderView> & Pick<OrderView, 'order'>): OrderView => (
   slot: 0, type: 'takeProfit', sizeUsd: 10n * USD, placedByRisk: false, state: 'pending', createdAt: 1_000, ...o,
 });
 
+/** No Props fee due, none to settle. */
+const NO_FEES: AccountView['fees'] = { due: 0n, settlements: 0n, plan: null, closing: null };
+
 /** Long SOL $1,000 on $100 collateral, synced, worth its collateral; the account has $400 USDC left. */
 function account(over: Partial<AccountView> = {}): AccountView {
   return {
     funded: 'Funded1', status: 'active', slots: [slot(0, SOL)], orders: [],
     positions: new Map([['position-0', { size: 1_000n * USD, collateral: 100_000_000n, netValue: 100n * USD }]]),
-    value: 500n * USD, ownerLamports: 200_000_000n,
+    value: 500n * USD, ownerLamports: 200_000_000n, fees: NO_FEES,
     markets: new Map([
       [SOL, { symbol: 'SOL', open: true, schedule: null, closedMaxLeverageBps: 0 }],
       [NVDA, { symbol: 'NVDA', open: true, schedule: 'nyse', closedMaxLeverageBps: 80_000 }],
@@ -132,6 +135,34 @@ test('closure: a breached account is closed once flat, never before, and without
   shut.markets.set(SOL, { ...shut.markets.get(SOL)!, open: false });
   assert.equal(planStep(shut, ctx()), null);
   assert.equal(planStep(account({ slots: [], positions: new Map() }), ctx()), null, 'a flat healthy account stays open');
+});
+
+test('Props fees: what is due is settled alone and before any breach decision; at closure in the same transaction as close_funded, never short of what is due', () => {
+  const plan = { charge: 2_500_000n, waive: 800_000n, allocations: [{ order: 'open', charge: 2_500_000n, waive: 0n }, { order: 'tp', charge: 0n, waive: 800_000n }] };
+  const fees = { due: 3_300_000n, settlements: 4n, plan, closing: plan };
+  const settle = { type: 'settleFees', plan, expectedDue: 3_300_000n, expectedSettlements: 4n };
+  // At the floor with fees due: the settlement goes first, alone (the next read decides the breach on the chain after it).
+  const atFloor = account({ value: 0n, fees, positions: new Map([['position-0', { size: 1_000n * USD, collateral: 100_000_000n, netValue: 0n }]]) });
+  assert.deepEqual(planStep(atFloor, ctx()), { kind: 'settle', actions: [settle], detail: '2.5 USDC of Props fees to charge, 0.8 USDC to waive' });
+  assert.equal(planStep(atFloor, ctx({ skip: new Set(['settle']) }))?.kind, 'breach', 'a settlement that failed this tick holds nothing up');
+  assert.equal(planStep(account({ fees: { ...fees, plan: { charge: 0n, waive: 0n, allocations: [] } } }), ctx()), null, 'nothing known to settle: nothing sent');
+
+  // A flat breached account with fees due: settled and closed in one transaction (close_funded refuses fees due).
+  const flat = account({ status: 'breached', slots: [], positions: new Map(), value: 5n * USD, fees: { ...fees, plan: null } });
+  assert.deepEqual(planStep(flat, ctx()), {
+    kind: 'closure', actions: [settle, { type: 'closeFunded' }], detail: 'the breached account is flat; its Props fees due are settled with its closure',
+  });
+  // A closing plan that does not settle all of it (the fee ledger has not caught up with the chain) waits.
+  assert.equal(planStep(account({ ...flat, fees: { ...fees, plan: null, closing: { ...plan, waive: 0n } } }), ctx()), null);
+  assert.equal(planStep(account({ ...flat, fees: { ...fees, plan: null, closing: null } }), ctx()), null);
+});
+
+test('payout review with Props fees: a request waits while any are due; the fees charged since the last payout count against the realized P&L', () => {
+  const facts = { profit: 95_000_000n, feesDue: 0n, feesCharged: 5_000_000n, requestedAt: T0 + 40 * MIN, flat: true, verified: true, fills: tripA, links: [], now: T0 + 41 * MIN };
+  assert.deepEqual(reviewPayout(facts), { decision: 'approve' }, '100 realized in fills less 5 of Props fees charged');
+  assert.deepEqual(reviewPayout({ ...facts, feesDue: 1n }), { decision: 'wait', reason: 'order fees are still being settled' });
+  const donated = reviewPayout({ ...facts, profit: 100_000_000n, now: facts.requestedAt + REVIEW_GRACE_MS });
+  assert.deepEqual(donated, { decision: 'hold', reasons: ['Requested profit 100 USDC is more than the 95 USDC realized in GMTrade fills since the last payout (after 5 USDC of Props fees); USDC sent to the account is not profit'] });
 });
 
 test('session guard: over-levered stock and FX positions are closed from 15 minutes before the session ends, only while open', () => {
@@ -231,13 +262,13 @@ test('realized P&L of the fills is the closed-trade net, on a real GMTrade round
   const trip: (TradeEvent & { signature: string })[] = JSON.parse(readFileSync(new URL('../../chain/test/fixtures/sol-round-trip.json', import.meta.url), 'utf8'),
     (_k, v) => (typeof v === 'string' && /^-?\d+n$/.test(v) ? BigInt(v.slice(0, -1)) : v));
   const sol = { marketToken: 'm', symbol: 'SOL', indexToken: 'i', decimals: 9 };
-  const rows = trip.map((e) => ({ ...fillRow(e, 'F', sol, e.signature), fundedAccount: 'F' }));
+  const rows = trip.map((e) => ({ ...fillRow(e, 'F', sol, e.signature), fundedAccount: 'F', platformFeeUsd: '0' }));
   assert.equal(realizedOf(rows.map((r) => ({ ...r, account: 'F' }))), BigInt(Math.round(Number(roundTrip('F', rows).netPnl) * 1e6)));
   assert.equal(realizedOf(tripA), 100_000_000n, '100.5 realized after the close fee, less the 0.5 open fee');
 });
 
 test('payout review: approve only a flat, verified account whose profit its GMTrade fills explain, with no linked positions', () => {
-  const facts = { profit: 100_000_000n, requestedAt: T0 + 40 * MIN, flat: true, verified: true, fills: tripA, links: [], now: T0 + 41 * MIN };
+  const facts = { profit: 100_000_000n, feesDue: 0n, feesCharged: 0n, requestedAt: T0 + 40 * MIN, flat: true, verified: true, fills: tripA, links: [], now: T0 + 41 * MIN };
   assert.deepEqual(reviewPayout(facts), { decision: 'approve' });
   assert.deepEqual(reviewPayout({ ...facts, profit: 100_020_000n }), { decision: 'approve' }, 'within a cent per fill');
 
@@ -268,7 +299,7 @@ test('linked positions: exposure added in the same market within 5 minutes of ea
   assert.equal(linkedPositions(ours, other('Short', T0 + 4 * MIN, T0 + 50 * MIN, 'BTC'), now).length, 0, 'another market');
   assert.equal(linkedPositions(ours, other('Short', T0 - 4 * MIN, T0 - MIN), now).length, 0, 'flat again before ours was opened');
   assert.equal(linkedPositions(ours, exposuresOf(tripA), now).length, 0, 'never linked to itself');
-  const review = reviewPayout({ profit: 100_000_000n, requestedAt: T0, flat: true, verified: true, fills: tripA, links: hedge, now });
+  const review = reviewPayout({ profit: 100_000_000n, feesDue: 0n, feesCharged: 0n, requestedAt: T0, flat: true, verified: true, fills: tripA, links: hedge, now });
   assert.deepEqual(review, { decision: 'hold', reasons: ['Opposite Short SOL exposure added in funded account B within 5 minutes of this account\'s Long SOL (2026-09-23 12:00 UTC)'] });
   // A partial close keeps the position open; a closing fill alone adds no exposure.
   const partial = exposuresOf([...tripA.slice(0, 1), fill({ venueId: '0015', ts: new Date(T0 + MIN), isIncrease: false, sizeUsd: '500', sizeAfterUsd: '500' })]);

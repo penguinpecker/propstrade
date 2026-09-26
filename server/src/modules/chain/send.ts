@@ -81,8 +81,8 @@ function refusal(err: unknown, logs: string[], keys: PublicKey[]): Rejected {
 export async function sendTransaction(rpc: SendRpc, p: {
   instructions: TransactionInstruction[];
   signer: Keypair;
-  /** Runs with the final signature before anything is sent; throwing here sends nothing. */
-  beforeSend?: (signature: string) => Promise<void>;
+  /** Runs with the final signature (and the block height it can land until) before anything is sent; throwing here sends nothing. */
+  beforeSend?: (signature: string, lastValidBlockHeight: number) => Promise<void>;
   /** Wraps `beforeSend` and the first send (the keeper serializes them across the accounts it works on at once). */
   gate?: (checkAndSend: () => Promise<void>) => Promise<void>;
 }): Promise<string> {
@@ -102,15 +102,20 @@ export async function sendTransaction(rpc: SendRpc, p: {
   const raw = tx.serialize();
   const send = () => rpc.sendRawTransaction(raw, { skipPreflight: true, maxRetries: 0 });
   const first = async () => {
-    await p.beforeSend?.(signature);
+    await p.beforeSend?.(signature, lastValidBlockHeight);
     await send();
   };
   await (p.gate ? p.gate(first) : first());
   const check = async () => {
+    // The height first: a status read after the confirmed height passed lastValidBlockHeight is final. Read the other
+    // way round, a transaction landing in its last valid block could read 'processed', then its block confirm and the
+    // height pass before the second read: reported expired although it landed.
+    const passed = (await rpc.getBlockHeight('confirmed')) > lastValidBlockHeight;
     const status = (await rpc.getSignatureStatuses([signature])).value[0];
     if (status?.err) return { failed: status.err };
     if (status?.confirmationStatus === 'confirmed' || status?.confirmationStatus === 'finalized') return 'landed' as const;
-    return (await rpc.getBlockHeight('confirmed')) > lastValidBlockHeight ? 'expired' as const : 'pending' as const;
+    // Still 'processed' after the height passed: on a fork that is either confirmed or dropped soon; poll on.
+    return passed && !status ? 'expired' as const : 'pending' as const;
   };
   for (let i = 1, unanswered = 0; ; i++) {
     await sleep(CONFIRM_POLL_MS);

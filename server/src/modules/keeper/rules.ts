@@ -2,6 +2,7 @@
 // funded account must do, whether a payout request can be approved, and whether GMTrade was upgraded. The loop reads
 // the chain, asks here, sends one transaction, reads again and asks again, so every decision is made on fresh state.
 import { parseFixed, formatFixed } from '@props/gmtrade';
+import type { SettlementPlan } from '../chain/fees.ts';
 import { nextSessionClose, type Schedule } from './sessions.ts';
 
 /** Tracked-order capacity of a funded account (programs/props_vault state.rs MAX_ORDERS). */
@@ -38,6 +39,13 @@ export interface AccountView {
   ownerLamports: bigint;
   /** By market token, for every used slot. */
   markets: Map<string, MarketView>;
+  /**
+   * Props order fees: `due` = FundedAccount.order_fees_due and `settlements` = its order_fee_settlements (what a
+   * settlement must name); `plan` = the next settlement of what is due (chain/fees.ts planSettlement) and `closing` = the
+   * one that settles all of it before closure; both null while the fee ledger is not in step with the chain or a sent
+   * settlement awaits its outcome.
+   */
+  fees: { due: bigint; settlements: bigint; plan: SettlementPlan | null; closing: SettlementPlan | null };
 }
 
 export type Action =
@@ -48,8 +56,9 @@ export type Action =
   | { type: 'closeCompleted'; order: string }
   | { type: 'cancel'; order: string }
   | { type: 'close'; slot: number }
+  | { type: 'settleFees'; plan: SettlementPlan; expectedDue: bigint; expectedSettlements: bigint }
   | { type: 'closeFunded' };
-export type StepKind = 'topUp' | 'breach' | 'session' | 'upgrade' | 'cleanup' | 'sync' | 'closure';
+export type StepKind = 'topUp' | 'settle' | 'breach' | 'session' | 'upgrade' | 'cleanup' | 'sync' | 'closure';
 /** One transaction's worth of work, in execution order (a prefix is sent when all of it does not fit). */
 export interface Step { kind: StepKind; actions: Action[]; detail: string }
 
@@ -66,6 +75,9 @@ export interface PlanContext {
 }
 
 const isIncrease = (o: OrderView) => o.type === 'market' || o.type === 'limit';
+const settles = (plan: SettlementPlan | null): plan is SettlementPlan => plan !== null && plan.charge + plan.waive > 0n;
+const settleFees = (v: AccountView, plan: SettlementPlan): Action =>
+  ({ type: 'settleFees', plan, expectedDue: v.fees.due, expectedSettlements: v.fees.settlements });
 const sizeOf = (v: AccountView, s: SlotView) => v.positions.get(s.gmPosition)?.size ?? 0n;
 const openSlots = (v: AccountView) => v.slots.filter((s) => sizeOf(v, s) > 0n);
 /** No used slot and no tracked order: what `close_funded` requires (the program re-checks every owner position). */
@@ -155,6 +167,15 @@ const steps: Record<StepKind, (v: AccountView, c: PlanContext) => Step | null> =
     : null),
 
   /**
+   * Props fees due, before any breach decision: executed orders charged what they owe (up to the USDC there), the rest
+   * of their assessments and every order that did not execute waived. Alone in its transaction: a sync or another
+   * settlement landing first changes what it names, and it then fails and is planned again from a fresh read.
+   */
+  settle: (v) => (settles(v.fees.plan)
+    ? { kind: 'settle', actions: [settleFees(v, v.fees.plan)], detail: `${formatFixed(v.fees.plan.charge, 6, 6)} USDC of Props fees to charge, ${formatFixed(v.fees.plan.waive, 6, 6)} USDC to waive` }
+    : null),
+
+  /**
    * Equity at the floor ends the account, as a failed evaluation ends: `mark_breached` (terminal; the restriction lift
    * cannot reopen it), alone in its transaction: it needs no SOL from the owner PDA and GMTrade cannot refuse it, so no
    * close can hold it up. Then every open position is closed, whatever it is worth now (a liquidation can leave
@@ -202,10 +223,14 @@ const steps: Record<StepKind, (v: AccountView, c: PlanContext) => Step | null> =
   sync: (v) => (syncDiffers(v) ? { kind: 'sync', actions: [{ type: 'sync' }], detail: 'GMTrade state differs from the last sync' } : null),
 
   // Last: cleanup and sync have freed every slot and order by now. USDC left goes back to the capital vault, the SOL
-  // float to the treasury, and the principal and the trader's funded slot are released.
-  closure: (v) => (v.status === 'breached' && isFlat(v)
-    ? { kind: 'closure', actions: [{ type: 'closeFunded' }], detail: 'the breached account is flat' }
-    : null),
+  // float to the treasury, and the principal and the trader's funded slot are released. The program refuses it while
+  // Props fees are due, so those are settled in the same transaction: charged up to the USDC there, the rest waived.
+  closure: (v) => {
+    if (v.status !== 'breached' || !isFlat(v)) return null;
+    if (v.fees.due === 0n) return { kind: 'closure', actions: [{ type: 'closeFunded' }], detail: 'the breached account is flat' };
+    if (!v.fees.closing || v.fees.closing.charge + v.fees.closing.waive !== v.fees.due) return null; // the fee ledger catches up first
+    return { kind: 'closure', actions: [settleFees(v, v.fees.closing), { type: 'closeFunded' }], detail: 'the breached account is flat; its Props fees due are settled with its closure' };
+  },
 };
 
 /** The next transaction for an account, most urgent first; null when there is nothing to do. */
@@ -276,6 +301,10 @@ export function linkedPositions(ours: Exposure[], others: Exposure[], now: numbe
 export interface PayoutFacts {
   /** Requested profit (owner USDC − principal at request), micro USDC. */
   profit: bigint;
+  /** Props fees due on the account now (the program refused the request with any due; nothing can add to them since). */
+  feesDue: bigint;
+  /** Props fees charged since the last paid payout, micro USDC: they left the owner's USDC, as the fills' costs did. */
+  feesCharged: bigint;
   requestedAt: number;
   /** No slot or tracked order, and every GMTrade position of the owner PDA exists at size 0. */
   flat: boolean;
@@ -291,6 +320,7 @@ const usdc = (micro: bigint) => formatFixed(micro, 6, 6);
 const at = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ');
 
 export function reviewPayout(f: PayoutFacts): Review {
+  if (f.feesDue > 0n) return { decision: 'wait', reason: 'order fees are still being settled' };
   const reasons: string[] = [];
   if (!f.flat) reasons.push('The account still had GMTrade positions or orders at review');
   if (!f.verified) reasons.push('The trader\'s identity is not verified onchain');
@@ -299,11 +329,11 @@ export function reviewPayout(f: PayoutFacts): Review {
     const reason = `${kind} ${theirs.side} ${theirs.symbol} exposure added in funded account ${theirs.account} within ${LINK_WINDOW_MS / 60_000} minutes of this account's ${ours.side} ${ours.symbol} (${at(ours.at)} UTC)`;
     if (!reasons.includes(reason)) reasons.push(reason);
   }
-  const realized = realizedOf(f.fills);
+  const realized = realizedOf(f.fills) - f.feesCharged;
   const tolerance = BigInt(Math.max(1, f.fills.length)) * RECONCILE_TOLERANCE_PER_FILL;
   if (f.profit > realized + tolerance) {
     if (!reasons.length && f.now - f.requestedAt < REVIEW_GRACE_MS) return { decision: 'wait', reason: 'waiting for GMTrade\'s indexer to report the last fills' };
-    reasons.push(`Requested profit ${usdc(f.profit)} USDC is more than the ${usdc(realized)} USDC realized in GMTrade fills since the last payout; USDC sent to the account is not profit`);
+    reasons.push(`Requested profit ${usdc(f.profit)} USDC is more than the ${usdc(realized)} USDC realized in GMTrade fills since the last payout${f.feesCharged > 0n ? ` (after ${usdc(f.feesCharged)} USDC of Props fees)` : ''}; USDC sent to the account is not profit`);
   }
   return reasons.length ? { decision: 'hold', reasons } : { decision: 'approve' };
 }

@@ -10,7 +10,7 @@ import { accounts, evaluations, fundedAccounts } from '../../../db/schema.ts';
 import type { Notice } from '../projector.ts';
 import type { ChainReader } from '../reader.ts';
 import { createVenue, type GmIndexer } from '../venue.ts';
-import { freshDb, offlineClient, silentLog } from './support.ts';
+import { freshDb, indexedOrders, offlineClient, silentLog } from './support.ts';
 
 type Trip = (TradeEvent & { signature: string })[];
 const trip: Trip = JSON.parse(readFileSync(new URL('fixtures/sol-round-trip.json', import.meta.url), 'utf8'),
@@ -41,6 +41,7 @@ test('a GMTrade fill notice links to the funded account route, not to the funded
     id: funded, wallet: trader, stage: 'funded', status: 'active', label: 'Funded 10K', tierId: 1, evaluation, funded, sizeUsd: '10000',
     lossAllowanceUsd: '500', maxExposureBps: 10_000, traderShareBps: 8000, termsHash: 'ab'.repeat(32), termsVersion: 1, activatedAt: new Date(),
   });
+  await indexedOrders(t.db, funded, trip.map((e) => ({ order: e.order, isIncrease: e.isIncrease })));
   const gm: GmIndexer = {
     // The closing fill happened just now, so it is notified.
     trades: async () => trip.map((e, i) => ({ ...e, user: owner, ts: i === trip.length - 1 ? Date.now() : Date.now() - 86_400_000 + i })),

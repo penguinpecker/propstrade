@@ -1,10 +1,11 @@
-// HTTP routes owned by the chain module: /v1/config, /v1/accounts* (practice + evaluation from the sim module, funded
-// from here, dispatched by id), payouts, verify, vault, the public trader lookup (./traders.ts), and under /v1/admin
-// the operator payout review, lifting a funded account's restriction and retrying a chain job that failed for good.
+// HTTP routes owned by the chain module: /v1/config, /v1/order-fee, /v1/accounts* (practice + evaluation from the sim
+// module, funded from here, dispatched by id), payouts, verify, vault, the public trader lookup (./traders.ts), and under
+// /v1/admin the operator payout review, lifting a funded account's restriction and retrying a chain job that failed for
+// good.
 import { and, desc, eq, inArray } from 'drizzle-orm';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import type { Payout } from '@props/shared';
+import type { OrderFeeInfo, Payout } from '@props/shared';
 import type { Db } from '../../db/client.ts';
 import { accounts, adminAuditLog, chainJobs, fundedAccounts, payouts } from '../../db/schema.ts';
 import { ApiError, parse } from '../../errors.ts';
@@ -16,7 +17,7 @@ import type { FundedProvider } from './funded.ts';
 import { jobRow, requeue, type JobPayload } from './jobs.ts';
 import { ProgramNotInitialized, type ProgramReader } from './program.ts';
 import { PAYOUT_REJECTION_REASONS, rejectionReason } from './projector.ts';
-import { dec } from './reader.ts';
+import { dec, micro } from './reader.ts';
 import { registerTraderRoutes } from './traders.ts';
 
 const AccountParams = z.object({ id: z.string().min(1).max(64) });
@@ -64,6 +65,11 @@ export function registerRoutes(app: FastifyInstance, d: {
   };
 
   app.get('/v1/config', async () => fromChain(() => d.program.appConfig()));
+  // The rate orders are assessed at now, before the program is live too (the server's settings then).
+  app.get('/v1/order-fee', async (): Promise<OrderFeeInfo> => {
+    const r = await d.program.orderFeeRate();
+    return { orderFeeUsd: micro(r.feeUsdc), orderFeeBps: r.feeBps, orderFeeSource: r.source };
+  });
   app.get('/v1/vault', async () => fromChain(() => d.program.vault()));
   app.get('/v1/verify', async (req) => d.verify(parse(VerifyQuery, req.query).q));
   registerTraderRoutes(app, { db, sim: d.sim, funded });

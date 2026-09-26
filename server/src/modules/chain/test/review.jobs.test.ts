@@ -138,7 +138,7 @@ test('approve_payout and close_funded pass only the owner PDA\'s positions with 
     },
   };
   const client = new PropsVaultClient(rpc as never);
-  const account = { trader: Keypair.generate().publicKey, status: { breached: {} }, slots: [], orders: [] };
+  const account = { trader: Keypair.generate().publicKey, status: { breached: {} }, slots: [], orders: [], orderFeesDue: new BN(0), orderFeeSettlements: new BN(0) };
   client.fetch = (async (name: string) => (name === 'payoutRequest' ? { status: { requested: {} }, funded } : null)) as never;
   client.fetchFunded = (async () => account) as never;
   const passed: string[][] = [];

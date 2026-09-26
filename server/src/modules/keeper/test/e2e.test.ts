@@ -2,6 +2,8 @@
 // ports 28899/28900) and a real Postgres, with the chain module indexing everything it does. GMTrade keepers do not
 // run locally, so the position the session guard closes is placed at genesis as a GMTrade fill would leave it, and
 // the keeper's close order stays pending. Market data is stubbed to call SOL a US stock 12 minutes before an NYSE close.
+// The Props order fee is on ($0.50 + 2 bps): the session guard's close of an active account is assessed like the
+// trader's own close (keeper/test/fees.e2e.test.ts settles fees on the program in LiteSVM, where orders can execute).
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -14,13 +16,13 @@ import postgres from 'postgres';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Market, Notification } from '@props/shared';
 import {
-  GMTRADE_PROGRAM_ID, GMTRADE_STORE, PropsVaultClient, USDC_MINT, enumName, evaluationPda, fundedPda, ownerPda, ownerUsdcAddress,
+  CLOSE_ALL, GMTRADE_PROGRAM_ID, GMTRADE_STORE, PropsVaultClient, USDC_MINT, enumName, evaluationPda, fundedPda, orderFee, ownerPda, ownerUsdcAddress,
   solTreasuryPda, toUnitPrice,
 } from '@props/sdk';
 import { model, type ModelInput } from '@props/gmsol-wasm';
 import { buildApp } from '../../../app.ts';
 import { loadConfig } from '../../../config.ts';
-import { chainJobs, fundedAccounts, gmOrders, gmtradeDeploys, payouts, programEvents, venueFills } from '../../../db/schema.ts';
+import { chainJobs, fundedAccounts, gmOrders, gmtradeDeploys, orderFees, payouts, programEvents, venueFills } from '../../../db/schema.ts';
 import { LOCK_KEYS } from '../../../lib/leader.ts';
 import { createConnection } from '../../../lib/solana.ts';
 import { createStreamHub } from '../../../stream.ts';
@@ -143,6 +145,8 @@ const donate = (from: Keypair, to: PublicKey, amount: string) =>
 
 test('keeper against solana-test-validator: top-up, session-guard close with a cancel, sync, payout review, upgrade restrict until acknowledged, lift, leader-lost guard', { skip, timeout: 300_000 }, async () => {
   // ---- Alice: long SOL with all 8 order slots in use (a pending open + 7 TP/SL); Bob: a payout request on 100 USDC
+  const rate = { feeUsdc: 500_000n, feeBps: 2 };
+  await send([await vault.setOrderFee({ admin: admin.publicKey, ...rate })], [admin]);
   await funded(alice, 'person-a');
   const open = await vault.openPosition({
     trader: alice.publicKey, funded: await fresh(fundedA), marketToken: MARKETS.SOL.token, isLong: true, orderType: 'market',
@@ -222,6 +226,12 @@ test('keeper against solana-test-validator: top-up, session-guard close with a c
     const riskOrder = await until(async () => (await t.db.select().from(gmOrders)
       .where(and(eq(gmOrders.fundedAccount, fundedA.toBase58()), eq(gmOrders.statusDetail, 'Closes the whole position'))))[0], 20_000, 'risk close indexed');
     assert.deepEqual([riskOrder.isIncrease, riskOrder.status], [false, 'awaiting_execution']);
+    // The session guard closes an active account's position: its Props fee is assessed like the trader's own close, on
+    // the account's $10,000 exposure cap (charged on what it closes if it executes). The cancelled TP/SL's is released.
+    const [guardFee] = await t.db.select().from(orderFees).where(eq(orderFees.order, riskOrder.address));
+    assert.equal(orderFee(rate, CLOSE_ALL, 10_000n * USD), 2_500_000n);
+    assert.deepEqual([guardFee!.assessedUsd, guardFee!.state], ['2.500000', 'assessed']);
+    assert.equal((await t.db.select().from(orderFees).where(eq(orderFees.order, cancelled.address)))[0]!.state, 'released');
     assert.ok(notices.some((n) => n.wallet === alice.publicKey.toBase58() && n.kind === 'risk' && n.title === 'Long SOL closed before the market closes'));
     assert.ok(notices.some((n) => n.wallet === alice.publicKey.toBase58() && n.title === 'Pending order cancelled' && n.body.includes('take-profit on Long SOL')),
       'the trader is told which of their orders made room for the close');

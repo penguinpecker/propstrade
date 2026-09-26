@@ -91,8 +91,11 @@ wallet use `{ preHandler: app.requireWallet }` and read `request.wallet`. Money-
 `GET /v1/sim/:id/fills`, `POST /v1/practice/reset` (all signed-in, own accounts only, else 404; the fill list of an
 evaluation whose result is onchain is public, for recomputing its trades root); implements `SimService`.
 Orders are accepted by any process; fills, liquidations and the 1 s rules loop run on the holder of `LOCK_KEYS.sim`.
-`SIM_FILL_DELAY_MS` (default 2000) is the keeper delay before an order may fill. Tests: `test/sim/` (own database
-`<TEST_DATABASE_URL>_engine` / `_restart`, fed with live GMTrade state recorded by `test/sim/capture-fixtures.ts`).
+`SIM_FILL_DELAY_MS` (default 2000) is the keeper delay before an order may fill. Props.trade's fee per order is simulated
+at the fills as the program charges funded orders, at the rate every stage reads: the onchain Config's once the program
+is live, `ORDER_FEE_USDC` / `ORDER_FEE_BPS` before (`src/lib/order-fee.ts`; docs/ARCHITECTURE.md §8 "Props order fee").
+Tests: `test/sim/` (own database `<TEST_DATABASE_URL>_engine` / `_restart`, fed with live GMTrade state recorded by
+`test/sim/capture-fixtures.ts`).
 
 ## Whole stack locally (rehearsal)
 

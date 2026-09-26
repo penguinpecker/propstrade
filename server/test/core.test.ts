@@ -160,7 +160,7 @@ describe('migrations', () => {
       expect(tables.map((t) => t.table_name)).toEqual([
         'account_events', 'accounts', 'admin_audit_log', 'auth_nonces', 'candle_windows', 'chain_jobs', 'closed_trades',
         'equity_snapshots', 'evaluations', 'funded_accounts', 'gm_orders', 'gm_position_snapshots', 'gmtrade_deploys',
-        'indexer_cursors', 'kyc_requests', 'notifications', 'payouts', 'price_bars', 'program_events', 'referral_payouts',
+        'indexer_cursors', 'kyc_requests', 'notifications', 'order_fee_settlements', 'order_fees', 'payouts', 'price_bars', 'program_events', 'referral_payouts',
         'referral_rewards', 'sessions', 'sim_fills', 'sim_orders', 'sim_positions', 'sim_results', 'users', 'vault_ledger', 'venue_fills',
       ]);
       const committed = JSON.parse(readFileSync(`${migrationsFolder}/meta/_journal.json`, 'utf8')).entries.length;

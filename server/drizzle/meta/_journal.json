@@ -71,6 +71,13 @@
       "when": 1790360930415,
       "tag": "0009_referrals",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1790377775502,
+      "tag": "0010_order_fees",
+      "breakpoints": true
     }
   ]
 }

@@ -2,15 +2,17 @@
 // approve_payout / reject_payout / restrict(false) / close_funded with a risk authority. Every attempt first re-reads the onchain
 // state (already done → confirmed with the signature of the transaction that did it, from the indexer), simulates,
 // stores the signature before sending, confirms, and retries with backoff: RPC trouble for as long as it lasts, the
-// chain's own refusal 10 times.
+// chain's own refusal 10 times. A close_funded of an account with Props fees due settles them in the same transaction
+// (charged up to its USDC, the rest waived), recorded with the signature like the keeper's settlements.
 import { setTimeout as sleep } from 'node:timers/promises';
 import { PublicKey, type Connection, type Keypair, type TransactionInstruction } from '@solana/web3.js';
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
-import { enumName, identityLockPda, traderProfilePda, type PropsVaultClient } from '@props/sdk';
+import { enumName, identityLockPda, ownerUsdcAddress, traderProfilePda, type PropsVaultClient } from '@props/sdk';
 import { parseFixed } from '@props/gmtrade';
 import type { Db } from '../../db/client.ts';
 import { chainJobs, programEvents } from '../../db/schema.ts';
+import { failSettlement, feeLedger, inStep, planSettlement, recordSettlement } from './fees.ts';
 import type { Sealer } from '../../lib/integrity.ts';
 import type { EvaluationResult, SimService } from '../types.ts';
 import { hex } from './reader.ts';
@@ -29,11 +31,13 @@ export type JobPayload = {
   close_funded: { funded: string };
 };
 
-/** What an attempt must do after re-reading the chain. */
+type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
+
+/** What an attempt must do after re-reading the chain; `record` runs in the transaction that stores its signature. */
 type Plan =
   | { done: true }
   | { permanent: string }
-  | { instructions: TransactionInstruction[]; signer: Keypair };
+  | { instructions: TransactionInstruction[]; signer: Keypair; record?: (tx: Tx, signature: string, lastValidBlockHeight: number) => Promise<void> };
 
 /** A job the chain refuses (Rejected) this many times fails for good; any other failure is retried until it passes. */
 const MAX_REJECTIONS = 10;
@@ -54,7 +58,7 @@ const DONE_BY: { [K in JobKind]: { event: VaultEventName; fields(job: Job): Reco
 
 export interface JobDeps {
   db: Db;
-  rpc: SendRpc & Pick<Connection, 'getAccountInfo'>;
+  rpc: SendRpc & Pick<Connection, 'getAccountInfo' | 'getTokenAccountBalance'>;
   client: PropsVaultClient;
   keys: { risk?: Keypair; kyc?: Keypair };
   /** Checks every job's seal before its plan: a job this server did not write is never signed. */
@@ -140,20 +144,51 @@ export function createJobs(d: JobDeps) {
       }
       // The program re-checks every GMTrade position of the owner PDA passed as flat; an empty one proves nothing.
       const positions = await client.fetchOwnerPositions(address, { open: true });
-      return { instructions: [await client.closeFunded({ riskAuthority: risk.publicKey, funded: { address, account }, positions })], signer: risk };
+      const close = await client.closeFunded({ riskAuthority: risk.publicKey, funded: { address, account }, positions });
+      const due = BigInt(account.orderFeesDue.toString());
+      if (due === 0n) return { instructions: [close], signer: risk };
+      // close_funded refuses an account with fees due: settle them first, in the same transaction.
+      const ledger = await feeLedger(db, address.toBase58());
+      const expectedSettlements = BigInt(account.orderFeeSettlements.toString());
+      if (ledger.pending || !inStep(ledger, { due, paid: BigInt(account.orderFeesPaid.toString()), settlements: expectedSettlements })) {
+        throw new Error('Props fees are due and the fee ledger is not in step with the chain yet; retrying');
+      }
+      const { rows } = ledger;
+      const balance = await rpc.getTokenAccountBalance(ownerUsdcAddress(address)).then((b) => BigInt(b.value.amount));
+      const plan = planSettlement(rows, { balance, now: Date.now(), closing: true });
+      const settle = await client.settleOrderFees({
+        riskAuthority: risk.publicKey, funded: address, charge: plan.charge, waive: plan.waive, expectedDue: due, expectedSettlements,
+      });
+      return {
+        instructions: [settle, close], signer: risk,
+        record: (tx, signature, lastValidBlockHeight) => recordSettlement(tx, {
+          signature, funded: address.toBase58(), plan, expectedDue: due, expectedSettlements, sentBy: 'close_funded job', lastValidBlockHeight,
+        }),
+      };
     },
   };
 
   const signerFor = (kind: JobKind) => (kind === 'set_identity' ? d.keys.kyc : d.keys.risk);
 
   /** Records the signature before sending, so a restart finds the transaction instead of sending the work twice. */
-  function send(job: Job, instructions: TransactionInstruction[], signer: Keypair): Promise<string> {
-    return sendTransaction(rpc, {
-      instructions, signer,
-      beforeSend: async (signature) => {
-        await db.update(chainJobs).set({ status: 'sent', signature, updatedAt: sql`now()` }).where(eq(chainJobs.id, job.id));
-      },
-    });
+  async function send(job: Job, plan: Extract<Plan, { instructions: unknown }>): Promise<string> {
+    let signed: string | undefined;
+    try {
+      return await sendTransaction(rpc, {
+        instructions: plan.instructions, signer: plan.signer,
+        beforeSend: async (signature, lastValidBlockHeight) => {
+          await db.transaction(async (tx) => {
+            await tx.update(chainJobs).set({ status: 'sent', signature, updatedAt: sql`now()` }).where(eq(chainJobs.id, job.id));
+            await plan.record?.(tx, signature, lastValidBlockHeight);
+          });
+          signed = signature;
+        },
+      });
+    } catch (err) {
+      // A settlement in a transaction that failed onchain or expired unlanded changed nothing.
+      if (signed && plan.record && (err instanceof Rejected || err instanceof Expired)) await failSettlement(db, signed);
+      throw err;
+    }
   }
 
   /** The indexed transaction that did the job's work (this job's or anyone else's). */
@@ -202,7 +237,7 @@ export function createJobs(d: JobDeps) {
         d.log.error({ job: job.id, kind: job.kind, reason: plan.permanent }, 'chain job cannot be applied');
         return;
       }
-      await complete(job, 'done' in plan ? null : await send(job, plan.instructions, plan.signer));
+      await complete(job, 'done' in plan ? null : await send(job, plan));
     } catch (err) {
       const attempts = job.attempts + 1;
       // RPC and indexer trouble is retried for as long as it lasts (backoff capped at 5 min); only the chain's own

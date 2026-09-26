@@ -1,6 +1,7 @@
-// Projects props_vault events into the chain tables (evaluations, funded_accounts + their accounts rows, gm_orders,
-// payouts, vault_ledger, account_events). Runs inside the indexer's per-transaction database transaction, exactly
-// once per (signature, event index), so every write here is applied once and in chain order.
+// Projects props_vault events into the chain tables (evaluations, funded_accounts + their accounts rows, gm_orders and
+// their Props fees (order_fees, order_fee_settlements), payouts, vault_ledger, account_events). Runs inside the indexer's
+// per-transaction database transaction, exactly once per (signature, event index), so every write here is applied once
+// and in chain order.
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Notification } from '@props/shared';
@@ -9,9 +10,10 @@ import { formatFixed } from '@props/gmtrade';
 import type { Db } from '../../db/client.ts';
 import type { SimService } from '../types.ts';
 import {
-  accountEvents, accounts, equitySnapshots, evaluations, fundedAccounts, gmOrders, gmPositionSnapshots, payouts, vaultLedger,
+  accountEvents, accounts, equitySnapshots, evaluations, fundedAccounts, gmOrders, gmPositionSnapshots, orderFees, payouts, vaultLedger,
 } from '../../db/schema.ts';
 import type { VaultEvent } from './events.ts';
+import { confirmSettlement } from './fees.ts';
 import { gmUsd, micro, orderPrice, sizeName, toMicro6, type ChainReader } from './reader.ts';
 
 export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -30,6 +32,7 @@ export const LEDGER = {
   deposit: { event: 'Capital deposited', direction: 'in' },
   withdrawal: { event: 'Capital withdrawn', direction: 'out' },
   evaluationFee: { event: 'Evaluation fee', direction: 'in' },
+  orderFees: { event: 'Order fees', direction: 'in' },
   feesSwept: { event: 'Fees moved to capital', direction: 'internal' },
   principalAllocated: { event: 'Principal allocated', direction: 'out' },
   principalReturned: { event: 'Principal returned', direction: 'in' },
@@ -70,6 +73,15 @@ export async function project(tx: Tx, ev: VaultEvent, eventIndex: number, info: 
     if (!row) throw new Error(`event for unknown funded account ${funded}`);
     return row.trader;
   };
+  /** An order's Props fee as the program assessed it now, and the Config rate that did. */
+  const assessed = (e: { fee: string; orderFeeUsdc: string; orderFeeBps: number }) =>
+    ({ assessedUsd: micro(e.fee), rateUsd: micro(e.orderFeeUsdc), rateBps: e.orderFeeBps, updatedSlot: slot });
+  /** Fees of orders that left the book: released (nothing charged) or due (the keeper settles them). */
+  const feesLeave = (orders: string[], state: 'released' | 'due', ts: string) => (orders.length
+    ? tx.update(orderFees).set({ state, dueAt: state === 'due' ? at(ts) : null, updatedSlot: slot })
+      .where(and(inArray(orderFees.order, orders), eq(orderFees.state, 'assessed')))
+    : undefined);
+  const feeText = (fee: string) => (BigInt(fee) > 0n ? ` Props fee ${micro(fee)} USDC, charged only if it executes.` : '');
 
   switch (ev.name) {
     case 'evaluationPurchased': {
@@ -141,11 +153,13 @@ export async function project(tx: Tx, ev: VaultEvent, eventIndex: number, info: 
         statusDetail: closeAll ? 'Closes the whole position' : byRisk ? 'Placed by the risk service' : null,
         createSignature: signature, createdAt: at(e.ts),
       }).onConflictDoNothing();
+      await tx.insert(orderFees).values({ order: e.order, fundedAccount: e.funded, isIncrease, state: 'assessed', ...assessed(e) }).onConflictDoNothing();
       const what = isIncrease ? `${e.orderType} order` : 'close order';
       await activity(e.funded, {
         type: byRisk ? 'risk' : 'order', symbol: m.symbol, ts: at(e.ts), amountUsd: closeAll ? null : sizeUsd,
         title: byRisk ? `Risk service placed a close order on ${side(e.isLong)} ${m.symbol}` : `${side(e.isLong)} ${m.symbol} ${what} placed`,
-        detail: isIncrease ? `Size ${sizeUsd} USD with ${micro(e.collateral)} USDC collateral, sent to the exchange.` : closeAll ? 'Closes the whole position on the exchange.' : `Reduces the position by ${sizeUsd} USD on the exchange.`,
+        detail: (isIncrease ? `Size ${sizeUsd} USD with ${micro(e.collateral)} USDC collateral, sent to the exchange.` : closeAll ? 'Closes the whole position on the exchange.' : `Reduces the position by ${sizeUsd} USD on the exchange.`)
+          + feeText(e.fee),
       });
       return [];
     }
@@ -159,10 +173,11 @@ export async function project(tx: Tx, ev: VaultEvent, eventIndex: number, info: 
         isIncrease: false, sizeUsd: gmUsd(e.sizeDeltaUsd), collateralUsd: null, triggerPrice: trigger, acceptablePrice: null,
         status: 'awaiting_price', createSignature: signature, createdAt: at(e.ts),
       }).onConflictDoNothing();
+      await tx.insert(orderFees).values({ order: e.order, fundedAccount: e.funded, isIncrease: false, state: 'assessed', ...assessed(e) }).onConflictDoNothing();
       await activity(e.funded, {
         type: 'protection', symbol: m.symbol, ts: at(e.ts),
         title: `${kind === 'TakeProfit' ? 'Take-profit' : 'Stop-loss'} set on ${side(e.isLong)} ${m.symbol}`,
-        detail: `Triggers at ${trigger ?? 'no set price'} for ${gmUsd(e.sizeDeltaUsd)} USD of the position.`,
+        detail: `Triggers at ${trigger ?? 'no set price'} for ${gmUsd(e.sizeDeltaUsd)} USD of the position.${BigInt(e.fee) > 0n ? ` Props fee at most ${micro(e.fee)} USDC, charged on the size it closes if it executes.` : ''}`,
       });
       return [];
     }
@@ -177,6 +192,8 @@ export async function project(tx: Tx, ev: VaultEvent, eventIndex: number, info: 
         ...(e.acceptablePrice !== null && { acceptablePrice: orderPrice(e.acceptablePrice, decimals) }),
         updatedAt: at(e.ts),
       }).where(eq(gmOrders.address, e.order));
+      // Every update re-assesses the fee at the rate of the moment.
+      await tx.update(orderFees).set(assessed(e)).where(and(eq(orderFees.order, e.order), eq(orderFees.state, 'assessed')));
       await activity(e.funded, {
         type: 'order', symbol: order.symbol, ts: at(e.ts), title: `${order.side} ${order.symbol} order updated`, detail: 'New order terms sent to the exchange.',
       });
@@ -189,6 +206,7 @@ export async function project(tx: Tx, ev: VaultEvent, eventIndex: number, info: 
         status: 'canceled', statusDetail: byRisk ? 'Cancelled by the risk service' : 'Cancelled', closeSignature: signature,
         closedAt: at(e.ts), updatedAt: at(e.ts),
       }).where(eq(gmOrders.address, e.order)).returning();
+      await feesLeave([e.order], 'released', e.ts);
       await activity(e.funded, {
         type: byRisk ? 'risk' : 'cancel', symbol: order?.symbol, ts: at(e.ts),
         title: `${order ? `${order.side} ${order.symbol} ` : ''}order cancelled${byRisk ? ' by the risk service' : ''}`,
@@ -204,8 +222,22 @@ export async function project(tx: Tx, ev: VaultEvent, eventIndex: number, info: 
         // GMTrade finished these orders (filled or cancelled by its keeper); the venue sync reads which.
         await tx.update(gmOrders).set({ closedAt: at(e.ts), updatedAt: at(e.ts) })
           .where(and(inArray(gmOrders.address, finished), isNull(gmOrders.closedAt)));
+        // A dropped order's fee is due; a finished order closed by close_completed_order: due if it executed, released if
+        // the exchange cancelled it (the program read which).
+        await feesLeave(finished, ev.name === 'completedOrderClosed' && ev.data.cancelled ? 'released' : 'due', e.ts);
       }
       if (ev.name === 'synced') await tx.update(fundedAccounts).set({ lastSyncAt: at(e.ts), updatedSlot: slot }).where(eq(fundedAccounts.address, e.funded));
+      return [];
+    }
+    case 'orderFeesSettled': {
+      const e = ev.data;
+      await confirmSettlement(tx, { signature, funded: e.funded, charged: BigInt(e.charged), waived: BigInt(e.waived), by: e.by, at: at(e.ts) });
+      if (BigInt(e.charged) > 0n) await ledger(LEDGER.orderFees, e.charged, e.ts, e.funded);
+      await activity(e.funded, {
+        type: 'charge', ts: at(e.ts), amountUsd: BigInt(e.charged) > 0n ? micro(e.charged) : null,
+        title: 'Props fees settled',
+        detail: `${micro(e.charged)} USDC of order fees charged to the fee vault${BigInt(e.waived) > 0n ? `, ${micro(e.waived)} USDC waived` : ''}; ${micro(e.orderFeesDue)} USDC still due.`,
+      });
       return [];
     }
     case 'payoutRequested': {

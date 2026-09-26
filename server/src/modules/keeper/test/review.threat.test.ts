@@ -20,6 +20,7 @@ const atFloor: AccountView = {
   slots: [{ index: 0, marketToken: SOL, isLong: true, gmPosition: 'position-0', sizeUsd: 1_000n * USD, collateral: 1n, pendingUsd: 0n }],
   orders: [], positions: new Map([['position-0', { size: 1_000n * USD, collateral: 1n, netValue: 0n }]]), value: 0n,
   ownerLamports: 200_000_000n, markets: new Map([[SOL, { symbol: 'SOL', open: true, schedule: null, closedMaxLeverageBps: 0 }]]),
+  fees: { due: 0n, settlements: 0n, plan: null, closing: null },
 };
 
 test('reaching the floor marks the funded account breached onchain, not only restricted', () => {

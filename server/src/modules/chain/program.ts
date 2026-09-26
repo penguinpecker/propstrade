@@ -1,5 +1,6 @@
 // Program-wide state: /v1/config from the onchain Config and Tier accounts (cached ~30 s, dropped early when a settings
-// change is indexed), and /v1/vault from the vault balances and Config totals read together, plus the indexed ledger.
+// change is indexed), /v1/vault from the vault balances and Config totals read together, plus the indexed ledger, and
+// the Props order fee rate every stage charges (the Config's, or the server's settings before the program is live).
 import type { Connection, PublicKey } from '@solana/web3.js';
 import { asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { AppConfig, Tier, VaultStats } from '@props/shared';
@@ -7,6 +8,7 @@ import { capitalVaultAddress, configPda, feeVaultPda, solTreasuryPda, type Confi
 import { formatFixed } from '@props/gmtrade';
 import type { Db } from '../../db/client.ts';
 import { fundedAccounts, payouts, vaultLedger } from '../../db/schema.ts';
+import type { OrderFeeRateInfo } from '../../lib/order-fee.ts';
 import { tokenAccountAmount } from '../../lib/solana.ts';
 import type { VaultEvent } from './events.ts';
 import { LEDGER } from './projector.ts';
@@ -63,8 +65,13 @@ export async function capitalSeries(db: Db): Promise<VaultStats['series']> {
   return series.slice(-SERIES_POINTS);
 }
 
+/** A failed rate read is retried this soon (not after the whole cache period). */
+const RATE_RETRY_MS = 5_000;
+
 export function createProgramReader(d: {
   db: Db; rpc: Pick<Connection, 'getMultipleAccountsInfo'>; client: PropsVaultClient; programId: PublicKey; cluster: AppConfig['cluster'];
+  /** The server's ORDER_FEE_USDC / ORDER_FEE_BPS: the rate while the program is not initialized. */
+  serverRate: OrderFeeRateInfo;
 }) {
   const config = cached(async () => {
     const c = await d.client.fetchConfig();
@@ -77,6 +84,26 @@ export function createProgramReader(d: {
   async function state(): Promise<ProgramState> {
     const [c, t] = await Promise.all([config.get(), tiers.get()]);
     return { config: c, tiers: t };
+  }
+
+  const rateOf = (c: ConfigAccount): OrderFeeRateInfo => ({ feeUsdc: BigInt(c.orderFeeUsdc.toString()), feeBps: c.orderFeeBps, source: 'program' });
+  // The last rate read, served at once while a newer read runs (quotes and fills never wait on the RPC but the first):
+  // not initialized = the server's settings; a failed read keeps the last rate (the settings before any) and is retried.
+  let rate: { value: OrderFeeRateInfo; at: number } | undefined;
+  let loadingRate: Promise<void> | undefined;
+  function refreshRate(): Promise<void> {
+    loadingRate ??= config.get().then(
+      (c) => void (rate = { value: rateOf(c), at: Date.now() }),
+      (err: unknown) => void (rate = err instanceof ProgramNotInitialized
+        ? { value: d.serverRate, at: Date.now() }
+        : { value: rate?.value ?? d.serverRate, at: Date.now() - CACHE_MS + RATE_RETRY_MS }),
+    ).finally(() => (loadingRate = undefined));
+    return loadingRate;
+  }
+  async function orderFeeRate(): Promise<OrderFeeRateInfo> {
+    if (!rate) await refreshRate();
+    else if (Date.now() - rate.at > CACHE_MS) void refreshRate();
+    return rate!.value;
   }
 
   async function appConfig(): Promise<AppConfig> {
@@ -94,6 +121,7 @@ export function createProgramReader(d: {
       tiers: tiers.map(tier), traderShareBps: c.traderShareBps, minPayoutUsdc: micro(c.minPayout.toString()),
       paused: { newEvaluations: c.paused.newEvaluations, trading: c.paused.trading, payouts: c.paused.payouts },
       feeVault: feeVaultPda().toBase58(), capitalVault: c.capitalVault.toBase58(),
+      orderFeeUsd: micro(c.orderFeeUsdc.toString()), orderFeeBps: c.orderFeeBps, orderFeeSource: 'program',
     };
   }
 
@@ -109,13 +137,17 @@ export function createProgramReader(d: {
     const [pending] = await d.db.select({ sum: sql<string | null>`sum(${payouts.traderAmount})` }).from(payouts)
       .where(inArray(payouts.status, ['requested', 'reviewing']));
     const ledger = await d.db.select().from(vaultLedger).orderBy(desc(vaultLedger.slot), desc(vaultLedger.eventIndex)).limit(LEDGER_ROWS);
+    const [orderFees] = await d.db.select({ sum: sql<string | null>`sum(${vaultLedger.amountUsd})` }).from(vaultLedger).where(eq(vaultLedger.event, LEDGER.orderFees.event));
     return {
       programId: d.programId.toBase58(), capitalVault: capitalVaultAddress().toBase58(), feeVault: feeVaultPda().toBase58(),
       solTreasury: solTreasuryPda().toBase58(),
       capitalUsdc: micro(capitalUsdc + allocated), allocatedPrincipal: micro(allocated), unallocated: micro(capitalUsdc),
       feeVaultUsdc: micro(balance(fee)), pendingPayouts: dec(pending?.sum ?? '0'),
       fundedAccounts: c.fundedActive, solTreasurySol: formatFixed(BigInt(treasury?.lamports ?? 0), 9, 9),
-      totals: { feesCollected: micro(c.feesCollected.toString()), payoutsPaid: micro(c.payoutsPaid.toString()), profitToVault: micro(c.profitToVault.toString()) },
+      totals: {
+        feesCollected: micro(c.feesCollected.toString()), orderFeesCharged: dec(orderFees?.sum ?? '0'),
+        payoutsPaid: micro(c.payoutsPaid.toString()), profitToVault: micro(c.profitToVault.toString()),
+      },
       series: await capitalSeries(d.db),
       ledger: ledger.map((l) => ({
         id: `${l.signature}:${l.eventIndex}`, event: l.event, account: l.account ?? undefined, amountUsd: dec(l.amountUsd),
@@ -125,16 +157,18 @@ export function createProgramReader(d: {
     };
   }
 
-  /** Drops what indexed events changed: the Config on any settings change, the tiers when a tier was written. */
+  /** Drops what indexed events changed: the Config (and with it the fee rate) on any settings change, the tiers when a
+   *  tier was written. */
   function changed(events: VaultEvent[]) {
     for (const e of events) {
       if (e.name !== 'configChanged') continue;
       config.clear();
+      if (rate) rate.at = 0;
       if (e.data.change === 'tier') tiers.clear();
     }
   }
 
-  return { state, appConfig, vault, changed };
+  return { state, appConfig, vault, changed, orderFeeRate };
 }
 
 export type ProgramReader = ReturnType<typeof createProgramReader>;

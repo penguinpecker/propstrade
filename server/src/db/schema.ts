@@ -48,6 +48,8 @@ export const notificationKind = pgEnum('notification_kind', ['fill', 'risk', 'pa
 export const kycStatus = pgEnum('kyc_status', ['pending', 'approved', 'rejected']);
 export const chainJobKind = pgEnum('chain_job_kind', ['set_identity', 'record_evaluation_result', 'approve_payout', 'reject_payout', 'lift_restriction', 'close_funded']);
 export const chainJobStatus = pgEnum('chain_job_status', ['queued', 'sent', 'confirmed', 'failed']);
+export const orderFeeState = pgEnum('order_fee_state', ['assessed', 'released', 'due']);
+export const feeSettlementStatus = pgEnum('fee_settlement_status', ['sent', 'confirmed', 'failed']);
 
 // ---------- identity + auth ----------
 
@@ -110,6 +112,8 @@ export const accounts = pgTable('accounts', {
   termsHash: text('terms_hash'),
   termsVersion: integer('terms_version'),
   realizedPnl: usd('realized_pnl').notNull().default('0'),
+  /** Practice and evaluation: Props.trade fees charged at the fills so far (simulated; in realized_pnl too). */
+  platformFeesUsd: usd('platform_fees_usd').notNull().default('0'),
   createdAt: now('created_at'),
   activatedAt: at('activated_at'),
   resolvedAt: at('resolved_at'),
@@ -164,6 +168,14 @@ export const simOrders = pgTable('sim_orders', {
   parentOrderId: uuid('parent_order_id').references((): AnyPgColumn => simOrders.id, { onDelete: 'cascade' }),
   /** Closes the whole position at execution (GMTrade CLOSE_ALL): take profit, stop loss and 100% closes; size_usd is shown only. */
   closeAll: boolean('close_all').notNull().default(false),
+  /**
+   * Props.trade's fee assessed on the order when it was placed (as the program assesses a funded order: an increase on
+   * its size, a decrease on the account's exposure cap) and the rate that assessment used: at a fill it is charged
+   * min(assessed, the rate on the executed size) (@props/sdk orderFee). 0 for liquidations' and breach closes.
+   */
+  platformFeeUsd: usd('platform_fee_usd').notNull().default('0'),
+  feeRateUsd: usd('fee_rate_usd').notNull().default('0'),
+  feeRateBps: integer('fee_rate_bps').notNull().default(0),
 }, (t) => [
   uniqueIndex('sim_orders_client_uq').on(t.accountId, t.clientId),
   index('sim_orders_account_status_idx').on(t.accountId, t.status),
@@ -185,6 +197,8 @@ export const simFills = pgTable('sim_fills', {
   priceImpactUsd: usd('price_impact_usd').notNull(),
   fundingUsd: usd('funding_usd').notNull(),
   borrowUsd: usd('borrow_usd').notNull(),
+  /** Props.trade's fee charged at this fill (simulated); realized_pnl is net of it. */
+  platformFeeUsd: usd('platform_fee_usd').notNull().default('0'),
   realizedPnl: usd('realized_pnl'),
   /** Timestamp of the price tick the fill used. */
   tickTs: at('tick_ts').notNull(),
@@ -224,10 +238,12 @@ export const closedTrades = pgTable('closed_trades', {
   sizeUsd: usd('size_usd').notNull(),
   entryPrice: price('entry_price').notNull(),
   exitPrice: price('exit_price').notNull(),
-  /** Every cost of the trip, summed from its fills: fees_usd = order_fees_usd + funding_usd + borrow_usd (kept as the
-   *  total readers always had); price impact sits inside the prices and the P&L and is recorded for the breakdown. */
+  /** Every cost of the trip, summed from its fills: fees_usd = order_fees_usd + platform_fee_usd + funding_usd +
+   *  borrow_usd; price impact sits inside the prices and the P&L and is recorded for the breakdown. */
   feesUsd: usd('fees_usd').notNull(),
   orderFeesUsd: usd('order_fees_usd').notNull().default('0'),
+  /** Props.trade's fees on the trip's orders (net_pnl is after them). */
+  platformFeeUsd: usd('platform_fee_usd').notNull().default('0'),
   fundingUsd: usd('funding_usd').notNull().default('0'),
   borrowUsd: usd('borrow_usd').notNull().default('0'),
   priceImpactUsd: usd('price_impact_usd').notNull().default('0'),
@@ -383,7 +399,13 @@ export const venueFills = pgTable('venue_fills', {
   priceImpactUsd: usd('price_impact_usd').notNull(),
   fundingUsd: usd('funding_usd').notNull(),
   borrowUsd: usd('borrow_usd').notNull(),
+  /** GMTrade's realized P&L of a decrease after its exchange costs (Props.trade's fee is not in it: platform_fee_usd). */
   realizedPnl: usd('realized_pnl'),
+  /**
+   * Props.trade's fee on the fill (order_fees: min(assessed, the rate of its latest assessment on the size executed),
+   * less what earlier fills of the order took): what the trade view shows at fill time; settlement only reconciles.
+   */
+  platformFeeUsd: usd('platform_fee_usd').notNull().default('0'),
   ts: at('ts').notNull(),
 }, (t) => [
   primaryKey({ columns: [t.signature, t.eventIndex] }),
@@ -392,6 +414,59 @@ export const venueFills = pgTable('venue_fills', {
   index('venue_fills_funded_venue_id_idx').on(t.fundedAccount, t.venueId),
   /** A position's fills in chain order: its opening fill (funded.ts positionsOf) and its round trip (syncFills). */
   index('venue_fills_position_venue_id_idx').on(t.position, t.venueId),
+  /** An order's fills: its Props fee (chain/fees.ts) and the next fill's share of it (syncFills). */
+  index('venue_fills_order_idx').on(t.order),
+]);
+
+/**
+ * Props.trade's fee of every funded order, from the program's events (docs/design/order-fee.md): assessed at placement
+ * and at every update (OrderRequested / ProtectionSet / OrderUpdated carry the fee and the Config rate that produced it),
+ * then released (OrderCancelled; CompletedOrderClosed with `cancelled`) or due (Synced.orders_dropped; CompletedOrderClosed
+ * without it), and settled by the keeper: charged_usd moved to the fee vault, waived_usd forgiven (confirmed
+ * settlements only). assessed − charged − waived of the rows in state 'due' is the account's order_fees_due.
+ */
+export const orderFees = pgTable('order_fees', {
+  order: pubkey('order').primaryKey().references(() => gmOrders.address),
+  fundedAccount: pubkey('funded_account').notNull().references(() => fundedAccounts.address),
+  isIncrease: boolean('is_increase').notNull(),
+  assessedUsd: usd('assessed_usd').notNull(),
+  rateUsd: usd('rate_usd').notNull(),
+  rateBps: integer('rate_bps').notNull(),
+  state: orderFeeState('state').notNull(),
+  dueAt: at('due_at'),
+  chargedUsd: usd('charged_usd').notNull().default('0'),
+  waivedUsd: usd('waived_usd').notNull().default('0'),
+  updatedSlot: slot('updated_slot').notNull(),
+}, (t) => [index('order_fees_funded_state_idx').on(t.fundedAccount, t.state)]);
+
+/**
+ * settle_order_fees transactions. The sender writes the row, with each order's share (`allocations`: { order, chargeUsd,
+ * waiveUsd }[]), in the database transaction that stores the signature before sending; the indexed OrderFeesSettled
+ * confirms it and applies the shares to order_fees, once. One the chain refused, or that cannot land any more, is
+ * 'failed' and changes nothing. A settlement this server did not send is recorded when indexed (sent_by = its signer),
+ * its amounts spread over the account's due orders oldest first.
+ */
+export const orderFeeSettlements = pgTable('order_fee_settlements', {
+  signature: signature('signature').notNull(),
+  fundedAccount: pubkey('funded_account').notNull().references(() => fundedAccounts.address),
+  chargeUsd: usd('charge_usd').notNull(),
+  waiveUsd: usd('waive_usd').notNull(),
+  /** The account's order_fees_due and order_fee_settlements the amounts were computed from (the program checks both). */
+  expectedDueUsd: usd('expected_due_usd').notNull(),
+  expectedSettlements: bigint('expected_settlements', { mode: 'number' }).notNull(),
+  allocations: jsonb('allocations').notNull(),
+  status: feeSettlementStatus('status').notNull(),
+  sentBy: text('sent_by').notNull(),
+  createdAt: now('created_at'),
+  resolvedAt: at('resolved_at'),
+  /** The program's clock when it landed (OrderFeesSettled.ts): the payout review counts the fees charged since a payout. */
+  settledAt: at('settled_at'),
+  /** A sent settlement's blockhash can land until the confirmed block height passes this; failed only after that. */
+  lastValidBlockHeight: bigint('last_valid_block_height', { mode: 'number' }),
+}, (t) => [
+  // One transaction can settle several accounts (an operators' batch): one row, and one confirmation, per account.
+  primaryKey({ columns: [t.signature, t.fundedAccount] }),
+  index('order_fee_settlements_funded_status_idx').on(t.fundedAccount, t.status),
 ]);
 
 export const payouts = pgTable('payouts', {

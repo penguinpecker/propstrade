@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { Keypair, PublicKey, type AccountInfo } from '@solana/web3.js';
 import BN from 'bn.js';
 import { eq } from 'drizzle-orm';
-import type { AccountDetail, AccountSummary, AppConfig, PayoutEligibility, Payout, Performance, VaultStats, VerifyResult } from '@props/shared';
+import type { AccountDetail, AccountSummary, AppConfig, OrderFeeInfo, PayoutEligibility, Payout, Performance, VaultStats, VerifyResult } from '@props/shared';
 import {
   PROPS_VAULT_PROGRAM_ID, USDC_MINT, capitalVaultAddress, configPda, feeVaultPda, ownerUsdcAddress, solTreasuryPda,
 } from '@props/sdk';
@@ -18,7 +18,8 @@ import { createStreamHub } from '../../../stream.ts';
 import { APP_ORIGIN, signIn } from '../../../../test/helpers.ts';
 import type { ModuleContext } from '../../types.ts';
 import { createChain } from '../index.ts';
-import { TEST_SESSION_SECRET, encodeAccount, freshDb, offlineClient, sealer, simStub } from './support.ts';
+import type { VaultEvent } from '../events.ts';
+import { TEST_SESSION_SECRET, encodeAccount, freshDb, offlineClient, sealer, simStub, until } from './support.ts';
 
 const client = offlineClient();
 const key = () => Keypair.generate().publicKey;
@@ -68,18 +69,19 @@ function fundedAccountData(trader: PublicKey, evaluation: PublicKey, status: str
   });
 }
 
-function configData(paused = false) {
+function configData(paused = false, fee = { usdc: 0, bps: 0 }) {
   return encodeAccount(client, 'config', {
     admin: key(), pendingAdmin: null, riskAuthorities: [key()], kycAuthority: key(), usdcMint: USDC_MINT, gmtradeProgram: key(), gmtradeStore: key(),
     capitalVault: capitalVaultAddress(), traderShareBps: 8000, minPayout: new BN(50_000_000), ownerSolTarget: new BN(1), ownerSolMin: new BN(1), maxDailyPrincipal: new BN(1), principalWindowStart: new BN(0), principalInWindow: new BN(0),
     paused: { newEvaluations: false, trading: false, payouts: paused }, feesCollected: new BN(79_000_000), allocatedPrincipal: new BN(500_000_000),
     payoutsPaid: new BN(0), profitToVault: new BN(0), evaluationsSold: new BN(1), fundedActivated: new BN(1), fundedActive: 1,
-    bump: 255, vaultBump: 255, feeVaultBump: 255, solTreasuryBump: 255,
+    bump: 255, vaultBump: 255, feeVaultBump: 255, solTreasuryBump: 255, orderFeeUsdc: new BN(fee.usdc), orderFeeBps: fee.bps,
   });
 }
 
 let t: Awaited<ReturnType<typeof freshDb>>;
 let app: Awaited<ReturnType<typeof buildApp>>;
+let chain: Awaited<ReturnType<typeof createChain>>;
 let adminToken: string;
 const ids = { evaluation: key().toBase58(), funded: key().toBase58(), owner: key().toBase58(), payout: key().toBase58(), otherPayout: key().toBase58() };
 const practice = `practice:${alice.publicKey.toBase58()}`;
@@ -92,7 +94,7 @@ before(async () => {
   adminToken = randomBytes(32).toString('hex');
   const config = loadConfig({
     DATABASE_URL: t.url, APP_ORIGIN, SESSION_SECRET: TEST_SESSION_SECRET, ADMIN_API_TOKEN: adminToken, RPC_URL: 'http://127.0.0.1:1',
-    PROGRAM_ID: PROPS_VAULT_PROGRAM_ID.toBase58(), SOLANA_CLUSTER: 'mainnet-beta', TRUST_PROXY_HOPS: '0',
+    PROGRAM_ID: PROPS_VAULT_PROGRAM_ID.toBase58(), SOLANA_CLUSTER: 'mainnet-beta', TRUST_PROXY_HOPS: '0', ORDER_FEE_USDC: '0.25', ORDER_FEE_BPS: '3',
   });
   const hub = createStreamHub();
   app = await buildApp({ config, db: t.db, sql: t.sql, hub, modules: new Map(), rpc: rpc as never, logger: false });
@@ -102,7 +104,7 @@ before(async () => {
     app, log: app.log, env: {}, publish: hub.publish, services: { sim: simStub([practiceDetail]).sim }, signal: stopped.signal,
     config, db: t.db, sql: t.sql, rpc: rpc as never, notify: async () => {},
   };
-  await createChain(ctx);
+  chain = await createChain(ctx);
   await app.ready();
 
   const trader = alice.publicKey.toBase58();
@@ -177,13 +179,21 @@ test('config, vault and payout eligibility read the program state, and say so wh
   assert.equal((await a.get('/v1/config')).status, 503);
   assert.equal((await a.get('/v1/vault')).status, 503);
   assert.equal((await a.get(`/v1/accounts/${ids.funded}/payout-eligibility`)).status, 503);
+  // The order fee answers before the program is live: the server's settings, which practice and evaluation charge.
+  const serverFee = await app.inject({ method: 'GET', url: '/v1/order-fee' });
+  assert.deepEqual([serverFee.statusCode, serverFee.json()], [200, { orderFeeUsd: '0.25', orderFeeBps: 3, orderFeeSource: 'server' } satisfies OrderFeeInfo]);
 
-  chainAccounts.set(configPda().toBase58(), info(PROPS_VAULT_PROGRAM_ID, configData()));
+  chainAccounts.set(configPda().toBase58(), info(PROPS_VAULT_PROGRAM_ID, configData(false, { usdc: 500_000, bps: 2 })));
+  // Once the program is live (its Initialized ConfigChanged indexed), every stage reads the Config's rate.
+  chain.program.changed([{ name: 'configChanged', data: { change: 'initialized', subject: key().toBase58(), paused: { newEvaluations: false, trading: false, payouts: false }, ts: '0' } } as VaultEvent]);
+  const programFee = { orderFeeUsd: '0.5', orderFeeBps: 2, orderFeeSource: 'program' } satisfies OrderFeeInfo;
+  await until(async () => JSON.stringify((await app.inject({ method: 'GET', url: '/v1/order-fee' })).json()) === JSON.stringify(programFee), 5_000, 'the program\'s rate');
   chainAccounts.set(capitalVaultAddress().toBase58(), usdcAccount(key(), 400_000_000n));
   chainAccounts.set(feeVaultPda().toBase58(), usdcAccount(key(), 79_000_000n));
   chainAccounts.set(solTreasuryPda().toBase58(), info(new PublicKey('11111111111111111111111111111111'), Buffer.alloc(0), 2_500_000_000));
   const config = await a.get<AppConfig>('/v1/config');
   assert.deepEqual([config.status, config.body.cluster, config.body.traderShareBps, config.body.minPayoutUsdc, config.body.tiers], [200, 'mainnet-beta', 8000, '50', []]);
+  assert.deepEqual([config.body.orderFeeUsd, config.body.orderFeeBps, config.body.orderFeeSource], [programFee.orderFeeUsd, programFee.orderFeeBps, 'program']);
   assert.ok(config.body.venueStore && !/gmtrade/i.test(JSON.stringify(config.body)), 'white label: no key or value of the public config names the venue');
 
   const vault = await a.get<VaultStats>('/v1/vault');

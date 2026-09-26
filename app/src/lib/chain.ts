@@ -4,8 +4,8 @@ import './buffer';
 import bs58 from 'bs58';
 import {
   CLOSE_ALL, GMTRADE_PROGRAM_ID, PROPS_VAULT_IDL, PROPS_VAULT_PROGRAM_ID, PropsVaultClient, acceptablePrice, buildTransaction, decodeGmMarketMeta, decodeGmPosition,
-  evaluationPda, fundedPda, gmPositionPda, marketConfigPda, ownerPda, payoutPda, tierPda, toMicro, toUnitPrice, traderProfilePda, usdToGm,
-  type FundedRef,
+  evaluationPda, fundedPda, gmPositionPda, marketConfigPda, orderFee, ownerPda, payoutPda, tierPda, toMicro, toUnitPrice, traderProfilePda, usdToGm,
+  type FundedRef, type OrderFeeRate,
 } from '@props/sdk';
 import { ComputeBudgetProgram, PublicKey, SendTransactionError, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
 import type { AccountInfo, Connection, TransactionError, TransactionInstruction } from '@solana/web3.js';
@@ -26,7 +26,8 @@ export interface Prepared {
  * still land (the send or the status reads failed in transit), so its signature must be followed before any retry.
  */
 export class TxError extends Error {
-  constructor(message: string, readonly signature?: string, readonly uncertain = false) {
+  /** `code`: the vault program's error number when it refused the transaction before anything was sent. */
+  constructor(message: string, readonly signature?: string, readonly uncertain = false, readonly code?: number) {
     super(message);
     this.name = 'TxError';
   }
@@ -186,6 +187,13 @@ async function onchainMarket(connection: Connection, market: MarketRef): Promise
 /** A GMTrade order a transaction created, and the position it changes, to follow until a keeper executes or cancels it. */
 export interface OrderFollow { order: string; position: string; sizeBefore: bigint; increase: boolean }
 
+/**
+ * The account's exposure cap in GMTrade USD, as the program reads it from the account's terms: a close, take profit or
+ * stop loss is assessed on at most this much (the position can grow before it executes, never past the cap), so the
+ * fee on it is the order's maximum, which it must carry as its max_fee (the program refuses a lower one).
+ */
+const exposureCap = ({ account }: FundedRef) => BigInt(account.terms.sizeUsd.toString()) * BigInt(account.terms.maxExposureBps) / 10_000n * 10n ** 14n;
+
 export interface OpenInput {
   funded: string;
   market: MarketRef;
@@ -198,6 +206,11 @@ export interface OpenInput {
   slippageBps: number;
   takeProfit?: string;
   stopLoss?: string;
+  /**
+   * The Props fee rate the trader reviewed. Every order carries the fee it gives as its max_fee (the SDK's orderFee: the
+   * program's formula), and the program refuses the order (OrderFeeChanged) when the rate now gives more.
+   */
+  rate: OrderFeeRate;
 }
 
 /** Opens (or adds to) a position, with optional take-profit and stop-loss orders for the whole position, in one transaction. */
@@ -206,18 +219,20 @@ export async function prepareOpen(connection: Connection, trader: PublicKey, inp
   const funded = await fundedRef(connection, input.funded);
   const { marketToken, decimals } = await onchainMarket(connection, input.market);
   const reference = unitPrice(input.price, decimals);
+  const sizeDeltaUsd = usdToGm(usd6(input.sizeUsd));
   const open = await c.openPosition({
     trader, funded, marketToken, isLong: input.isLong, orderType: input.kind === 'Market' ? 'market' : 'limit',
-    collateral: collateralMicro(input.collateralUsd), sizeDeltaUsd: usdToGm(usd6(input.sizeUsd)),
+    collateral: collateralMicro(input.collateralUsd), sizeDeltaUsd,
     triggerPrice: input.kind === 'Limit' ? reference : undefined,
     acceptablePrice: acceptablePrice(reference, input.isLong, true, input.slippageBps),
+    maxFee: orderFee(input.rate, sizeDeltaUsd),
   });
   const instructions = [open.instruction];
   for (const [orderType, price] of [['takeProfit', input.takeProfit], ['stopLoss', input.stopLoss]] as const) {
     if (!price) continue;
     const protection = await c.setProtection({
       trader, funded, marketToken, isLong: input.isLong, orderType, triggerPrice: unitPrice(price, decimals),
-      sizeDeltaUsd: CLOSE_ALL, ordersBefore: instructions.length,
+      sizeDeltaUsd: CLOSE_ALL, ordersBefore: instructions.length, maxFee: orderFee(input.rate, CLOSE_ALL, exposureCap(funded)),
     });
     instructions.push(protection.instruction);
   }
@@ -230,6 +245,8 @@ export interface CloseInput {
   funded: string;
   slippageBps: number;
   positions: { market: MarketRef; isLong: boolean; markPrice: string; sizeUsd: number; percent: number }[];
+  /** As in OpenInput: each close carries its maximum (the rate on its size, at most the exposure cap) as its max_fee. */
+  rate: OrderFeeRate;
 }
 
 /** Market-closes a share of one position, or all of several positions, in one transaction. */
@@ -245,6 +262,7 @@ export async function prepareClose(connection: Connection, trader: PublicKey, in
     const close = await c.closePosition({
       authority: trader, funded, marketToken, isLong: p.isLong, sizeDeltaUsd: size, ordersBefore: instructions.length,
       acceptablePrice: acceptablePrice(unitPrice(p.markPrice, decimals), p.isLong, false, input.slippageBps),
+      maxFee: orderFee(input.rate, size, exposureCap(funded)),
     });
     instructions.push(close.instruction);
     closes.push({ order: close.order, position: gmPositionPda(ownerPda(funded.address), marketToken, p.isLong) });
@@ -262,6 +280,8 @@ export interface ProtectionInput {
   /** For each side: the working order to change or cancel (if any) and the new trigger price (null removes it). */
   takeProfit: { order: string | null; price: string | null };
   stopLoss: { order: string | null; price: string | null };
+  /** As in OpenInput: a moved order is re-assessed at the current rate, so it carries its maximum again. */
+  rate: OrderFeeRate;
 }
 
 /** Places, moves or cancels a position's take-profit and stop-loss orders in one transaction. */
@@ -269,14 +289,16 @@ export async function prepareProtection(connection: Connection, trader: PublicKe
   const c = client(connection);
   const funded = await fundedRef(connection, input.funded);
   const { marketToken, decimals } = await onchainMarket(connection, input.market);
+  // A take profit or stop loss, placed or moved, may cost at most the rate on the exposure cap: its max_fee.
+  const maxFee = orderFee(input.rate, CLOSE_ALL, exposureCap(funded));
   const instructions: TransactionInstruction[] = [];
   let created = 0;
   for (const [orderType, side] of [['takeProfit', input.takeProfit], ['stopLoss', input.stopLoss]] as const) {
     const triggerPrice = side.price ? unitPrice(side.price, decimals) : null;
-    if (side.order && triggerPrice !== null) instructions.push(await c.updateOrder({ trader, funded, order: new PublicKey(side.order), triggerPrice }));
+    if (side.order && triggerPrice !== null) instructions.push(await c.updateOrder({ trader, funded, order: new PublicKey(side.order), triggerPrice, maxFee }));
     else if (side.order) instructions.push(await c.cancelOrder({ authority: trader, funded, order: new PublicKey(side.order) }));
     else if (triggerPrice !== null) {
-      const placed = await c.setProtection({ trader, funded, marketToken, isLong: input.isLong, orderType, triggerPrice, sizeDeltaUsd: CLOSE_ALL, ordersBefore: created++ });
+      const placed = await c.setProtection({ trader, funded, marketToken, isLong: input.isLong, orderType, triggerPrice, sizeDeltaUsd: CLOSE_ALL, ordersBefore: created++, maxFee });
       instructions.push(placed.instruction);
     }
   }
@@ -293,8 +315,21 @@ export async function prepareCancel(connection: Connection, trader: PublicKey, f
 
 // The IDL's messages name GMTrade; the trader reads it as "the exchange".
 const PROGRAM_ERRORS = new Map(PROPS_VAULT_IDL.errors.map(e => [e.code, e.msg.replace(/\ba GMTrade\b/g, 'an exchange').replace(/^GMTrade\b/, 'The exchange').replace(/GMTrade/g, 'exchange')]));
+/** The vault's refusal of an order whose Props fee is above the max_fee it carries: the rate went up since it was reviewed. */
+export const ORDER_FEE_CHANGED = PROPS_VAULT_IDL.errors.find(e => e.name === 'OrderFeeChanged')!.code;
+/** The rate the program assesses orders at now: its Config, read on this connection (the server's copy can lag a change). */
+export async function readOrderFeeRate(connection: Connection): Promise<OrderFeeRate> {
+  const config = await client(connection).fetchConfig();
+  if (!config) throw new TxError('The Props.trade program could not be read. Try again shortly.');
+  return { feeUsdc: BigInt(config.orderFeeUsdc.toString()), feeBps: config.orderFeeBps };
+}
 const FAILED = /^Program (\w+) failed: custom program error: 0x([0-9a-f]+)/;
 const ANCHOR_ERROR = /AnchorError.*Error Number: (\d+)\. Error Message: (.*?)\.?$/;
+/** The vault program's error number when it is the program that failed first in these logs. */
+function vaultError(logs: string[] | null | undefined): number | undefined {
+  const [, program, hex] = (logs ?? []).map(line => FAILED.exec(line)).find(Boolean) ?? [];
+  return program === PROPS_VAULT_PROGRAM_ID.toBase58() ? parseInt(hex!, 16) : undefined;
+}
 
 /** Plain reason for a failed simulation or preflight, from the error and the program logs. */
 export function describeFailure(err: TransactionError | string | null, logs: string[] | null | undefined): string {
@@ -324,7 +359,7 @@ export function describeFailure(err: TransactionError | string | null, logs: str
  */
 export async function signAndSend(connection: Connection, prepared: Prepared, sign: Signer): Promise<string> {
   const simulation = await connection.simulateTransaction(prepared.tx, { sigVerify: false, commitment: 'confirmed' });
-  if (simulation.value.err) throw new TxError(describeFailure(simulation.value.err, simulation.value.logs));
+  if (simulation.value.err) throw new TxError(describeFailure(simulation.value.err, simulation.value.logs), undefined, false, vaultError(simulation.value.logs));
   const units = simulation.value.unitsConsumed;
   const signed = await sign(units ? withComputeLimit(prepared.tx, units) : prepared.tx);
   const signature = bs58.encode(signed.signatures[0]!);
@@ -333,7 +368,7 @@ export async function signAndSend(connection: Connection, prepared: Prepared, si
     return signature;
   } catch (error) {
     // The RPC answered with an error (preflight failed): the transaction was not forwarded.
-    if (error instanceof SendTransactionError) throw new TxError(describeFailure(error.message, error.logs));
+    if (error instanceof SendTransactionError) throw new TxError(describeFailure(error.message, error.logs), undefined, false, vaultError(error.logs));
     // The request failed in transit: the node may already have forwarded it, so it can still land.
     throw new TxError('The connection dropped while sending the transaction. It may still go through: follow it before trying again.', signature, true);
   }

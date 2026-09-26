@@ -1,14 +1,15 @@
 // Funded accounts on GMTrade. Each tick reads an account's onchain state (FundedAccount, owner USDC, the GMTrade
-// Position and Order accounts it tracks), keeps gm_orders statuses, position snapshots, venue fills and closed trades
-// current, and values open positions with the GMTrade model at live prices. The accounts API and the stream serve
-// the cached valuation.
+// Position and Order accounts it tracks), keeps gm_orders statuses, position snapshots, venue fills (with the Props fee
+// each carries) and closed trades current, and values open positions with the GMTrade model at live prices, less the
+// Props fees executed orders owe. The accounts API and the stream serve the cached valuation.
 import { createHash } from 'node:crypto';
 import { PublicKey, type Connection } from '@solana/web3.js';
 import { and, desc, eq, gt, inArray, isNull, lt, max, or, sql } from 'drizzle-orm';
 import type { FastifyBaseLogger } from 'fastify';
 import type { DataFreshness } from '@props/shared';
 import {
-  GMTRADE_PROGRAM_ID, ORDER_LAYOUT, decodeGmPosition, enumName, ownerPda, ownerUsdcAddress, type FundedAccount, type GmPosition, type PropsVaultClient,
+  GMTRADE_PROGRAM_ID, ORDER_LAYOUT, decodeGmPosition, enumName, fundedReservedFees, gmOrderPda, orderNonce, ownerPda, ownerUsdcAddress, type FundedAccount, type GmPosition,
+  type PropsVaultClient,
 } from '@props/sdk';
 import {
   fetchOrderRemovals, fetchTradeEvents, fetchTxSignatures, parseFixed, formatFixed, type OrderRemoval, type TradeEvent,
@@ -20,6 +21,7 @@ import { tokenAccountAmount } from '../../lib/solana.ts';
 import { accrueReferralReward } from '../../routes/referrals.ts';
 import { why } from '../marketdata/upstreams.ts';
 import type { MarketDataService } from '../types.ts';
+import { asOnchain, feeLedger, feesInMotion, feesOwed, fillFee, type FeeRow } from './fees.ts';
 import { fundedHref, type Notice } from './projector.ts';
 import { gmUsd, micro, tokenAmount, unitPrice, type ChainReader, type MarketInfo } from './reader.ts';
 
@@ -81,6 +83,12 @@ export interface Valuation {
   /** The program's own flat test: no used slot and no tracked order (what request_payout checks). */
   flat: boolean;
   freshness: DataFreshness;
+  /**
+   * Props fees, USDC base units: `owed` by executed orders and not charged or waived yet (subtracted from the value,
+   * whether or not a sync has made them due), `due` / `paid` / `held` as the program keeps them (FundedAccount
+   * order_fees_due, order_fees_paid, and due + the fees of pending increases, which new exposure must leave in the USDC).
+   */
+  fees: { owed: bigint; due: bigint; paid: bigint; held: bigint };
 }
 
 export interface VenueDeps {
@@ -106,6 +114,16 @@ const CLOSED_GRACE_MS = 3_600_000;
 const FILLS_AFTER_FLAT_MS = 180_000;
 /** Equity snapshots for the performance chart: at most one per account per interval. */
 const SNAPSHOT_EVERY_MS = 60_000;
+
+/** A fill of an order the indexer has not seen yet waits this long for it (its Props fee is on the order's event). */
+const ORDER_INDEX_WAIT_MS = 30 * 60_000;
+/**
+ * Only an order the account could have placed is waited for: one of the order numbers around its current order_seq
+ * (the ones the indexer may not have applied yet). Any other (deleveraging, a liquidation without a liquidation fee) is
+ * not the account's and carries no Props fee.
+ * ponytail: a fixed window of 64 back, 8 ahead of the read; an indexer behind by more orders than that is alerted anyway.
+ */
+const RECENT_ORDERS = { back: 64n, ahead: 8n };
 
 const withTimeout = <T>(p: Promise<T>, ms: number) =>
   Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error('timed out')), ms).unref())]);
@@ -155,7 +173,8 @@ export function fillRow(e: TradeEvent, funded: string, market: MarketInfo, signa
 
 type Fill = typeof venueFills.$inferSelect;
 
-/** One round trip (first increase from flat → the fill that made the position flat) as a closed_trades row. */
+/** One round trip (first increase from flat → the fill that made the position flat) as a closed_trades row, net of the
+ *  exchange's costs and of Props.trade's fees. */
 export function roundTrip(accountId: string, fills: Fill[]) {
   const last = fills.at(-1)!;
   const weighted = (list: Fill[]) => {
@@ -166,33 +185,36 @@ export function roundTrip(accountId: string, fills: Fill[]) {
   const costs = (f: Fill) => d6(f.feeUsd) + d6(f.fundingUsd) + d6(f.borrowUsd);
   const increases = fills.filter((f) => f.isIncrease);
   const decreases = fills.filter((f) => !f.isIncrease);
-  const net = sum((f) => d6(f.realizedPnl ?? '0'), decreases) - sum(costs, increases);
+  const platform = sum((f) => d6(f.platformFeeUsd));
+  const net = sum((f) => d6(f.realizedPnl ?? '0'), decreases) - sum(costs, increases) - platform;
   const peak = fills.reduce((m, f) => (d6(f.sizeAfterUsd) > m ? d6(f.sizeAfterUsd) : m), 0n);
   return {
     id: uuidOf(`closed:${last.venueId}`), accountId, symbol: last.symbol, side: last.side, venue: 'gmtrade' as const,
     openedAt: fills[0]!.ts, closedAt: last.ts,
     sizeUsd: fmt6(peak > 0n ? peak : d6(last.sizeUsd)), // peak size; a trip indexed from its closing fill only has the fill
     entryPrice: weighted(increases), exitPrice: weighted(decreases),
-    feesUsd: fmt6(sum(costs)), orderFeesUsd: fmt6(sum((f) => d6(f.feeUsd))), fundingUsd: fmt6(sum((f) => d6(f.fundingUsd))),
+    feesUsd: fmt6(sum(costs) + platform), orderFeesUsd: fmt6(sum((f) => d6(f.feeUsd))), platformFeeUsd: fmt6(platform), fundingUsd: fmt6(sum((f) => d6(f.fundingUsd))),
     borrowUsd: fmt6(sum((f) => d6(f.borrowUsd))), priceImpactUsd: fmt6(sum((f) => d6(f.priceImpactUsd))), netPnl: fmt6(net),
     signatures: [...new Set(fills.map((f) => f.signature))],
   };
 }
 
-function fillActivity(f: ReturnType<typeof fillRow>, e: TradeEvent) {
+function fillActivity(f: ReturnType<typeof fillRow> & { platformFeeUsd: string }, e: TradeEvent) {
   const opened = e.isIncrease && e.before.sizeInUsd === 0n;
   const closed = !e.isIncrease && e.after.sizeInUsd === 0n;
   const verb = e.isLiquidation ? 'liquidated' : opened ? 'opened' : closed ? 'closed' : e.isIncrease ? 'increased' : 'reduced';
+  const fee = d6(f.platformFeeUsd);
+  const realized = f.realizedPnl === null ? null : fmt6(d6(f.realizedPnl) - fee);
   return {
     type: (e.isLiquidation ? 'liquidation' : 'fill') as 'liquidation' | 'fill',
     title: `${f.side} ${f.symbol} ${verb}`,
-    detail: `${f.sizeUsd} USD filled on the exchange at ${f.price}${f.realizedPnl === null ? '' : `; realized ${f.realizedPnl} USD after costs`}.`,
-    amountUsd: f.realizedPnl, symbol: f.symbol, signature: f.signature, ts: f.ts,
+    detail: `${f.sizeUsd} USD filled on the exchange at ${f.price}${realized === null ? '' : `; realized ${realized} USD after costs`}${fee > 0n ? `${realized === null ? ';' : ','} Props fee ${fmt6(fee)} USDC` : ''}.`,
+    amountUsd: realized, symbol: f.symbol, signature: f.signature, ts: f.ts,
   };
 }
 
-/** What reading and valuing a funded account needs. */
-export type FundedReadDeps = Pick<VenueDeps, 'rpc' | 'client' | 'reader' | 'marketdata' | 'log'>;
+/** What reading and valuing a funded account needs; with `db`, the valuation counts the Props fees executed orders owe. */
+export type FundedReadDeps = Pick<VenueDeps, 'rpc' | 'client' | 'reader' | 'marketdata' | 'log'> & { db?: Db };
 
 /** A GMTrade account at an address GMTrade derives; anything else there (e.g. lamports sent to a closed one) is absent. */
 const gmOwned = <T extends { owner: PublicKey }>(info: T | null | undefined) => (info?.owner.equals(GMTRADE_PROGRAM_ID) ? info : null);
@@ -246,8 +268,11 @@ export async function readFundedState(d: FundedReadDeps, funded: string, extraPo
 
 export type FundedState = NonNullable<Awaited<ReturnType<typeof readFundedState>>>;
 
-/** Values the open positions with the GMTrade model at live prices. */
-export async function valueFunded(d: FundedReadDeps, funded: string, state: FundedState): Promise<Valuation> {
+/**
+ * Values the open positions with the GMTrade model at live prices, less the Props fees executed orders owe (from `feeRows`,
+ * the ledger as the chain has it, when the caller read it; else read here when fees are in motion and `d.db` is given).
+ */
+export async function valueFunded(d: FundedReadDeps, funded: string, state: FundedState, feeRows?: FeeRow[]): Promise<Valuation> {
   let freshness: DataFreshness = 'live';
   const positions: ValuedPosition[] = [];
   for (const p of state.positions) {
@@ -270,10 +295,14 @@ export async function valueFunded(d: FundedReadDeps, funded: string, state: Fund
   }
   const pending = state.orders.filter((o) => o.state === 'pending');
   const increase = (t: string) => t === 'market' || t === 'limit';
+  const account = state.account;
+  const due = BigInt(account.orderFeesDue.toString());
+  const rows = feeRows ?? (d.db && feesInMotion(due, state.orders) ? asOnchain(await feeLedger(d.db, funded), BigInt(account.orderFeeSettlements.toString())) : []);
   return {
-    funded, at: Date.now(), status: enumName(state.account.status), ownerUsdc: state.ownerUsdc,
+    funded, at: Date.now(), status: enumName(account.status), ownerUsdc: state.ownerUsdc,
     pendingCollateral: pending.filter((o) => increase(enumName(o.tracked.orderType))).reduce((s, o) => s + BigInt(o.tracked.collateral.toString()), 0n),
     positions, pendingOrders: pending.length, flat: state.flat, freshness,
+    fees: { owed: feesOwed(rows), due, paid: BigInt(account.orderFeesPaid.toString()), held: fundedReservedFees(account) },
   };
 }
 
@@ -339,17 +368,31 @@ export function createVenue(d: VenueDeps) {
 
   /** Indexes new GMTrade fills of the owner PDA; closing fills also write the round trip to closed_trades, and each fill
    *  of a referred trader its referrer's reward. */
-  async function syncFills(funded: string, owner: string, trader: string): Promise<number> {
+  async function syncFills(funded: string, owner: string, trader: string, orderSeq?: bigint): Promise<number> {
     const [{ cursor } = { cursor: null }] = await d.db.select({ cursor: max(venueFills.venueId) }).from(venueFills).where(eq(venueFills.fundedAccount, funded));
     const trades = await d.gm.trades(owner, cursor ?? undefined);
     if (!trades.length) return 0;
     const signatures = await d.gm.signatures(trades.map((t) => t.id));
     let added = 0;
+    let recent: Set<string> | undefined;
+    const couldBeOwn = (order: string) => {
+      if (orderSeq === undefined) return true;
+      if (!recent) {
+        recent = new Set();
+        const from = orderSeq > RECENT_ORDERS.back ? orderSeq - RECENT_ORDERS.back : 0n;
+        for (let k = from; k < orderSeq + RECENT_ORDERS.ahead; k++) recent.add(gmOrderPda(new PublicKey(owner), orderNonce(k)).toBase58());
+      }
+      return recent.has(order);
+    };
     for (const e of trades) {
       const signature = signatures.get(e.id);
       if (!signature) break; // the indexer has not linked it yet: resume from here next tick, keeping fills in order
+      // Props.trade's fee rides on the order's own event: a fill of one of the account's recent orders that event has
+      // not been indexed for waits (for at most ORDER_INDEX_WAIT_MS); any other order is not the account's.
+      const fee = e.isLiquidation ? null : await fillFee(d.db, e.order, abs(e.after.sizeInUsd - e.before.sizeInUsd));
+      if (fee === null && !e.isLiquidation && couldBeOwn(e.order) && Date.now() - e.ts < ORDER_INDEX_WAIT_MS) break;
       const market = await d.reader.market(e.marketToken);
-      const row = fillRow(e, funded, market, signature);
+      const row = { ...fillRow(e, funded, market, signature), platformFeeUsd: micro(fee ?? 0n) };
       const notice = await d.db.transaction(async (tx) => {
         const inserted = await tx.insert(venueFills).values(row).onConflictDoNothing().returning({ id: venueFills.venueId });
         if (!inserted.length) return null;
@@ -412,9 +455,12 @@ export function createVenue(d: VenueDeps) {
     if (!state) return null;
     await syncOrders(funded);
     if (!state.flat) lastActive.set(funded, Date.now());
-    if (withFills || Date.now() - (lastActive.get(funded) ?? -Infinity) < FILLS_AFTER_FLAT_MS) {
+    // Fills are also read while fees are due: a close's fee is owed on the size its fill shows, however late the
+    // exchange's indexer reports it.
+    const feesDue = BigInt(state.account.orderFeesDue.toString()) > 0n;
+    if (withFills || feesDue || Date.now() - (lastActive.get(funded) ?? -Infinity) < FILLS_AFTER_FLAT_MS) {
       try {
-        await syncFills(funded, owner, trader);
+        await syncFills(funded, owner, trader, BigInt(state.account.orderSeq.toString()));
       } catch (err) {
         d.log.warn({ err, funded }, 'GMTrade fills unavailable; retrying next tick');
       }
