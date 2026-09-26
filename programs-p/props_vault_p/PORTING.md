@@ -119,9 +119,10 @@ the wiring.
 The seed list is fixed in `run.ts`: seqfuzz seeds 1..1000 at 250 steps (five seeds per process: a child keeps about
 200 MB per seed it ran) and invariants seeds 1..600 at 400 steps: 340,780 transactions (179,485 succeeded) in 59 minutes
 on an M-series laptop with nothing else heavy running (a child takes up to 1 GB), 0 differences and 0 violations on
-2026-09-24 (run twice on the final binaries). With the order fee (2026-09-26) the full campaign has not been rerun: the
-`FUZZ_QUICK=1` jobs and seqfuzz seeds 6-45 / invariants seeds 2-21 had 0 differences and 0 violations, and after its
-audit fixes `FUZZ_QUICK=1` and seqfuzz seeds 6-105 / invariants seeds 2-61 (33,267 transactions, 5.8 minutes) did too.
+2026-09-24 (run twice on the final binaries). With the order fee (2026-09-26) the full campaign ran on the final
+binaries (sha256 812366914a98… Anchor / 005f77fd09e4… Pinocchio): 338,550 transactions (173,166 succeeded) in 58.5
+minutes, 0 differences, 0 violations, 0 crashes, with set_order_fee, settle_order_fees and fee-bearing orders in both
+fuzzers' action sets (invariants I9-I11 held on every step).
 To reproduce a failing seed, run that fuzzer
 alone with the seed the summary names (`FIRST_SEED=<seed> … seqfuzz.ts 1 250`, or `FUZZ_SEED=<seed> FUZZ_STEPS=400 …
 invariants.ts`): seqfuzz prints the first divergent step of the seed with its label and mutation, invariants the first
