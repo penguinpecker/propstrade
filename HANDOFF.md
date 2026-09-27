@@ -32,7 +32,7 @@ split, paid by the program from realized USDC only.
 - Demo (practice/evaluation) and real (funded) data live in separate tables (sim_* vs gm_orders/venue_fills/
   program events); keep it that way.
 
-## State on 2026-09-26
+## State on 2026-09-27
 
 - LIVE (main = daec993 and later docs): app on Vercel (propstrade.vercel.app), server + Postgres on Railway
   (migrations up to 0012). Evaluations, funded accounts and payouts show "not initialized" until the program is
@@ -45,19 +45,29 @@ split, paid by the program from realized USDC only.
   source 'server'). From the program's initialize on, every stage reads the program's rate, so set_order_fee must
   follow initialize immediately (runbook 10.1), or demo fees drop to 0.
 - NOT on mainnet: the `props_vault` program. Pinocchio build 181,672 bytes (≈ 1.02 SOL of program data at the default
-  `--max-len`), with the order fee. Audited (09-23/24), black-swan campaign (09-25: no invariant broke; 16 server
+  `--max-len`), with the order fee. The deploy file is the `solana-verify` Docker build of 2026-09-27,
+  `programs-p/props_vault_p/target/deploy/props_vault_p.so`, executable hash
+  `a3dd0d389959ceb137e3050919f4eff148573aec631ec4d075e99f27257ae997` (LiteSVM 95/95 on it; the compare scenarios,
+  quick fuzz and validator smoke still have to be re-run on this file: they ran on a local `cargo build-sbf` binary
+  that differs in 4,451 bytes). Audited (09-23/24), black-swan campaign (09-25: no invariant broke; 16 server
   findings fixed), order-fee audit (11 defects fixed), full differential fuzz on the fee binaries (338,550
   transactions, 0 differences, 0 violations).
 - Sign-ups so far: 2 wallets (2026-09-26 01:50 IST).
 
 ## What happens next, in order
 
-1. Owner: fund the operator key with at least 2 SOL and say go. Get the exchange's written OK for charging fees on
-   top of their code (BSL 1.1 licence; learnings 2026-09-26).
-2. Follow `docs/runbooks/launch.md` sections 1–10 with the Pinocchio build (the server already runs the fee-aware
-   IDL, so the program can follow it): verifiable build, every suite against that binary through `PROPS_VAULT_SO`,
-   deploy, configure (everything paused), small-money smoke test, `set_order_fee 2 / 10`, go live.
-3. Hand over admin and the upgrade authority to the Squads vault (section 13) only once operations are boring.
+1. Owner: send 3 SOL (13 SOL for the Anchor-fallback `--max-len`, runbook §4) to the operator key
+   `5fWyePMCDoaLnShs7PTX3umcur1zQsDQ4rFB7UZdhCHH` (`~/.config/props-trade/operator.json`; 0 SOL on 2026-09-27),
+   create the Alchemy app (PAYG with a spend limit) and hand over its key, decide `--max-len`, and say go. Get the
+   exchange's written OK for charging fees on top of their code (BSL 1.1 licence; learnings 2026-09-26).
+2. Operator: put the Alchemy HTTP URL in Railway `RPC_URL` and the streaming URL in `RPC_WS_URL` (both sealed,
+   runbook §6), redeploy the server, check `/v1/health`; back up `keys/props_vault-keypair.json` and the operator
+   key; re-run runbook §3.3 (compare ×7, `FUZZ_QUICK=1`, validator smoke, server module suites, full-stack e2e) with
+   `PROPS_VAULT_SO` = the Docker file above.
+3. Follow `docs/runbooks/launch.md` sections 4–10 with that file (the server already runs the fee-aware IDL, so the
+   program can follow it): deploy with `PROGRAM_KEYPAIR=keys/props_vault-keypair.json`, configure (everything paused),
+   small-money smoke test, `set_order_fee 2 / 10`, go live.
+4. Hand over admin and the upgrade authority to the Squads vault (section 13) only once operations are boring.
 
 ## Build and test (from the repo root)
 
@@ -92,12 +102,23 @@ Rules that came from pain:
 
 ## Open items
 
-- `node_modules/litesvm` is 0.8.0 while the lock pins 1.4.1: run `npm install` once, or the program suite refuses
-  to start (agents loaded 1.4.1 through a scratch import hook).
-- The `solana-verify` Docker build (launch.md 3.2) has not been rehearsed here (colima is aarch64 without Rosetta).
-- `--max-len` for the deploy is an owner decision: default +10 % or sized for an Anchor fallback (section 14.3).
+- `node_modules/litesvm` is 1.4.1 since `npm ci` on 2026-09-27 (the lock's version; 0.8.0 before, which made the
+  program suite refuse to start). Re-run `npm ci` after any checkout.
+- The `solana-verify` Docker build (launch.md 3.2) was rehearsed on this Mac on 2026-09-27: `colima start
+  --vz-rosetta`, ≈ 15 s, 181,672 B, executable hash `a3dd0d38…7ae997`; colima is stopped again (start it only to
+  rebuild). A local `cargo build-sbf` binary differs from it in 4,451 bytes: only the Docker file is the deploy file.
+- Program keypair: the source of truth is `keys/props_vault-keypair.json` (git-ignored, mode 600, the only copy: back
+  it up). `target/deploy/props_vault-keypair.json` is a copy that `cargo clean` deletes and `anchor build` regenerates
+  at random (it now holds `EznR…Ln1m`); never deploy it. `records.txt` line 109 still names that path: fix it.
+- Operator key: `~/.config/props-trade/operator.json`, public key `5fWyePMCDoaLnShs7PTX3umcur1zQsDQ4rFB7UZdhCHH`,
+  0 SOL on mainnet (2026-09-27).
+- `--max-len` for the deploy is an owner decision: default +10 % (199,839 B, 1.016 SOL) or sized for an Anchor
+  fallback (`MAX_LEN=1161274`, ≈ 5.90 SOL; the Anchor binary is 1,055,704 B now, so the older 1123117 leaves 6 %).
 - The Privy app secret was once pasted into a chat: rotate it in the Privy dashboard.
-- The server's RPC is the public mainnet endpoint until a Helius key is provided; `props.trade` is not bought.
+- RPC provider is Alchemy (was Helius in the docs until 2026-09-27; every method and subscription the code uses is
+  supported; PAYG $0.525/M CU, idle ≈ 23M CU/month, ≈ 41M CU/month ≈ $22 per funded account). The server runs on the
+  public mainnet endpoint until the key exists; `RPC_WS_URL` must then be set too (the streaming host), or the indexer
+  silently polls. `props.trade` is not bought.
 - Owner decisions pending: phone-landscape layout (chart starts ~280 px down; folding the account strip/watchlist
   would hide content); a referral cut of evaluation sales (only real revenue from demo users).
 - Keeper never sends `close_empty_position` (≈ 0.026 SOL rent per empty position stays locked); the exchange's

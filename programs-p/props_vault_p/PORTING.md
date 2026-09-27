@@ -59,7 +59,9 @@ The crate has its own `[workspace]` so the Anchor build's `Cargo.toml`, `Cargo.l
 (`anchor build` still produces a byte-identical `props_vault.so`). Release profile as the root: `overflow-checks = true`,
 `lto = "fat"`, `codegen-units = 1`, `opt-level = "s"` (measured on the admin build: s 84,728 B, z 84,808, 2 85,688,
 3 86,320). `cargo build-sbf` writes a throwaway `target/deploy/props_vault_p-keypair.json` (gitignored, never used:
-the program id is fixed in `src/lib.rs`).
+the program id is fixed in `src/lib.rs`). The keypair that matches that id is `keys/props_vault-keypair.json` at the
+repo root (gitignored, the only copy); the root `target/deploy/props_vault-keypair.json` is a copy `cargo clean`
+deletes and `anchor build` regenerates at random, so it is never the `--program-id` of a deploy (runbook §2).
 
 `compare/harness.ts` runs a scenario on both builds in LiteSVM with deterministic keys and clock and diffs every
 transaction outcome (success, `Error Code`, runtime error, error log lines minus the origin of difference 2, and every
@@ -330,8 +332,10 @@ SPL Token / ATA / System instruction builders by reading.
      mount path absolute: `solana-verify` hands it to `docker run -v` verbatim, and Docker reads a relative one as a
      volume name), which lands in this workspace's `programs-p/props_vault_p/target/deploy/props_vault_p.so`; the
      runbook's `<EXECUTABLE_HASH>` is its `get-executable-hash` and `<SO_SIZE>` its size, both read from that build (a
-     local `cargo build-sbf` and the pinned Docker image differ by a few bytes: 172,536 vs 172,504 in an earlier
-     round), and it builds nothing else into that `target/deploy/` afterwards (`--sbf-out-dir target/deploy` above
+     local `cargo build-sbf` and the pinned Docker image differ: 172,536 vs 172,504 bytes in an earlier round, and on
+     2026-09-27 the same 181,672 bytes with 4,451 of them different, executable hash `a3dd0d38…7ae997` for the Docker
+     build, so a suite run on the local build says nothing about the deploy file; the build runs in ≈ 15 s once
+     `colima start --vz-rosetta` provides an amd64 Docker on this Mac), and it builds nothing else into that `target/deploy/` afterwards (`--sbf-out-dir target/deploy` above
      writes to the repo root's).
    - `PROPS_VAULT_SO=<that file>` (absolute) for every suite, the validator smoke, the server module suites,
      `scripts/local-stack.ts`, the seven `compare/*.ts` scenarios and the fuzzers, which otherwise default to the Anchor
@@ -340,10 +344,10 @@ SPL Token / ATA / System instruction builders by reading.
      scenarios at 0 differences are the proof that the binary implements the SDK's IDL; they and the fuzzers still
      need `anchor build`'s reference binary at `target/deploy/props_vault.so`.
    - `--max-len`: 10 % headroom is only ≈ 18 KB here (≈ 1.016 SOL of program-data rent in all at 181,672 B, against
-     ≈ 5.7 SOL for the Anchor binary), program data never shrinks, and after the handover the vault cannot extend
+     ≈ 5.90 SOL at `MAX_LEN=1161274`, the 1,055,704 B Anchor binary + 10 %), program data never shrinks, and after the handover the vault cannot extend
      through Squads (runbook §14.3; `scripts/admin/extend-program.ts` while ExtendProgramChecked is inactive), so the
-     runbook presents the choice: the default, or sizing for a fallback to the Anchor build (≈ +850 KB of binary,
-     ≈ 5.7 SOL locked from the first day).
+     runbook presents the choice: the default, or sizing for a fallback to the Anchor build (≈ +875 KB of binary,
+     ≈ 5.9 SOL locked from the first day).
 
    Both workspaces pin the image `solana-verify` builds with (`[workspace.metadata.cli] solana = "3.1.10"`); without
    it, it guessed 3.0.1 / 2.3.0 from the lockfiles, whose platform-tools (Rust 1.84) cannot build either lockfile.

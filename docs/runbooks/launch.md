@@ -52,7 +52,7 @@ build → deploy → initialize (all paused) → authorities → tiers → marke
 | Domain (`<DOMAIN>`, e.g. `props.trade`) with DNS you control | app at `<DOMAIN>`, API at `api.<DOMAIN>` | The API **must** be a subdomain of the app's domain: the session cookie is SameSite=Lax, so it only flows between same-site origins. A `*.up.railway.app` or `*.vercel.app` address is a different site. |
 | Vercel team on **Pro** | the app | Hobby is non-commercial only. Routing Middleware is included on every plan. |
 | Railway project (Hobby or Pro) | the server + Postgres | One service, one replica. Pro adds team access and higher limits. |
-| Helius **Developer** plan or higher | RPC for server, browser and operator | Two API keys: a server/operator key, and a browser key restricted to `<DOMAIN>` (dashboard → RPCs → Access Control Rules → Allowed Domains). The public mainnet endpoint refuses browser requests and rate-limits the rest. |
+| Alchemy app (Solana mainnet), **Pay As You Go** with a spend limit | RPC for server and operator; the browser goes through the server's relay (`/v1/rpc`, section 7) | One app, one API key (`<ALCHEMY_KEY>`): its HTTP URL is `https://solana-mainnet.g.alchemy.com/v2/<ALCHEMY_KEY>` and its websocket URL `wss://solana-mainnet.streaming.alchemy.com/v2/<ALCHEMY_KEY>` (a different host: section 6). Free (30M CU/month, 300 CU/s) covers only the smoke test: the idle server burns ≈ 23M CU/month and a breach burst exceeds 300 CU/s (section 15). Leave the domain and IP allowlists off: the browser never holds the key, and Railway has no fixed egress IP. The public mainnet endpoint refuses browser requests and rate-limits the rest. |
 | Telegram bot | keeper alerts | Create with @BotFather (`TELEGRAM_BOT_TOKEN`), add it to the operators' group, read the group's chat id (`TELEGRAM_CHAT_ID`, negative for groups) from `https://api.telegram.org/bot<TOKEN>/getUpdates` after posting in the group. |
 | Better Stack (or any heartbeat + uptime monitor) | keeper heartbeat, API uptime | A heartbeat URL (`HEARTBEAT_URL`) and an uptime monitor on `https://api.<DOMAIN>/v1/health`. |
 | Sentry (optional) | keeper warnings/criticals | A project DSN (`SENTRY_DSN`). |
@@ -81,15 +81,15 @@ git checkout <RELEASE_COMMIT>
 npm ci --no-audit --no-fund
 ```
 
-Set these for the rest of the runbook. The RPC URL carries the Helius API key, so read it without echo instead of
+Set these for the rest of the runbook. The RPC URL carries the Alchemy API key, so read it without echo instead of
 typing it into a command line, which the shell history keeps (the admin token and the identity salt are loaded the same
 way in sections 8 and 9):
 
 ```sh
-read -rs RPC_URL && export RPC_URL    # paste https://mainnet.helius-rpc.com/?api-key=<SERVER_HELIUS_KEY>, Enter
-export KEYS_DIR=<ENCRYPTED_DIRECTORY_OUTSIDE_THE_REPO>     # every key file lives here, never in the checkout
-export OPERATOR_KEYPAIR=$KEYS_DIR/operator.json             # section 2
-export PROGRAM_KEYPAIR=$KEYS_DIR/props_vault-keypair.json   # section 2
+read -rs RPC_URL && export RPC_URL    # paste https://solana-mainnet.g.alchemy.com/v2/<ALCHEMY_KEY>, Enter (the same HTTP URL as Railway's RPC_URL)
+export KEYS_DIR=<ENCRYPTED_DIRECTORY_OUTSIDE_THE_REPO>     # operator and buffer keys live here, never in the checkout
+export OPERATOR_KEYPAIR=$KEYS_DIR/operator.json             # section 2 (here: ~/.config/props-trade/operator.json)
+export PROGRAM_KEYPAIR=$PWD/keys/props_vault-keypair.json   # section 2: the checkout's git-ignored keys/, never target/deploy/
 export PROGRAM_ID=$(solana-keygen pubkey "$PROGRAM_KEYPAIR")
 export NODE_NO_WARNINGS=1                                   # hides a punycode deprecation warning from a dependency
 ```
@@ -98,6 +98,8 @@ export NODE_NO_WARNINGS=1                                   # hides a punycode d
 error output into a ticket or chat without removing it.
 
 The admin scripts (`scripts/admin/*.ts`) take `--cluster mainnet-beta` (the default), which uses `RPC_URL`. They
+cannot take `RPC_WS_URL`: `@solana/web3.js` derives the websocket host from `RPC_URL`, which on Alchemy is not the
+streaming host, so their `confirmTransaction` falls back to polling signature status (slower, and fine). They
 **simulate by default** and print `dry run: ok, <n> CU` / `nothing sent; re-run with --execute to send`; add
 `--execute` to send (`sent: <signature>`). A failing dry run prints the program's last log lines and exits 1 with
 `…: the dry run fails, so nothing was sent`. Run each one without `--execute` first. `status.ts` is read-only and needs no
@@ -108,12 +110,19 @@ block-height or timeout error, run `status.ts` before retrying: the transaction 
 
 | Key | Signs | Kept | SOL it needs |
 |---|---|---|---|
-| Operator (`OPERATOR_KEYPAIR`) | program deploy (upgrade authority), every admin instruction until section 13 | offline, encrypted; cold storage after handover | ≈ 1.02 SOL spent by the deploy at the default `--max-len` (section 15; ≈ 5.7 SOL when sized for an Anchor fallback, section 4); keep **≥ 2 SOL** (≥ 12 SOL for the fallback sizing) on it while deploying, plus what you send on to the treasury and authorities |
-| Program keypair (`PROGRAM_KEYPAIR`) | only the first deploy (it creates the program address) | offline | none |
+| Operator (`OPERATOR_KEYPAIR`) | program deploy (upgrade authority), every admin instruction until section 13 | offline, encrypted; cold storage after handover | ≈ 1.02 SOL spent by the deploy at the default `--max-len` (section 15; ≈ 5.9 SOL when sized for an Anchor fallback, section 4); keep **≥ 2 SOL** (≥ 12 SOL for the fallback sizing) on it while deploying, plus what you send on to the treasury and authorities: **send 3 SOL** for the default sizing, **13 SOL** for the fallback sizing, and the go-live treasury (section 10) separately |
+| Program keypair (`PROGRAM_KEYPAIR`) | only the first deploy (it creates the program address) | `keys/props_vault-keypair.json` in the checkout (git-ignored, mode 600): the **only** copy, so back it up encrypted before deploying | none |
 | Deploy buffer keypair | the deploy's write buffer (makes an interrupted deploy resumable) | next to the operator key; delete after the deploy | none |
 | Risk authority (`RISK_AUTHORITY_KEYPAIR`) | keeper transactions, `record_evaluation_result`, payouts, restrictions | **only** as a Railway variable (hot) | 0.2 SOL (≈ 0.00003 SOL per keeper transaction at the server's fixed priority fee) |
 | KYC authority (`KYC_AUTHORITY_KEYPAIR`) | `set_identity` | **only** as a Railway variable (hot) | 0.1 SOL (≈ 0.002 SOL of rent per verified trader) |
 | Squads vault (`<SQUADS_VAULT>`) | admin and upgrades after section 13 | Squads members' devices | ≥ 0.01 SOL: the `--print-for` dry runs simulate with the vault as fee payer and fail if it holds nothing; a new tier or market config's rent (≈ 0.0014 SOL) comes out of it |
+
+**Never deploy `target/deploy/props_vault-keypair.json`.** It is a copy that `cargo clean` deletes and the next
+`anchor build` regenerates with a random key (on 2026-09-27 it held `EznRQigkGRP7XeczSqkTvjg4zApCRL6nSUMkttkHLn1m`);
+`solana program deploy --program-id` with it would create a program at that address, not at the id every
+client and the program itself hard-code. `PROGRAM_KEYPAIR=keys/props_vault-keypair.json` is the source of truth;
+the `solana-keygen pubkey` check below catches a wrong file. Back up `keys/` and the operator key (encrypted,
+off this machine) before section 4: neither is anywhere else.
 
 Create the operator key on the offline machine and check the program key matches the code.
 `programs-p/props_vault_p/src/lib.rs` holds the id as the 32 bytes of `ID` (no `declare_id!`); the crate's
@@ -163,6 +172,13 @@ Railway. Keep `ADMIN_API_TOKEN` in the operators' password manager: every admin 
    `<SO_SIZE>`: a local `cargo build-sbf` gave 172,536 bytes on 2026-09-24 (181,672 with the order fee, 2026-09-26) and the pinned Docker
    image a few bytes less in an earlier round, so never take either from a number written here.
 
+   Rehearsed on this Mac on 2026-09-27: `colima start --vz-rosetta` (the image is amd64; Rosetta persists in colima's
+   profile, so a plain `colima start` does afterwards), then the command above builds in ≈ 15 s and printed
+   181,672 bytes, executable hash `a3dd0d389959ceb137e3050919f4eff148573aec631ec4d075e99f27257ae997`. The Docker
+   binary and a local `cargo build-sbf` of the same commit have the same size but differ in 4,451 bytes: a suite that
+   loaded the local build proved nothing about the file you deploy, so every step-3 process must load the Docker
+   file (its stderr line names the size and this hash).
+
 3. Run the suites **against that binary**. Every process that loads the program (the LiteSVM suite, the validator
    smoke, the server module suites, `scripts/local-stack.ts` under the full-stack browser test, the Pinocchio side of
    the compare scenarios and of the fuzzers) takes it from `PROPS_VAULT_SO`, an absolute path; without it they load the
@@ -209,8 +225,9 @@ and program data never shrinks. It is sized with `--max-len`; choose between:
 
 - the default, 10 % headroom (≈ 18 KB, ≈ +0.09 SOL of rent; ≈ 1.016 SOL in all at 181,672 B): later, slightly larger
   releases of this build upgrade without an `extend`;
-- sizing for a fallback to the Anchor build (`anchor build` gives 1,021,016 B on 2026-09-24; its +10 % is
-  `MAX_LEN=1123117`, ≈ 5.7 SOL locked from the first day for a binary you may never deploy).
+- sizing for a fallback to the Anchor build (`anchor build` gives 1,055,704 B on 2026-09-27; its +10 % is
+  `MAX_LEN=1161274`, ≈ 5.90 SOL locked from the first day for a binary you may never deploy; the earlier
+  `MAX_LEN=1123117` from the 1,021,016 B binary of 2026-09-24 leaves it only 6 % of headroom).
 
 After the handover the Squads vault cannot extend it, and which other route works depends on a pending loader feature
 (section 14.3; while ExtendProgramChecked is inactive, `scripts/admin/extend-program.ts` grows it with the operator
@@ -219,8 +236,8 @@ key), so choose `--max-len` for the largest release you expect to ship.
 ```sh
 SO=programs-p/props_vault_p/target/deploy/props_vault_p.so   # the solana-verify build of section 3.2, not the Anchor build
 SO_SIZE=$(wc -c < "$SO" | tr -d ' ')                         # = <SO_SIZE>
-MAX_LEN=$(( SO_SIZE + SO_SIZE / 10 ))                        # the default; MAX_LEN=1123117 for the Anchor fallback sizing
-solana rent $(( MAX_LEN + 45 )) --url "$RPC_URL"         # Rent-exempt minimum: ≈ 1.016 SOL (1.01606096 for 181,672 B; ≈ 5.7 for the fallback sizing)
+MAX_LEN=$(( SO_SIZE + SO_SIZE / 10 ))                        # the default (199,839 for 181,672 B); MAX_LEN=1161274 for the Anchor fallback sizing
+solana rent $(( MAX_LEN + 45 )) --url "$RPC_URL"         # Rent-exempt minimum: ≈ 1.016 SOL (1.01606096 for 181,672 B; ≈ 5.90 for the fallback sizing)
 solana balance "$(solana-keygen pubkey "$OPERATOR_KEYPAIR")" --url "$RPC_URL"   # ≥ 2 SOL (≥ 12 SOL for the fallback sizing)
 ```
 
@@ -418,8 +435,8 @@ the Node provider (without it Railpack sees the root `Cargo.toml` and builds the
    | `APP_ORIGIN` | `https://<DOMAIN>` (exact origin: no path, no trailing slash) |
    | `SESSION_SECRET` | `openssl rand -hex 32` |
    | `ADMIN_API_TOKEN` | `openssl rand -hex 32` (also in the operators' password manager) |
-   | `RPC_URL` | `https://mainnet.helius-rpc.com/?api-key=<SERVER_HELIUS_KEY>` |
-   | `RPC_WS_URL` | `wss://mainnet.helius-rpc.com/?api-key=<SERVER_HELIUS_KEY>` |
+   | `RPC_URL` | `https://solana-mainnet.g.alchemy.com/v2/<ALCHEMY_KEY>` (the Alchemy HTTP URL) |
+   | `RPC_WS_URL` | `wss://solana-mainnet.streaming.alchemy.com/v2/<ALCHEMY_KEY>` (**required** on Alchemy, see below) |
    | `SOLANA_CLUSTER` | `mainnet-beta` |
    | `PROGRAM_ID` | `7qYRWwpmj3j3exVoBUJHzigcWmMN8ruPEdZdZrGzTJ7` |
    | `RISK_AUTHORITY_KEYPAIR`, `KYC_AUTHORITY_KEYPAIR` | from section 5.2 (stdin) |
@@ -448,12 +465,18 @@ the Node provider (without it Railpack sees the root `Cargo.toml` and builds the
    (service → Variables → New Variable): no command line, no trailing newline.
 
    Then seal the secrets (service → Variables → the ⋮ menu of each → Seal): `RISK_AUTHORITY_KEYPAIR`,
-   `KYC_AUTHORITY_KEYPAIR`, `SESSION_SECRET`, `ADMIN_API_TOKEN`, `RPC_URL`, `RPC_WS_URL` (both carry the Helius key) and
+   `KYC_AUTHORITY_KEYPAIR`, `SESSION_SECRET`, `ADMIN_API_TOKEN`, `RPC_URL`, `RPC_WS_URL` (both carry the Alchemy key) and
    `TELEGRAM_BOT_TOKEN`. A sealed value still reaches every build and deployment, but nobody with access to the project
    can read it back: not in the dashboard, the API, `railway variable list` or `railway run`. Sealing cannot be undone;
    a sealed variable can still be updated (⋮ → Edit, not the Raw Editor). Sealed values are not copied into PR
    environments or into duplicated environments and services: set them again there. Only seal `ADMIN_API_TOKEN` once it
    is in the password manager, since it can never be read back.
+
+   `RPC_WS_URL` is not optional on Alchemy: its websocket host (`solana-mainnet.streaming.alchemy.com`) differs from
+   the HTTP host, and with the variable unset `@solana/web3.js` derives `wss://solana-mainnet.g.alchemy.com/…`, which
+   never connects. Nothing fails: the indexer silently degrades to its 10 s poll and the keeper's lag alert fires only
+   after 5 min. After the deploy check `/v1/health` (indexer lag) and, once, `wscat -c "$RPC_WS_URL"` followed by a
+   `logsSubscribe`.
 
 4. Deploy from the connected repo (dashboard → Deploy, or push to the release branch; deploy from Git, not by
    uploading a working directory that holds key files) and read the build and deploy logs. Expected: the build runs
@@ -491,7 +514,7 @@ and adds the Content-Security-Policy (below). Node is pinned by `"engines": { "n
    | Variable | Value |
    |---|---|
    | `VITE_API_URL` | `https://api.<DOMAIN>` (no trailing slash) |
-   | `VITE_RPC_URL` | `https://mainnet.helius-rpc.com/?api-key=<BROWSER_HELIUS_KEY>` (the domain-restricted key) |
+   | `VITE_RPC_URL` | `https://api.<DOMAIN>/v1/rpc` (the server's RPC relay, as in section 7.1: the Alchemy key stays in Railway's `RPC_URL` and never reaches the browser) |
    | `VITE_CLUSTER` | `mainnet-beta` |
    | `VITE_PROGRAM_ID` | `7qYRWwpmj3j3exVoBUJHzigcWmMN8ruPEdZdZrGzTJ7` (the app refuses an API that reports another program) |
    | `VITE_PRIVY_APP_ID` | the Privy app id, for the Google wallet (set it on mainnet; see below) |
@@ -526,11 +549,12 @@ The Content-Security-Policy the middleware sends (built by `contentSecurityPolic
 ```
 default-src 'none'; script-src 'self' 'sha256-<theme script>'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
 font-src 'self' https://fonts.gstatic.com; img-src 'self' data:;
-connect-src https://api.<DOMAIN> https://mainnet.helius-rpc.com wss://mainnet.helius-rpc.com ws://localhost:* http://localhost;
+connect-src https://api.<DOMAIN> wss://api.<DOMAIN> ws://localhost:* http://localhost;
 base-uri 'none'; form-action 'none'; frame-ancestors 'none'
 ```
 
-`connect-src` holds exactly the API and the RPC origins (HTTPS and the websocket `@solana/web3.js` derives). The
+`connect-src` holds exactly the API and the RPC origins (HTTPS and the websocket `@solana/web3.js` derives; with the
+relay as RPC both are the API's host, so no provider origin appears). The
 `localhost` entries, the inline styles and the Google font are what the Solana Mobile Wallet Adapter needs on Android
 (it talks to the wallet app over a local websocket and styles its own dialog); desktop wallets inject through their
 extensions and need nothing. If `index.html`'s inline theme script ever changes, update its hash in `middleware.js`
@@ -585,7 +609,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -X POST -H 'Origin: https://example.com
 # 403  (writes from any other origin are refused)
 curl -s -H "Authorization: Bearer $ADMIN_API_TOKEN" https://api.<DOMAIN>/v1/admin/payouts     # []
 curl -sI https://<DOMAIN>/ | grep -iE '^(content-security-policy|x-frame-options|x-content-type-options):'
-# content-security-policy: default-src 'none'; … connect-src https://api.<DOMAIN> https://mainnet.helius-rpc.com wss://… ; … frame-ancestors 'none'
+# content-security-policy: default-src 'none'; … connect-src https://api.<DOMAIN> wss://api.<DOMAIN> ws://localhost:* http://localhost; … frame-ancestors 'none'
 # x-frame-options: DENY
 # x-content-type-options: nosniff
 ```
@@ -741,7 +765,7 @@ does not charge them.
 | API uptime | uptime monitor on `https://api.<DOMAIN>/v1/health` expecting 200 and `"status":"ok"` | 503 means the database is unreachable. |
 | Onchain balances | `node scripts/admin/status.ts` daily (its `warnings` list) | Risk key < 0.05 SOL, KYC key < 0.02 SOL, treasury < one owner float, an enabled tier the capital cannot fund. |
 | Pool depth | GMTrade pools of every enabled market, daily (learnings §8) | Lower `--max-position-usd` / `--max-total-oi-usd` with `upsert-markets.ts`. |
-| RPC | Helius dashboard: credits and rate-limit errors | Upgrade the plan before the credits run out. |
+| RPC | Alchemy dashboard: compute units per day, 429s, the spend limit | Usage grows ≈ 41M CU/month per funded account (section 15): raise the spend limit before it is hit, since a hit limit is an RPC outage (section 12). |
 | Props order fees | keeper alerts: `fees-due:<funded>` (fees due over 30 min: the account's payouts and closure wait), `fee-outcome:<funded>` (the exchange's indexer has not said for 10 min whether an order whose fee is due executed; waived after 24 h), `fee-ledger:<funded>` (critical: for 5 min the fee ledger has not matched the account's onchain fees due, settlement count and fees charged, so settlements wait), `fee-view:<funded>` (the keeper could not work out a settlement this tick; the account's other checks ran), `failed:<funded>:settle:<cause>` (a settlement the chain refused; it is planned again from a fresh read). `status.ts` → `order fees` (charged, due) | Ledger out of step: the indexer is behind or stuck (its own alert says so), or a settlement sent by hand has not been indexed yet (it clears once it is). Fees due that the keeper cannot settle (its key is out of reach): section 12. |
 | Referral rewards owed | weekly: `curl -s -H "Authorization: Bearer $ADMIN_API_TOKEN" https://api.<DOMAIN>/v1/admin/referrals` (each referrer with its code, referees, `earnedUsd`, `paidUsd`, `pendingUsd`, most owed first) | A referrer is owed USDC: send it from the operations wallet, then record it with the transfer's signature: `curl -s -X POST -H "Authorization: Bearer $ADMIN_API_TOKEN" -H 'content-type: application/json' -d '{"referrer":"<WALLET>","amountUsd":"<AMOUNT>","signature":"<SIGNATURE>"}' https://api.<DOMAIN>/v1/admin/referrals/payouts` (409 `referrer_unverified` until the referrer has passed identity review, `exceeds_pending` above what it is owed, `payout_recorded` for a signature already recorded for it; 422 when that confirmed transaction does not move at least the amount into the referrer's USDC; logged in `admin_audit_log`). |
 | Vault reconciliation | weekly: `status.ts` allocated principal vs `select sum(principal) from funded_accounts where status <> 'closed';` (`railway connect Postgres`) | They differ, or the capital vault is not deposits − withdrawals − principal posted + closure returns + vault profit share + swept fees. |
@@ -888,7 +912,7 @@ Onchain (mainnet rent on 2026-09-23, ≈ 5,080 lamports per byte; re-check with 
 
 | Item | Size | SOL | Paid by |
 |---|---|---|---|
-| Program data at `--max-len` = size + 10 % (`<SO_SIZE>` binary, ≈ 181,672 B; section 3.2) | ≈ 199,839 B | ≈ 1.016 (0.924 without headroom; ≈ 5.7 sized for an Anchor fallback, section 4) | operator, locked while deployed |
+| Program data at `--max-len` = size + 10 % (`<SO_SIZE>` binary, ≈ 181,672 B; section 3.2) | ≈ 199,839 B | ≈ 1.016 (0.924 without headroom; ≈ 5.90 at `MAX_LEN=1161274`, sized for an Anchor fallback, section 4) | operator, locked while deployed |
 | Program account | 36 B | 0.0008 | operator |
 | Deploy writes (≈ 180 transactions at 100,000 µlamports/CU) | | ≈ 0.001 | operator |
 | Config + fee vault + capital vault (initialize) | 484 + 165 + 165 B | 0.0061 | operator |
@@ -900,13 +924,16 @@ Onchain (mainnet rent on 2026-09-23, ≈ 5,080 lamports per byte; re-check with 
 
 Operator SOL: keep about twice what the deploy locks, ≥ 2 SOL at the default `--max-len` (the buffer's rent is the
 program's rent, ≈ 1.02; the margin covers a restarted buffer and fees) or ≥ 12 SOL when sized for an Anchor fallback;
-≈ 1.02 SOL (≈ 5.7) is spent and locked by the deploy, then the authorities and treasury.
+≈ 1.02 SOL (≈ 5.9) is spent and locked by the deploy, then the authorities and treasury. In one transfer: **3 SOL** for
+the default sizing, **13 SOL** for the fallback sizing (≥ 2 / ≥ 12 on the key through section 4, plus 0.3 SOL to the
+authorities, 0.5 SOL to the treasury for the smoke test and ≈ 0.02 of rent and fees). The go-live treasury top-up
+(section 10: 0.25 SOL per expected funded account + 0.5) is sent separately once the smoke test has passed.
 
 Monthly (list prices on 2026-09-23; check before buying):
 
 | Service | Plan | Cost |
 |---|---|---|
-| Helius | Developer (10M credits, 50 req/s, websockets) | $49 |
+| Alchemy | Pay As You Go with a spend limit ($0.525 per 1M compute units, 10,000 CU/s; Free = 30M CU/month at 300 CU/s, smoke test only) | idle server ≈ 23M CU/month (≈ $12); + ≈ 41M CU/month ≈ $22 per funded account (venue loop and keeper each read every account every 5 s) |
 | Vercel | Pro (commercial use) | $20 per developer seat |
 | Railway | Hobby $5 or Pro $20 per workspace, each including that much usage; then per second (≈ $20/vCPU, $10/GB RAM, $0.15/GB volume per month) | ≈ $5–40 for one server + Postgres |
 | Domain | `props.trade` is a registry premium: ≈ $385 first year, ≈ $55 renewal (ordinary `.trade` names ≈ $5–27) | per year |
@@ -924,8 +951,8 @@ variable that is not documented there and here):
 | `APP_ORIGIN` | yes | exact app origin; CORS, sign-in message domain, cross-site write check |
 | `SESSION_SECRET` | yes | ≥ 32 characters; keys the session-token hashes |
 | `ADMIN_API_TOKEN` | yes | ≥ 32 characters; bearer token for `/v1/admin/*` |
-| `RPC_URL` | yes | Solana JSON-RPC HTTP endpoint |
-| `RPC_WS_URL` | no | RPC websocket (derived from `RPC_URL` when unset) |
+| `RPC_URL` | yes | Solana JSON-RPC HTTP endpoint (`https://solana-mainnet.g.alchemy.com/v2/<ALCHEMY_KEY>`) |
+| `RPC_WS_URL` | yes on Alchemy | RPC websocket (`wss://solana-mainnet.streaming.alchemy.com/v2/<ALCHEMY_KEY>`); derived from `RPC_URL` when unset, which on Alchemy is the wrong host: the indexer then silently polls every 10 s (section 6) |
 | `SOLANA_CLUSTER` | no | `mainnet-beta` (default) or `localnet` |
 | `NODE_ENV` | no | leave unset in production; `test` + `SOLANA_CLUSTER=localnet` enables the local rehearsal's price-pin route |
 | `PROGRAM_ID` | no (yes on mainnet) | props_vault program id; must equal the SDK's |
@@ -949,7 +976,7 @@ App (`app/.env.example`; `app/tests/env-docs.test.js` checks the same for the ap
 | Variable | Required | Meaning |
 |---|---|---|
 | `VITE_API_URL` | yes | API base URL, same site as the app; also the CSP's API origin |
-| `VITE_RPC_URL` | yes on mainnet | browser RPC endpoint (domain-restricted key); also the CSP's RPC origins |
+| `VITE_RPC_URL` | yes on mainnet | browser RPC endpoint: the server's relay, `<VITE_API_URL>/v1/rpc` (no provider key in the browser); also the CSP's RPC origins |
 | `VITE_CLUSTER` | no | `mainnet-beta` (default) or `localnet` |
 | `VITE_PROGRAM_ID` | no (set it) | the app refuses to sign in against an API reporting another program |
 | `VITE_PRIVY_APP_ID` | no (set it on mainnet) | Privy app id: offers the Google wallet (Privy's embedded Solana wallet) and allows auth.privy.io in the CSP; without it browser wallets, which need the address lookup table first (section 7) |

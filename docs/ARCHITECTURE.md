@@ -308,7 +308,7 @@ browser with `packages/sdk`**; the server never holds user keys.
   tested with patched Position/USDC fixture accounts. `scripts/local-stack.ts` starts all of it (server/README.md), and
   `app/tests/fullstack.e2e.mjs` rehearses the whole trader journey through it in Chrome.
 - **mainnet**: program deployed by the operator keypair (upgrade authority → Squads multisig at handover), server on
-  Railway, app on Vercel, RPC = Helius (`RPC_URL`, `RPC_WS_URL`). Secrets: `RISK_AUTHORITY_KEYPAIR`,
+  Railway, app on Vercel, RPC = Alchemy (`RPC_URL` and `RPC_WS_URL`, both required: Alchemy's websocket host differs from its HTTP host; the browser uses the server's `/v1/rpc` relay). Secrets: `RISK_AUTHORITY_KEYPAIR`,
   `KYC_AUTHORITY_KEYPAIR`, `SESSION_SECRET`, `DATABASE_URL`, `ADMIN_API_TOKEN`, alert vars above.
 
 ## 7. Known limits (state them in product copy where relevant)
