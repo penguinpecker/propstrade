@@ -1,7 +1,7 @@
 # Props.trade — architecture and build spec
 
 Status: authoritative build spec, 2026-09-23. Every component in this repo implements this document.
-Evidence for every factual claim below is in `learnings.txt` and `research/`.
+Evidence for every factual claim below is kept in the private operations repository (operator notes and raw research).
 If implementation proves a statement here wrong, fix the code to the facts AND update this file in the same change.
 
 ## 0. Non-negotiables
@@ -86,7 +86,7 @@ packages/gmsol-wasm/         gmsol-sdk 0.10.0 built to WASM (nodejs + web target
 server/                      API + engine + indexer + keeper
 app/                         the approved interface, wired to real data
 docs/                        this spec, design docs, runbooks
-research/, learnings.txt     evidence
+research/spike-vault         the early CPI spike; operator notes and raw research are private
 ```
 
 ## 3. Onchain program `props_vault`

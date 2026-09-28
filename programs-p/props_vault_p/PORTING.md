@@ -321,7 +321,7 @@ SPL Token / ATA / System instruction builders by reading.
    derived the address itself and its CPI failed with `MissingAccount`. Same accept/reject set.
 5. Anchor's onchain-IDL instructions are not included (the IDL tag answers `IdlInstructionStub`, as with Anchor's
    `no-idl`), so every `anchor idl` command fails against this build. Kept out for size: the onchain IDL is optional
-   (explorers only; server, app and SDK decode with the IDL bundled in `@props/sdk`, learnings.txt round 3), and one
+   (explorers only; server, app and SDK decode with the IDL bundled in `@props/sdk`, the audit's round 3 notes), and one
    can still be published with a tool that needs no instruction in the program, e.g. the Program Metadata program
    (`@solana-program/program-metadata` on npm); check what explorers read before relying on it. The launch runbook
    `docs/runbooks/launch.md` was switched to this build on 2026-09-24 and deploys it end to end, with no IDL step, IDL

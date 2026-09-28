@@ -203,7 +203,6 @@ sequenceDiagram
 | `docs/ARCHITECTURE.md` | Build spec; section 8 holds the implementation notes that override the earlier sections |
 | `docs/design/` | Design notes, including the order-fee design and screen plan |
 | `docs/runbooks/launch.md` | Mainnet go-live procedure, rehearsed on a local validator |
-| `HANDOFF.md`, `learnings.txt` | Operating manual and the dated record of decisions and verified facts |
 
 ## Build and test
 

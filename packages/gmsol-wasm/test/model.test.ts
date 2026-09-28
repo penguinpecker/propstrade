@@ -1,6 +1,6 @@
 // Model checks on real mainnet account images captured 2026-09-22 22:22 UTC (research snapshot,
 // slot 449511955). Expected numbers are the research team's gmsol-model 0.10.0 native Rust results
-// on the same snapshot (research/2026-09-23-round2-stack.json, gmtrade-integration-facts).
+// on the same snapshot (the 2026-09-23 mainnet snapshot in the private research notes, gmtrade-integration-facts).
 //
 // Like GMTrade before every order, the model first accrues borrowing, funding and the position impact
 // distribution from the market's clocks up to the wall clock. load() moves the clocks a day ahead so
