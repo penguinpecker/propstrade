@@ -60,7 +60,7 @@ export function Tabs({ items, value, onChange, className = '' }) {
     if (next === undefined) return;
     e.preventDefault(); onChange(values[next]); e.currentTarget.children[next].focus();
   };
-  return <div className={`tabs ${className}`} role="tablist" onKeyDown={onKeyDown}>{items.map((item, i) => <button role="tab" aria-selected={value === values[i]} tabIndex={value === values[i] ? 0 : -1} key={values[i]} className={value === values[i] ? 'active' : ''} onClick={() => onChange(values[i])}>{typeof item === 'string' ? item : item.label}</button>)}</div>; }
+  return <div className={`tabs ${className}`} role="tablist" onKeyDown={onKeyDown}>{items.map((item, i) => <button type="button" role="tab" aria-selected={value === values[i]} tabIndex={value === values[i] ? 0 : -1} key={values[i]} className={value === values[i] ? 'active' : ''} onClick={() => onChange(values[i])}>{typeof item === 'string' ? item : item.label}</button>)}</div>; }
 export function Toggle({ checked, onChange, label }) { return <button type="button" role="switch" aria-checked={checked} aria-label={label} className={`toggle ${checked ? 'checked' : ''}`} onClick={() => onChange(!checked)}><span /></button>; }
 export function Dialog({ title, children, onClose, wide = false, className = '' }) {
   const ref = useRef(null);

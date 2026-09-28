@@ -142,14 +142,17 @@ const bucketStart = (interval, t) => {
   if (interval === '1M') { const d = new Date(t * 1000); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth()) / 1000; }
   return Math.floor(t / STEP[interval]) * STEP[interval];
 };
-/** 120 bars ending at the current bucket; the calendar intervals count back by their own buckets. */
+/**
+ * 120 bars ending at the current bucket; the calendar intervals count back by their own buckets. Longer intervals swing
+ * wider, as real candles do: 5m bars move ±0.4 % over a 1.2 % drift, 1D bars ±6 % over an 18 % drift.
+ */
 export function candles(m, interval) {
-  const step = STEP[interval], last = Number(m.price);
+  const step = STEP[interval], last = Number(m.price), amp = Math.min(15, Math.sqrt(step / 300));
   let end = bucketStart(interval, Math.floor(Date.now() / 1000));
   const times = [end];
   for (let i = 1; i < 120; i++) { end = interval === '1M' || interval === '1W' ? bucketStart(interval, end - 1) : end - step; times.unshift(end); }
   return times.map((time, i) => {
-    const drift = k => last * (1 + Math.sin((k + 1) * 0.37) * 0.004 - (119 - k) * 0.0001);
+    const drift = k => last * (1 + Math.sin((k + 1) * 0.37) * 0.004 * amp - (119 - k) * 0.0001 * amp);
     const open = drift(i - 1), close = i === 119 ? last : drift(i);
     return { time, open, high: Math.max(open, close) * 1.0006, low: Math.min(open, close) * 0.9994, close };
   });
@@ -213,6 +216,20 @@ function createWallet(state, wallet) {
   state.accounts.set(traderProfilePda(owner).toBase58(), { owner: PROGRAM_ID, encode: () => encodeAccount('traderProfile', { wallet: owner, identityHash: Array(32).fill(7), verifiedAt: new BN(0), activeFunded: 1, evaluationCount: 2, bump: 255 }) });
   state.accounts.set(funded, { owner: PROGRAM_ID, encode: () => encodeAccount('fundedAccount', fundedAccount(w)) });
   return w;
+}
+
+/**
+ * Fills a wallet's practice account for the chart's guide checks: a SOL long entered 2.4 % under the mark, its liquidation
+ * ~5 % under it and a take profit 40 % above, a limit buy resting 3.5 % under, and an ETH long to switch markets to.
+ * Returns the account's id (w.positions[id] / w.orders[id] hold the rows).
+ */
+function practiceFixture(state, w) {
+  const id = `practice:${w.wallet}`, now = Date.now();
+  const at = (symbol, factor) => { const m = state.markets.find(x => x.symbol === symbol); return (Number(m.price) * factor).toFixed(m.priceDecimals); };
+  const position = (symbol, entry, liq, takeProfit) => ({ id: `pos-practice-${symbol}`, symbol, side: 'Long', sizeUsd: '3000', sizeTokens: String(3000 / Number(at(symbol, entry))), collateralUsd: '600', leverage: 5, entryPrice: at(symbol, entry), markPrice: at(symbol, 1), liquidationPrice: at(symbol, liq), unrealizedPnl: '72.11', pendingFeesUsd: '1.80', pendingBorrowUsd: '0.40', pendingFundingUsd: '0.20', closeFeeUsd: '1.20', closing: false, takeProfit, stopLoss: null, openedAt: now - 2 * HOUR, venue: 'simulated' });
+  w.positions[id] = [position('SOL', 0.976, 0.95, { price: at('SOL', 1.4), orderId: 'tp-practice-SOL', status: 'awaiting_price' }), position('ETH', 0.99, 0.9, null)];
+  w.orders[id] = [{ id: 'ord-practice-SOL', symbol: 'SOL', side: 'Long', kind: 'Limit', isIncrease: true, sizeUsd: '1000', collateralUsd: '200', triggerPrice: at('SOL', 0.965), acceptablePrice: null, status: 'awaiting_price', createdAt: now - HOUR, updatedAt: now - HOUR }];
+  return id;
 }
 
 /** A wallet's referral code, as the server gives it: the first 8 characters of the address upper-cased, more while another wallet holds those. */
@@ -670,6 +687,8 @@ export async function startStub() {
     url, state, publish, walletData,
     /** A trader who signed up just now and bought nothing yet: the practice account only, inside the referral window. */
     newTrader: wallet => { const w = walletData(wallet); w.accounts = w.accounts.filter(a => a.stage === 'practice'); w.referral.createdAt = Date.now(); return w; },
+    /** Puts the SOL long, its resting limit buy and an ETH long (practiceFixture) in a wallet's practice account; returns the account's id. */
+    seedPractice: wallet => practiceFixture(state, walletData(wallet)),
     close: () => { for (const s of state.streams) s.res.destroy(); server.close(); },
   };
 }

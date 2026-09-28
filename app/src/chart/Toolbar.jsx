@@ -109,7 +109,7 @@ export function ChartToolbar({ interval, onInterval, pinned, onPinned, chartType
     <span className="toolbar-divider" />
     <button type="button" className="chart-option" aria-label="Indicators" onClick={onIndicators}><span className="tv-fx" aria-hidden="true">ƒx</span><span>Indicators</span></button>
     <span className="toolbar-divider" />
-    <button type="button" className={showGuides ? 'chart-option active' : 'chart-option'} aria-label="Positions" aria-pressed={showGuides} data-tip="Entry, liquidation, take-profit and stop-loss levels of your open positions" onClick={() => onShowGuides(!showGuides)}><Layers3 size={14} /><span>Positions</span></button>
+    <button type="button" className={showGuides ? 'chart-option active' : 'chart-option'} aria-label="Positions" aria-pressed={showGuides} data-tip="Entry, liquidation, take-profit and stop-loss levels of your open positions, and your resting orders" onClick={() => onShowGuides(!showGuides)}><Layers3 size={14} /><span>Positions</span></button>
     <div className="toolbar-spacer" />
     <button type="button" className={`tv-icon-button tv-draw-toggle ${drawTools || drawing ? 'active' : ''}`} aria-label="Drawing tools" aria-expanded={drawTools} onClick={onDrawTools}><PencilRuler size={17} strokeWidth={1.6} /></button>
     {onExpand && <button type="button" className="tv-icon-button" aria-label="Expand price chart" data-tip="Expand price chart" onClick={onExpand}><Expand size={16} strokeWidth={1.7} /></button>}
