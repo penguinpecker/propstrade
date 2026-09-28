@@ -37,9 +37,9 @@
   "devDependencies": {
     "@solana/spl-token": "^0.4.14",
     "@types/bn.js": "^5.2.0",
-    "@types/node": "^22.19.0",
+    "@types/node": "^26.6.2",
     "drizzle-kit": "^0.31.11",
-    "typescript": "^5.9.3",
-    "vitest": "^5.0.1"
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.2"
   }
 }
