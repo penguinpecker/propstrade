@@ -161,20 +161,26 @@ export default function Trading() {
   const tick = useMemo(() => market?.price && market.updatedAt ? { price: Number(market.price), ts: market.updatedAt } : null, [market?.price, market?.updatedAt]);
   /** The `count` candles (300 by default, at most 2,000 per request) before `before` (unix seconds), as the chart goes back in time. */
   const loadOlder = useCallback((before, count = 300) => { const step = INTERVAL_SECONDS[interval]; return api.candles(market.symbol, interval, before - count * step, before - step).then(r => r.candles); }, [market?.symbol, interval]);
-  // Chart lines: each open position's entry, liquidation price and TP/SL orders (behind the toolbar's Positions toggle),
-  // and the ticket's own TP/SL while they are typed, labelled with what they would make.
+  // Chart lines: each open position's entry, liquidation price and TP/SL orders and each resting increase order of this
+  // market, at the price it waits for (behind the toolbar's Positions toggle), and the ticket's own limit price and
+  // TP/SL while they are typed, the legs labelled with what they would make.
   const guides = useMemo(() => {
     const list = [];
-    if (showGuides) for (const p of (positions.data ?? []).filter(p => p.symbol === market?.symbol)) {
-      list.push({ price: Number(p.entryPrice), title: `${p.side} entry`, kind: 'entry' });
-      if (p.liquidationPrice) list.push({ price: Number(p.liquidationPrice), title: 'Liq.', kind: 'liquidation' });
-      if (p.takeProfit) list.push({ price: Number(p.takeProfit.price), title: 'TP', kind: 'tp' });
-      if (p.stopLoss) list.push({ price: Number(p.stopLoss.price), title: 'SL', kind: 'sl' });
+    const limit = s => `Limit ${s === 'Long' ? 'buy' : 'sell'}`;
+    if (showGuides) {
+      for (const p of (positions.data ?? []).filter(p => p.symbol === market?.symbol)) {
+        list.push({ price: Number(p.entryPrice), title: `${p.side} entry`, kind: 'entry' });
+        if (p.liquidationPrice) list.push({ price: Number(p.liquidationPrice), title: 'Liq.', kind: 'liquidation' });
+        if (p.takeProfit) list.push({ price: Number(p.takeProfit.price), title: 'TP', kind: 'tp' });
+        if (p.stopLoss) list.push({ price: Number(p.stopLoss.price), title: 'SL', kind: 'sl' });
+      }
+      for (const o of (orders.data ?? []).filter(o => isOpenOrder(o) && o.isIncrease && o.symbol === market?.symbol && Number(o.triggerPrice) > 0)) list.push({ price: Number(o.triggerPrice), title: limit(o.side), kind: 'limit' });
     }
+    if (ticket.orderType === 'Limit' && Number(ticket.limitPrice) > 0) list.push({ price: Number(ticket.limitPrice), title: `${limit(side)} · new`, kind: 'limit', draft: true }); // told apart from a resting order's line
     if (estimates.tp) list.push({ price: estimates.tp.price, title: `TP ≈ ${signedUsd(estimates.tp.pnl, 0)}`, kind: 'tp', draft: true });
     if (estimates.sl) list.push({ price: estimates.sl.price, title: `SL ≈ ${signedUsd(estimates.sl.pnl, 0)}`, kind: 'sl', draft: true });
     return list;
-  }, [showGuides, positions.data, market?.symbol, estimates]);
+  }, [showGuides, positions.data, orders.data, market?.symbol, estimates, ticket.orderType, ticket.limitPrice, side]);
   useEffect(() => { if ([tx.phase, openTx.phase].some(phase => phase === 'done' || phase === 'failed')) void refresh(); }, [tx.phase, openTx.phase]);
   // A position reads "Closing…" from the close request until the positions stream drops it. A close the venue canceled
   // or rejected gives the row back with the reason; one that executed with the position still here was partial.

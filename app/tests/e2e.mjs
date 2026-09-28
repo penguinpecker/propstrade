@@ -113,7 +113,7 @@ async function check(name, fn) {
 }
 async function expectEventually(predicate, message, timeout = 5_000) {
   for (const start = Date.now(); Date.now() - start < timeout;) {
-    if (predicate()) return;
+    if (await predicate()) return; // an async predicate's promise is not its answer
     await new Promise(resolve => setTimeout(resolve, 50));
   }
   throw new Error(message);
@@ -1249,6 +1249,96 @@ try {
       await page.getByRole('tab', { name: /Positions/ }).click();
       await page.getByRole('button', { name: 'Show SOL / USD on the chart' }).click();
       await page.locator('.market-select strong', { hasText: /^SOL/ }).waitFor();
+    });
+
+    await check('chart guides: lines within 20% of the price stay in the auto-scaled view on 5m and 1D, a take profit 40% away gets a chip that brings it in, a resting limit order and the ticket\'s limit price draw lines, a liquidation price comes back with the stream, and the Positions toggle is kept', async () => {
+      const id = stub.seedPractice(keys[0].address); // a SOL long (entry 2.4% under the mark, liquidation 5% under, take profit 40% above), a limit buy resting 3.5% under, an ETH long
+      const w = stub.walletData(keys[0].address);
+      const chart = page.locator('.chart-section');
+      const shown = (attr, expected) => page.waitForFunction(([a, e]) => document.querySelector('.chart-section .price-chart')?.getAttribute(a) === e, [attr, expected], { timeout: 5_000 }).catch(async () => { throw new Error(`${attr}: ${await page.locator('.chart-section .price-chart').getAttribute(attr)}, expected ${expected}`); });
+      const interval = async name => { await chart.locator('.timeframes').getByRole('button', { name, exact: true }).click(); await chart.locator('.tv-legend-main').getByText(`SOL / USD · ${name} · Props.trade`).waitFor(); };
+      const toggle = chart.getByRole('button', { name: 'Positions', exact: true });
+      const auto = chart.getByRole('button', { name: 'Auto scale' });
+      const chip = chart.locator('.tv-guide-chip');
+      try {
+        await page.goto(`${siteUrl}/#/trade/practice`);
+        await showMarket('SOL');
+        // The rows reach an open page the way the server's do, on the stream (a list read seconds ago is not read again).
+        stub.publish({ type: 'positions', accountId: id, positions: w.positions[id] }, keys[0].address);
+        stub.publish({ type: 'orders', accountId: id, orders: w.orders[id] }, keys[0].address);
+        await interval('5m');
+        await shown('data-guides', 'Long entry|Liq.|TP|Limit buy');
+        // 5m candles span ~2%: the library fits the scale to them alone, so the lines 2–5% away were off the chart; now
+        // they are scaled in. The take profit, 40% away, is not: its chip names it at the edge it is beyond.
+        await shown('data-guides-visible', 'Long entry|Liq.|Limit buy');
+        await chip.filter({ hasText: /^TP 212\.58 ▲$/ }).waitFor();
+        assert.equal(await chip.count(), 1, 'one chip, for the take profit');
+        // The chip extends the price scale to the take profit (auto-scale off, as after a drag); "auto" fits the candles and the near lines again.
+        await chip.click();
+        await shown('data-guides-visible', 'Long entry|Liq.|TP|Limit buy');
+        await chip.waitFor({ state: 'detached' });
+        assert.equal(await auto.getAttribute('aria-pressed'), 'false', 'auto-scale stayed on after the chip extended the scale');
+        await auto.click();
+        await shown('data-guides-visible', 'Long entry|Liq.|Limit buy');
+        // The chip reads like the axis: a percent on the % scale, a price again after. On the log scale it is a badge, not
+        // a button (the library takes a custom price range in price units only).
+        const percent = chart.getByRole('button', { name: 'Percent scale' });
+        await percent.click();
+        await chip.filter({ hasText: /^TP 4\d\.\d\d% ▲$/ }).waitFor();
+        await percent.click();
+        await chip.filter({ hasText: /^TP 212\.58 ▲$/ }).waitFor();
+        const log = chart.getByRole('button', { name: 'Log scale' });
+        await log.click();
+        await chart.locator('span.tv-guide-chip', { hasText: /^TP 212\.58 ▲$/ }).waitFor();
+        await log.click();
+        await chart.locator('button.tv-guide-chip', { hasText: /^TP 212\.58 ▲$/ }).waitFor();
+        // 1m candles span under 1%: a take profit 18% away (a 5× position's liquidation is that far) would flatten them
+        // to a line if it were scaled in, so it gets the chip instead; the entry 2.4% away still fits.
+        const sol = w.positions[id].find(p => p.symbol === 'SOL');
+        stub.publish({ type: 'positions', accountId: id, positions: w.positions[id].map(p => p === sol ? { ...p, takeProfit: { ...p.takeProfit, price: (Number(p.markPrice) * 1.18).toFixed(2) } } : p) }, keys[0].address);
+        await chip.filter({ hasText: /^TP 179\.17 ▲$/ }).waitFor();
+        await chart.locator('.timeframes').getByRole('button', { name: 'More intervals' }).click();
+        await page.getByRole('menuitemradio', { name: '1 minute' }).click();
+        await chart.locator('.tv-legend-main').getByText('SOL / USD · 1m · Props.trade').waitFor();
+        await chip.filter({ hasText: /^TP 179\.17 ▲$/ }).waitFor();
+        await page.waitForFunction(() => /^Long entry/.test(document.querySelector('.chart-section .price-chart')?.getAttribute('data-guides-visible') ?? ''));
+        stub.publish({ type: 'positions', accountId: id, positions: w.positions[id] }, keys[0].address);
+        await chip.filter({ hasText: /^TP 212\.58 ▲$/ }).waitFor();
+        // 1D candles span ~30%: the same lines are in view, the take profit still beyond the top.
+        await interval('1D');
+        await shown('data-guides-visible', 'Long entry|Liq.|Limit buy');
+        await chip.filter({ hasText: /^TP/ }).waitFor();
+        // The ticket's limit price draws a draft line beside the resting order's, and leaves with it.
+        const ticket = page.locator('.order-panel');
+        await ticket.getByRole('tab', { name: 'Limit' }).click();
+        await ticket.getByLabel('Order price').fill('150');
+        await shown('data-guides', 'Long entry|Liq.|TP|Limit buy|Limit buy · new');
+        await ticket.getByLabel('Order price').fill('');
+        await shown('data-guides', 'Long entry|Liq.|TP|Limit buy');
+        await ticket.getByRole('tab', { name: 'Market' }).click();
+        await page.waitForTimeout(300);
+        assert.equal(w.orders[id].length, 1, 'switching the order type submitted the ticket (the tabs were submit buttons inside the form)');
+        // No liquidation price (the venue could not value the position): no line, until the stream's next positions event brings one.
+        stub.publish({ type: 'positions', accountId: id, positions: w.positions[id].map(p => p === sol ? { ...p, liquidationPrice: null } : p) }, keys[0].address);
+        await shown('data-guides', 'Long entry|TP|Limit buy');
+        stub.publish({ type: 'positions', accountId: id, positions: w.positions[id] }, keys[0].address);
+        await shown('data-guides', 'Long entry|Liq.|TP|Limit buy');
+        // The Positions toggle takes the position and order lines off, reads pressed or not, and is kept across a reload.
+        await toggle.click();
+        await shown('data-guides', '');
+        assert.equal(await toggle.getAttribute('aria-pressed'), 'false');
+        await page.reload();
+        await chart.locator('.price-chart canvas').first().waitFor();
+        await shown('data-guides', '');
+        assert.equal(await toggle.getAttribute('aria-pressed'), 'false', 'the toggle came back on after a reload');
+        await toggle.click();
+        await shown('data-guides', 'Long entry|Liq.|TP|Limit buy');
+        await interval('1h'); // the interval is kept in the browser: the checks below expect 1h
+      } finally {
+        w.positions[id] = [];
+        w.orders[id] = [];
+        await page.evaluate(() => { localStorage.removeItem('props.chart-guides'); localStorage.setItem('props.chart-interval', '"1h"'); });
+      }
     });
 
     await check('closing: the row reads Closing… at once with its buttons gone, leaves when the stream drops it, and comes back with the reason when the venue cancels', async () => {

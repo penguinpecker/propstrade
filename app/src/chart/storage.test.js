@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_INTERVALS, DRAWING_COLOR, MAX_DRAWINGS, loadDrawings, loadInterval, loadIntervals, loadStudies, saveDrawings, validDrawings, validIntervals, validStudies } from './storage.js';
+import { DEFAULT_INTERVALS, DRAWING_COLOR, MAX_DRAWINGS, loadDrawings, loadInterval, loadIntervals, loadShowGuides, loadStudies, saveDrawings, validDrawings, validIntervals, validStudies } from './storage.js';
 
 /** A localStorage stand-in. */
 function memory(entries = {}) {
@@ -110,5 +110,11 @@ describe('interval settings from storage', () => {
     expect(loadIntervals(memory({ 'props.chart-intervals': '["1W","1m"]' }))).toEqual(['1m', '1W']);
     expect(loadIntervals(memory({ 'props.chart-intervals': '{bad' }))).toEqual(DEFAULT_INTERVALS);
     expect(loadIntervals(memory())).toEqual(DEFAULT_INTERVALS);
+  });
+
+  it('shows the position lines unless the toggle was saved off', () => {
+    expect(loadShowGuides(memory({ 'props.chart-guides': 'false' }))).toBe(false);
+    for (const raw of ['true', '"off"', '0', '{bad']) expect(loadShowGuides(memory({ 'props.chart-guides': raw }))).toBe(true);
+    expect(loadShowGuides(memory())).toBe(true);
   });
 });

@@ -89,13 +89,15 @@ export const loadInterval = (storage = store()) => { const saved = read(storage,
 /** The pinned intervals: known ones only, each once, in the chart's order; anything else reads as the defaults. */
 export const validIntervals = raw => Array.isArray(raw) ? INTERVALS.filter(i => raw.includes(i)) : DEFAULT_INTERVALS;
 export const loadIntervals = (storage = store()) => validIntervals(read(storage, 'chart-intervals'));
+/** The Positions toggle (position and order lines on the chart): on unless it was switched off. */
+export const loadShowGuides = (storage = store()) => read(storage, 'chart-guides') !== false;
 export const loadDrawings = (symbol, storage = store()) => validDrawings(read(storage, `chart-drawings.${symbol}`));
 export const saveDrawings = (symbol, list, storage = store()) => write(storage, `chart-drawings.${symbol}`, list);
 
 /**
  * Chart state shared by the trade page's chart and its expanded copy: interval and the intervals pinned in the toolbar
- * (both saved in this browser), chart type, the Positions toggle, indicator instances (saved in this browser), the
- * market's drawings (saved per market) and the drawing toggles.
+ * (both saved in this browser), chart type, the Positions toggle (saved), indicator instances (saved in this browser),
+ * the market's drawings (saved per market) and the drawing toggles.
  */
 export function useChartSettings(symbol) {
   const [interval, setIntervalState] = useState(() => loadInterval());
@@ -103,7 +105,8 @@ export function useChartSettings(symbol) {
   const [pinned, setPinnedState] = useState(() => loadIntervals());
   const setPinned = useCallback(list => { write(store(), 'chart-intervals', list); setPinnedState(list); }, []);
   const [chartType, setChartType] = useState('candles');
-  const [showGuides, setShowGuides] = useState(true);
+  const [showGuides, setShowGuidesState] = useState(() => loadShowGuides());
+  const setShowGuides = useCallback(on => { write(store(), 'chart-guides', on); setShowGuidesState(on); }, []);
   const [studies, setStudiesState] = useState(() => loadStudies());
   const setStudies = useCallback(list => { write(store(), 'chart-studies', list); setStudiesState(list); }, []);
   const [saved, setSaved] = useState(() => ({ symbol, list: loadDrawings(symbol) }));

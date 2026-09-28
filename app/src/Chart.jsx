@@ -22,6 +22,10 @@ const REACH_BATCH = 2000;
 const REACH_BARS = 30_000;
 /** A press that moves this far vertically pans the price axis (auto-scale off until "auto" or a price-axis double-click). */
 const VERTICAL_PAN_PX = 6;
+/** Guides this close to the last price (a fraction of it) join the auto-scaled range; farther ones get an off-view chip. */
+const GUIDE_REACH = 0.2;
+/** A guide joins only while the range stays within this many times the candles' own span, so the candles stay readable (a 5× liquidation ~18 % away would flatten a 1m chart). */
+const GUIDE_ROOM = 3;
 const FONT = 'Manrope, sans-serif';
 /** Touch screens: a vertical swipe on the chart scrolls the page (a drag across still pans time), and the axis text is a size up. */
 const COARSE = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
@@ -35,6 +39,8 @@ const PALETTES = {
   light: { surface: '#fdfdfb', axis: '#6e6975', grid: '#efeee9', border: '#eeece6', separatorHover: 'rgba(121,70,188,.14)', purple: '#8552cc', green: '#0a9e6b', red: '#e5354d', greenSoft: 'rgba(10,158,107,.5)', redSoft: 'rgba(229,53,77,.5)', entry: '#976ccc', entryBg: '#f0e8fa', entryText: '#76529b', amber: '#c48a1d' },
 };
 const closesOnly = type => type === 'line' || type === 'area';
+/** A guide's own colour (entry and limit lines use the palette's entry colours instead). */
+const guideColor = (c, kind) => ({ liquidation: c.amber, tp: c.green, sl: c.red })[kind];
 const toPoint = (type, bar) => closesOnly(type) ? { time: bar.time, value: bar.close } : bar;
 /** The main series; its own last-value label is off because it follows the last candle in view (see lastPrice). */
 function seriesOptions(type, c) {
@@ -220,8 +226,9 @@ export default function ChartPanel({ settings, market, candles, tick, theme, liv
 
 /**
  * GMTrade candles (`candles`), moved live by `tick` ({ price, ts }); `guides` are horizontal price lines ({ price, title,
- * kind: 'entry' | 'liquidation' | 'tp' | 'sl', draft? }): entry neutral, liquidation amber, take profit green, stop loss
- * red, a draft (the ticket's own TP/SL while it is typed) dashed. Drag in any direction pans; the wheel or a pinch zooms. `loadOlder(beforeTime, count)` supplies earlier candles as the
+ * kind: 'entry' | 'limit' | 'liquidation' | 'tp' | 'sl', draft? }): entry and limit neutral and dashed, liquidation amber,
+ * take profit green, stop loss red, a draft (the ticket's own limit price or TP/SL while it is typed) dashed, a draft limit
+ * dotted. Guides within GUIDE_REACH of the last price join the auto-scaled view while the candles keep GUIDE_ROOM; the rest get a chip at the edge they are beyond. Drag in any direction pans; the wheel or a pinch zooms. `loadOlder(beforeTime, count)` supplies earlier candles as the
  * view nears the first one. Drawings and indicator instances come from the chart settings.
  */
 function PriceChart({ market, candles, tick, interval, chartType, theme, live, guides, loadOlder, studies, studyActions, drawings, onDrawings, prefs, tool, onTool, selected, onSelect, scaleMode, autoScale, onAutoScale, request, onRequestDone }) {
@@ -241,10 +248,10 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
   const [behind, setBehind] = useState(false); // the latest candle is out of view
   const [legendHeight, setLegendHeight] = useState(0);
   const [notice, setNotice] = useState(null); // why a range or date could not be shown in full
-  const [narrow, setNarrow] = useState(false); // under 500 px wide: the entry line's axis label would cover the price ticks
   const startText = edit => { editing.current = edit; setText(edit); };
   const latest = useRef(null);
-  latest.current = { live, loadOlder, request, onDrawings, onSelect, onTool, onAutoScale, onRequestDone, startText, onNotice: setNotice };
+  const [offView, setOffView] = useState([]); // guides beyond the top or bottom of the price scale: { title, price, kind, above, text }
+  latest.current = { live, loadOlder, request, guides, onDrawings, onSelect, onTool, onAutoScale, onRequestDone, startText, onNotice: setNotice };
 
   useEffect(() => {
     const colors = PALETTES[theme];
@@ -261,7 +268,20 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
     });
     const series = chart.addSeries(SERIES[chartType], seriesOptions(chartType, colors));
     const minMove = 10 ** -market.priceDecimals;
-    series.applyOptions({ priceFormat: { type: 'price', precision: market.priceDecimals, minMove } });
+    // The library fits the price scale to the candles alone (price lines are not in its range), so a liquidation price a
+    // few percent away was off the chart on short intervals: guides within GUIDE_REACH of the last price join the range,
+    // nearest first, while it stays within GUIDE_ROOM times the candles' span (the rest get a chip).
+    const autoscaleInfoProvider = base => {
+      const info = base();
+      const last = bars.current.at(-1)?.close;
+      if (!info?.priceRange || !last) return info;
+      let { minValue, maxValue } = info.priceRange;
+      const room = (maxValue - minValue) * GUIDE_ROOM;
+      const near = latest.current.guides.filter(g => Math.abs(g.price / last - 1) <= GUIDE_REACH).sort((a, b) => Math.abs(a.price - last) - Math.abs(b.price - last));
+      for (const g of near) { const lo = Math.min(minValue, g.price), hi = Math.max(maxValue, g.price); if (hi - lo <= room) { minValue = lo; maxValue = hi; } }
+      return { ...info, priceRange: { minValue, maxValue } };
+    };
+    series.applyOptions({ priceFormat: { type: 'price', precision: market.priceDecimals, minMove }, autoscaleInfoProvider });
     chart.panes()[0].setStretchFactor(3);
     const layer = createDrawingLayer({
       chart, series, step, scroll: SCROLL, bars: () => bars.current, theme: { surface: colors.surface, up: colors.green, down: colors.red, accent: colors.purple }, formatPrice: price => price.toFixed(market.priceDecimals),
@@ -270,6 +290,25 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
     series.attachPrimitive(layer.primitive);
     const label = lastPrice(series, interval, () => bars.current, () => latest.current.live);
     series.attachPrimitive(label);
+    // Which guides the price scale shows right now (data-guides-visible, for the browser checks) and which are beyond
+    // its top or bottom (the chips): read after every chart update, once the price range is settled, kept when unchanged.
+    let seen = null;
+    const watch = { updateAllViews: () => {
+      const height = chart.paneSize(0).height;
+      const inside = [];
+      const outside = [];
+      for (const g of latest.current.guides) {
+        const y = series.priceToCoordinate(g.price);
+        if (y === null) continue;
+        if (y >= 0 && y <= height) inside.push(g); else outside.push({ ...g, above: y < 0, text: series.priceFormatter().format(g.price) });
+      }
+      const key = `${inside.map(g => g.title)}#${outside.map(g => `${g.title}${g.text}${g.above}`)}`; // the text follows the axis (price or %)
+      if (key === seen) return;
+      seen = key;
+      el.dataset.guidesVisible = inside.map(g => g.title).join('|');
+      setOffView(outside);
+    } };
+    series.attachPrimitive(watch);
     const showRecent = () => { const n = bars.current.length; if (n) chart.timeScale().setVisibleLogicalRange({ from: Math.max(0, n - RECENT_BARS), to: n - 1 + RIGHT_OFFSET }); };
     // `view` shows what the chart was opened with (the latest bars, the view before a rebuild, or a range or date asked
     // for), found by time so older candles loaded meanwhile do not move it; it runs again once the chart knows its width.
@@ -298,6 +337,15 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
     const local = e => { const r = el.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
     const scale = () => series.priceScale();
     const report = () => latest.current.onAutoScale(scale().options().autoScale);
+    /** Extends the price scale to a guide beyond its edge (a chip's press): auto-scale goes off, as after a drag, until "auto". */
+    current.reveal = price => {
+      const range = scale().getVisibleRange();
+      if (!range || scale().options().mode !== PriceScaleMode.Normal) return; // the library sets a custom range in price units only (on the log scale the chips are badges)
+      const pad = (Math.max(range.to, price) - Math.min(range.from, price)) * 0.06;
+      scale().setVisibleRange({ from: Math.min(range.from, price - pad), to: Math.max(range.to, price + pad) });
+      watch.updateAllViews();
+      report();
+    };
     const panel = () => el.closest('.tv-panel');
     let press = null;
     const down = e => {
@@ -379,7 +427,6 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
     const observer = new ResizeObserver(([entry]) => {
       const nextWidth = Math.round(entry.contentRect.width);
       if (nextWidth === width || nextWidth <= 0) return;
-      setNarrow(nextWidth < 500);
       const first = width === 0;
       width = nextWidth;
       cancelAnimationFrame(resizeFrame);
@@ -416,6 +463,7 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
       panes.disconnect();
       cancelAnimationFrame(resizeFrame);
       series.detachPrimitive(label);
+      series.detachPrimitive(watch);
       chart.remove();
       chartRef.current = null;
       editing.current = null;
@@ -500,13 +548,13 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
     const c = current.colors;
     for (const priceLine of current.priceLines) current.series.removePriceLine(priceLine);
     current.priceLines = guides.map(g => {
-      const color = { liquidation: c.amber, tp: c.green, sl: c.red }[g.kind];
+      const color = guideColor(c, g.kind);
       return current.series.createPriceLine(color
         ? { price: g.price, color, lineWidth: 1, lineStyle: g.draft ? LineStyle.Dashed : LineStyle.Solid, axisLabelVisible: true, title: g.title, axisLabelColor: color, axisLabelTextColor: ink(color) }
-        : { price: g.price, color: c.entry, lineWidth: 1, lineStyle: LineStyle.Dashed, axisLabelVisible: !narrow, title: g.title, axisLabelColor: c.entryBg, axisLabelTextColor: c.entryText });
+        : { price: g.price, color: c.entry, lineWidth: 1, lineStyle: g.draft ? LineStyle.Dotted : LineStyle.Dashed, axisLabelVisible: true, title: g.title, axisLabelColor: c.entryBg, axisLabelTextColor: c.entryText }); // the library draws the title only with the axis label
     });
     container.current.dataset.guides = guides.map(g => g.title).join('|'); // what the axis shows (drawn on canvas), for the browser checks
-  }, [guides, narrow, market.symbol, interval, chartType, theme]);
+  }, [guides, market.symbol, interval, chartType, theme]);
 
   useEffect(() => {
     const current = chartRef.current;
@@ -546,6 +594,7 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
   const valuesOf = inst => { const st = chartRef.current?.studies.get(inst.id); return st && index >= 0 ? st.data.map(points => points[index - (list.length - points.length)]?.value ?? null) : null; };
   const paneTop = inst => { const st = chartRef.current?.studies.get(inst.id); return st ? paneTops[st.series[0].getPane().paneIndex()] : undefined; };
   const drawing = !prefs.locked && !prefs.hidden ? drawings.find(d => d.id === selected) : null;
+  const axisWidth = chartRef.current?.series.priceScale().width() ?? 60; // the chips and the latest-candle button sit just left of the price axis
   const surface = PALETTES[theme].surface;
   const textColor = color => readable(color, surface);
   const legend = inst => <StudyLegend key={inst.id} study={inst} values={valuesOf(inst)} decimals={market.priceDecimals} textColor={textColor} {...studyActions} />;
@@ -560,6 +609,7 @@ function PriceChart({ market, candles, tick, interval, chartType, theme, live, g
     </div>}
     {text && <TextEditor edit={text} onDone={endText} />}
     {notice && <div className="tv-notice" role="status">{notice}</div>}
-    {behind && <button type="button" className="tv-latest" aria-label="Scroll to the latest candle" data-tip="Scroll to the latest candle" style={{ right: (chartRef.current?.series.priceScale().width() ?? 60) + 10 }} onClick={() => chartRef.current?.chart.timeScale().scrollToRealTime()}><ChevronsRight size={15} /></button>}
+    {['above', 'below'].map(edge => { const list = offView.filter(g => g.above === (edge === 'above')); return list.length ? <div key={edge} className={`tv-guide-chips ${edge}`} style={{ right: axisWidth + (edge === 'below' && behind ? 44 : 8), ...(edge === 'above' ? { top: drawing ? 42 : 6 } : { bottom: 36 }) }}>{list.map(g => { const color = guideColor(PALETTES[theme], g.kind); const Chip = scaleMode === 'log' ? 'span' : 'button'; return <Chip key={g.title + g.price} type={Chip === 'button' ? 'button' : undefined} className="tv-guide-chip" style={color ? { background: color, color: ink(color) } : { background: PALETTES[theme].entryBg, color: PALETTES[theme].entryText }} aria-label={`${g.title} ${g.text} is ${edge} the chart${Chip === 'button' ? ': bring it into view' : ''}`} onClick={Chip === 'button' ? () => chartRef.current?.reveal(g.price) : undefined}>{g.title} {g.text} {edge === 'above' ? '▲' : '▼'}</Chip>; })}</div> : null; })}
+    {behind && <button type="button" className="tv-latest" aria-label="Scroll to the latest candle" data-tip="Scroll to the latest candle" style={{ right: axisWidth + 10 }} onClick={() => chartRef.current?.chart.timeScale().scrollToRealTime()}><ChevronsRight size={15} /></button>}
   </>;
 }
