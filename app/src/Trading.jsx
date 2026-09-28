@@ -226,7 +226,7 @@ export default function Trading() {
     const shown = dialog;
     if (funded) {
       // Two closes per transaction stay under Solana's 1,232-byte limit (three measure 1,285 B with their max_fee
-      // arguments). ponytail: an address lookup table would fit all eight slots in one transaction.
+      // arguments). Simplification: an address lookup table would fit all eight slots in one transaction.
       for (let i = 0; i < list.length; i += 2) {
         const chunk = list.slice(i, i + 2);
         setClosing(prev => new Map([...prev, ...chunk.map(p => [p.id, { orderId: null }])]));

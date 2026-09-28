@@ -62,7 +62,7 @@ export async function buildApp(deps: AppDeps) {
 
   await app.register(helmet, { contentSecurityPolicy: false, crossOriginResourcePolicy: { policy: 'same-site' } });
   await app.register(cors, { origin: [config.APP_ORIGIN], credentials: true, methods: ['GET', 'POST', 'PUT', 'DELETE'] });
-  // ponytail: in-memory counters are right for the single Railway replica; use a Redis store if it ever scales out.
+  // Simplification: in-memory counters are right for the single Railway replica; use a Redis store if it ever scales out.
   await app.register(rateLimit, { max: 300, timeWindow: '1 minute' });
   await app.register(cookie);
 

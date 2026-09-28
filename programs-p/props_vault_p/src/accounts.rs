@@ -74,7 +74,7 @@ pub const EVENT_AUTHORITY_PDA: (Address, u8) = (
 
 /// The instruction's declared accounts, in IDL order (`AccountNotEnoughKeys` when short). `&accounts[N..]` are the
 /// remaining accounts.
-// ponytail: checks the count up front; Anchor reports the first failing account before running out, so a transaction
+// Simplification: checks the count up front; Anchor reports the first failing account before running out, so a transaction
 // that is both short and wrong earlier names a different error (still a failure).
 pub fn take<const N: usize>(accounts: &[AccountView]) -> Result<&[AccountView; N]> {
     accounts.first_chunk::<N>().ok_or(E::AccountNotEnoughKeys.into())

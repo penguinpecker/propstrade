@@ -118,7 +118,7 @@ const ORDER_INDEX_WAIT_MS = 30 * 60_000;
  * Only an order the account could have placed is waited for: one of the order numbers around its current order_seq
  * (the ones the indexer may not have applied yet). Any other (deleveraging, a liquidation without a liquidation fee) is
  * not the account's and carries no Props fee.
- * ponytail: a fixed window of 64 back, 8 ahead of the read; an indexer behind by more orders than that is alerted anyway.
+ * Simplification: a fixed window of 64 back, 8 ahead of the read; an indexer behind by more orders than that is alerted anyway.
  */
 const RECENT_ORDERS = { back: 64n, ahead: 8n };
 

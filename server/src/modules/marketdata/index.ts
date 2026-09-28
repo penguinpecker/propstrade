@@ -62,7 +62,7 @@ const PREWARM_ORDER: NativeInterval[] = ['1h', '5m', '15m', '4h', '1D'];
 // a 300-bar page answers in 0.1-0.3 s when GMTrade is idle, so the 68 markets' 1,972 pages take about 75 minutes;
 // gated on 'ok' under 2 s, the walk stayed shut through GMTrade's slow spells all day (windowsStored 0), so the gate
 // shuts only for the outages the walk cannot get through.
-// ponytail: an empty page inside a closure (a stock's 5m page on a weekend) reads as that series' history start, as
+// Simplification: an empty page inside a closure (a stock's 5m page on a weekend) reads as that series' history start, as
 // the app's own scroll does; derive the start from the 1D series if that ever matters.
 const PAGE_BARS = 300;
 const BACKFILL_BARS: Record<NativeInterval, number> = { '5m': 1_000, '15m': 1_000, '1h': 2_000, '4h': 2_000, '1D': 2_000 };
