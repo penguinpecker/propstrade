@@ -14,8 +14,6 @@ keys/
 coverage/
 tests/program/fixtures/*.so
 records.txt
-CLAUDE.md
-.claude/
 AGENTS.md
 wallet.json
 id_rsa
