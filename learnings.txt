@@ -1187,3 +1187,18 @@ Pinocchio evaluated (2026-09-23; measured in a scratch copy, 59/59 LiteSVM tests
   files; they re-ran and fixed the half-written tests instead of starting over.
 - Railway variables can be set without a redeploy (railway variables --set K=V --skip-deploys) so the next
   railway up boots with them; print only the keys you set (--kv | grep ^KEY=), never the rest.
+
+2026-09-28 DEPLOYED 99b2aaa (app only): chart guide lines "sometimes appear, sometimes not" (owner). Root cause:
+           lightweight-charts 5.2 fits the price scale to the candles only (Series autoscale merges bar min/max and
+           primitives' autoscaleInfo, never custom price lines), so a liquidation ~5 % away was off-canvas on 1m-15m
+           and in view on 1h/1D. Fix: an autoscaleInfoProvider admits guides nearest-first within 20 % of the last
+           price while the candles keep >= a third of the height; farther guides get an edge chip (TP 212.58 ▲) that
+           reveals them (auto-scale restores). Second cause: resting limit orders and the ticket's typed limit price
+           were never guides at all (now dashed 'Limit buy/sell' and dotted '… · new'). Contributor: the Positions
+           toggle was unpersisted state with a faint pressed look.
+- A price line the library "draws" can be off-canvas: assert visibility through a hook that measures the pane
+  (data-guides-visible, updated by a series primitive's updateAllViews), not through the list of created lines.
+- Found on the way: Tabs rendered <button> without type inside the order form, so Limit -> Market SUBMITTED the form
+  and placed a simulated market order (on funded: a wallet prompt). Every <button> inside a <form> needs type=button.
+- e2e's expectEventually did not await async predicates: two data-guides checks had passed vacuously for days. A
+  helper that takes a predicate must `await` it; grep helpers for `() =>` predicates returning promises.
