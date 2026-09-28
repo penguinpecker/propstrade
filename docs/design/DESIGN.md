@@ -187,7 +187,7 @@ The palette pairs violet-tinted charcoal and warm paper with the same purple ide
 
 - **Working purple** (`purple`): active navigation, selected controls, links, primary buttons and focus.
 - **Purple wash** (`purple-wash`): selected backgrounds and quiet contextual emphasis.
-- **Original brand purple** (`brand-purple`): the supplied symbol, unchanged in either theme. Use `public/brand/symbol.svg`; its authority remains the selected #31 master at `/Users/pp/Props.trade-selected-31/hq/Props.trade-symbol-master.svg`.
+- **Original brand purple** (`brand-purple`): the supplied symbol, unchanged in either theme. Use `public/brand/symbol.svg` (the selected #31 master).
 - **Primary foreground** (`on-primary`): dark ink on the bright dark-mode button; its light counterpart is white.
 
 ### Secondary

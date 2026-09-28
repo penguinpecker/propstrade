@@ -8,7 +8,7 @@ A light, compact workspace built around a clear progression: choose an evaluatio
 
 The plan covers **21 core screen designs**, **one optional free-practice design** and **three later capital-provider designs**. Some share a route or appear as focused overlays; this is design coverage, not a requirement for 25 separate pages.
 
-The shared product conversation, Strat research and GMTrade documentation inform this plan. Commercial rules and the proposed onchain architecture still need validation. [PRODUCT.md](PRODUCT.md) records those boundaries; [RESEARCH.md](RESEARCH.md) links the evidence.
+The product conversation, competitor research and the exchange's documentation inform this plan. Commercial rules and the proposed onchain architecture still need validation; `docs/ARCHITECTURE.md` and `research/` hold the current spec and evidence.
 
 ## 2. Stages and journey
 
@@ -18,7 +18,7 @@ The shared product conversation, Strat research and GMTrade documentation inform
 | Evaluation | Qualify under purchased rules. | Simulated positions; evaluation fee paid in USDC. | Evaluation · Simulated. Target, loss allowance and applicable deadline. |
 | Funded | Trade an approved allocation. | Proposed real GMTrade positions using Props.trade vault margin. | Funded · Live. Allocation, loss allowance and eligible settled profit. |
 
-Free practice is a recommendation, not a confirmed Props.trade requirement or a verified separate Strat feature. The paid simulated evaluation is the working model from the brief.
+Free practice is a recommendation, not a confirmed Props.trade requirement. The paid simulated evaluation is the working model from the brief.
 
 ```mermaid
 flowchart LR

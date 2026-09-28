@@ -37,9 +37,9 @@ const MAX_STEPS = 8;
 /**
  * Funded accounts worked on at once. Each waits on its own confirmations (≥ 1 s per transaction): one at a time, a burst
  * of 30 breaches took a 61 s tick. A breached account costs ~14 RPC calls, so 8 at once peak near 100 requests/s, twice
- * the Helius Developer plan's 50/s; web3.js retries a 429 with backoff.
+ * the RPC plan's per-second limit; web3.js retries a 429 with backoff.
  */
-// ponytail: fixed concurrency; derive it from the RPC plan's rate limit if 429s show up in a burst.
+// Simplification: fixed concurrency; derive it from the RPC plan's rate limit if 429s show up in a burst.
 const ACCOUNT_CONCURRENCY = 8;
 const CHURN_WINDOW_MS = 3_600_000;
 /** Orders per account per hour that count as churn (each costs GMTrade execution fees paid from the owner's SOL). */
@@ -517,7 +517,7 @@ export function createKeeper(d: KeeperDeps) {
       return { pending: false, slot: -1 };
     });
     const market = marketViews();
-    // ponytail: each account is read here and again by the chain module's venue loop; share one read per tick if RPC load matters.
+    // Simplification: each account is read here and again by the chain module's venue loop; share one read per tick if RPC load matters.
     const rows = await db.select({ address: fundedAccounts.address, trader: fundedAccounts.trader }).from(fundedAccounts).where(ne(fundedAccounts.status, 'closed'));
     const openBySymbol = new Map<string, number>();
     let active = 0;

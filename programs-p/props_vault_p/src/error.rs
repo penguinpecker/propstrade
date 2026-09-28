@@ -276,7 +276,7 @@ static BLOB: [u8; BLOB_LEN] = {
 
 /// Logs `e` as Anchor's `AnchorError::log` (`ProgramErrorWithOrigin::log` for a runtime error) does for an error
 /// without origin.
-// ponytail: no "caused by account: <name>" / "thrown in <file>:<line>" origin and no Left/Right lines; nothing parses
+// Simplification: no "caused by account: <name>" / "thrown in <file>:<line>" origin and no Left/Right lines; nothing parses
 // them. Add the origin if an operator needs it (it costs a name string per account).
 #[cold]
 #[inline(never)]

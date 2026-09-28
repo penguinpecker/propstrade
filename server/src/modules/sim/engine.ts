@@ -919,7 +919,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
 
   /**
    * Open positions get an equity snapshot every 5 min; a flat account's equity moves only on fills, which take one.
-   * ponytail: after a restart every open account is due at once (one locked step each); stagger them if that burst matters.
+   * Simplification: after a restart every open account is due at once (one locked step each); stagger them if that burst matters.
    */
   const snapshotDue = (accountId: string, marks: Mark[], v: Valuation, now: number) =>
     v.complete && marks.length > 0 && now - (lastSnapshot.get(accountId) ?? 0) >= SNAPSHOT_MS;

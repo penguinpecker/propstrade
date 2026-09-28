@@ -16,3 +16,5 @@ artifacts are a modified copy of the Licensed Work and remain subject to that li
 
 crate/ (the wasm-bindgen entry points) and src/ (the TypeScript wrapper) are Props.trade code that
 links the Licensed Work. Rebuild everything with ./build.sh.
+
+This work is based on open-source software provided under license by the Licensor (gmxresearch.eth). This derivative work has been created by Props.trade, and the Licensor does not endorse or assume responsibility for its content.

@@ -251,7 +251,7 @@ export const RECONCILE_TOLERANCE_PER_FILL = 10_000n; // micro USDC
 /** GMTrade's indexer runs ~35 s behind: a request younger than this waits for its last fills instead of being held. */
 export const REVIEW_GRACE_MS = 5 * 60_000;
 /** Exposure added to the same market this close together in two funded accounts is linked. */
-// ponytail: same-market timing heuristic; add cross-market correlation (e.g. BTC vs ETH) if hedging moves there.
+// Simplification: same-market timing heuristic; add cross-market correlation (e.g. BTC vs ETH) if hedging moves there.
 export const LINK_WINDOW_MS = 5 * 60_000;
 
 export interface FillRow {

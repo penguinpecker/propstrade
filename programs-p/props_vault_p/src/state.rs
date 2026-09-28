@@ -597,7 +597,7 @@ impl ConfigTail {
     }
 
     /// Counts `principal` against the day's activation limit.
-    // ponytail: a window anchored at its first activation lets up to 2× the limit through across a window edge; keep
+    // Simplification: a window anchored at its first activation lets up to 2× the limit through across a window edge; keep
     // per-activation timestamps for a true rolling day if that matters (same as the Anchor program).
     pub fn allocate_daily_principal(&mut self, principal: u64, now: i64) -> Result {
         if now >= self.principal_window_start.get().saturating_add(DAY_SECONDS) {

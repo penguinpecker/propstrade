@@ -65,7 +65,7 @@ const PayoutBody = z.object({
  * constraint stays the last word).
  */
 export async function assignReferralCode(tx: Tx, wallet: string): Promise<string | null> {
-  // ponytail: one lock serializes every code assignment (first sign-ins and the boot backfill, a few ms each); key it by
+  // Simplification: one lock serializes every code assignment (first sign-ins and the boot backfill, a few ms each); key it by
   // the 8-character prefix if sign-ups ever queue on it.
   await tx.execute(sql`select pg_advisory_xact_lock(${LOCK_KEYS.referralCodes}::int)`);
   const [row] = await tx.execute<{ code: string | null }>(sql`
@@ -165,7 +165,7 @@ async function summaryOf(db: Db, wallet: string, rewardBps: number): Promise<Ref
       withEvaluation: sql<number>`count(*) filter (where exists (select 1 from ${evaluations} where ${evaluations.trader} = ${users.wallet}))`.mapWith(Number),
       funded: sql<number>`count(*) filter (where exists (select 1 from ${fundedAccounts} where ${fundedAccounts.trader} = ${users.wallet}))`.mapWith(Number),
     }).from(users).where(eq(users.referredBy, wallet)),
-    // ponytail: sums every funded fill of the referees per read; keep a running total if a referrer's passes ~100k fills.
+    // Simplification: sums every funded fill of the referees per read; keep a running total if a referrer's passes ~100k fills.
     db.select({ usd: sum(venueFills.sizeUsd) }).from(venueFills)
       .innerJoin(fundedAccounts, eq(fundedAccounts.address, venueFills.fundedAccount))
       .innerJoin(users, eq(users.wallet, fundedAccounts.trader)).where(eq(users.referredBy, wallet)),
@@ -236,7 +236,7 @@ export function registerReferralRoutes(
     /** Every referrer with a referee, most owed first: rewards earned, payouts recorded and what is still owed, USD. */
     admin.get('/referrals', async (req) => {
       const { limit } = parse(AdminListQuery, req.query);
-      // ponytail: sums the whole ledger per call (operators only); keep running totals per referrer if it gets slow.
+      // Simplification: sums the whole ledger per call (operators only); keep running totals per referrer if it gets slow.
       const rows = await db.execute<{ referrer: string; code: string | null; referees: number; earned: string; paid: string }>(sql`
         select r.wallet as referrer, u.referral_code as code, r.referees, coalesce(e.usd, 0)::text as earned, coalesce(p.usd, 0)::text as paid
         from (select referred_by as wallet, count(*)::int as referees from users where referred_by is not null group by referred_by) r
