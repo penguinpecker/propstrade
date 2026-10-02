@@ -29,7 +29,7 @@ const ROUTES = ['/trade/funded', '/trade/evaluation', '/trade/practice', '/marke
 
 const stub = await startStub();
 const { state } = stub;
-const keys = testKeys(7); // keys[3] never signs in or trades: the Search page's unknown trader; keys[4] to keys[6] sign up with referral codes
+const keys = testKeys(10); // keys[3] never signs in or trades: the Search page's unknown trader; keys[4] to keys[6] sign up with referral codes; keys[7] to keys[9] hold accounts in some stages only
 const publicAccounts = list => list.map(({ address, publicKey }) => ({ address, publicKey }));
 const short = address => `${address.slice(0, 4)}…${address.slice(-4)}`;
 
@@ -853,6 +853,57 @@ try {
       await page.locator('.order-panel').getByRole('button', { name: /Buy \/ Long DOGE/ }).and(page.locator(':enabled')).waitFor();
       assert.equal(await page.locator('.order-panel').getByText(/not available|USDC-only pool/).count(), 0, 'practice restricts a listed market');
       await page.goto(`${siteUrl}/#/trade/funded`);
+    });
+
+    await check('stage fallback: a stage the wallet has no account in opens the best stage that has one (funded, else evaluation, else practice), the switcher still picks practice, and signed out keeps the saved stage', async () => {
+      const only = (key, ...stages) => { const w = stub.walletData(key.address); w.accounts = w.accounts.filter(a => stages.includes(a.stage)); };
+      only(keys[7], 'practice'); only(keys[8], 'practice', 'evaluation'); only(keys[9], 'practice', 'funded');
+      const strip = p => p.locator('.account-strip .active-account');
+      /** A signed-in page whose saved stage is `stage`, opened at `route`; `name` is the strip's expected account label. */
+      const open = async (key, stage, route, name) => {
+        const context = await signedInContext(browser, key, { viewport: { width: 1440, height: 900 } });
+        await context.addInitScript(s => { if (location.protocol === 'http:') localStorage.setItem('props.stage', JSON.stringify(s)); }, stage);
+        const page = await context.newPage();
+        const errors = watchConsole(page);
+        await page.goto(`${siteUrl}/#${route}`);
+        await strip(page).getByText(name, { exact: true }).waitFor();
+        return { context, page, errors };
+      };
+      const landed = async ({ page, errors }, hash) => { await page.waitForFunction(h => location.hash === h, hash); await page.waitForTimeout(300); assert.equal(await page.evaluate(() => location.hash), hash); assert.deepEqual(errors.splice(0), []); };
+      // 1. Only a practice account, the saved stage funded, an empty route: the practice terminal, not "No funded account".
+      let p = await open(keys[7], 'funded', '/trade', 'Practice account');
+      await landed(p, '#/trade/practice');
+      assert.equal(await p.page.evaluate(() => localStorage.getItem('props.stage')), '"practice"', 'the fallback stage is not saved');
+      // 2. An explicit link to the funded terminal or account page is replaced, and Back does not return to it.
+      await p.page.goto(`${siteUrl}/#/trade/funded`);
+      await landed(p, '#/trade/practice');
+      await p.page.goto(`${siteUrl}/#/account/funded`);
+      await landed(p, '#/account/practice');
+      await p.page.goBack();
+      await landed(p, '#/trade/practice');
+      await p.context.close();
+      // 3. Practice + evaluation: the evaluation wins; practice + funded (the saved stage evaluation): funded wins.
+      p = await open(keys[8], 'funded', '/trade', 'Evaluation 25K');
+      await landed(p, '#/trade/evaluation');
+      // 4. The switcher still picks the practice account while an evaluation exists, and the choice stays.
+      await strip(p.page).click();
+      await p.page.getByRole('dialog', { name: 'Switch account' }).getByRole('button', { name: /Practice account/ }).click();
+      await strip(p.page).getByText('Practice account', { exact: true }).waitFor();
+      await landed(p, '#/trade/practice');
+      await p.context.close();
+      p = await open(keys[9], 'evaluation', '/trade', 'Funded 25K');
+      await landed(p, '#/trade/funded');
+      await p.context.close();
+      // 5. Signed out: the saved stage stays, with the strip asking for a wallet.
+      const out = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+      await out.addInitScript(() => { if (location.protocol === 'http:') localStorage.setItem('props.stage', '"funded"'); });
+      const page = await out.newPage();
+      const errors = watchConsole(page);
+      await page.goto(`${siteUrl}/#/trade`);
+      await strip(page).getByText('Connect a wallet', { exact: true }).waitFor();
+      await page.locator('.order-panel .badge').getByText('Funded', { exact: true }).waitFor();
+      await landed({ page, errors }, '#/trade');
+      await out.close();
     });
 
     await check('phone width: notifications and market search stay reachable', async () => {

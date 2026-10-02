@@ -104,6 +104,17 @@ export default function App() {
   /** The account a stage works with: the one chosen in the switcher, else the newest current one, else the newest. */
   const accountFor = s => { const list = accounts.filter(a => a.stage === s).sort(newestFirst); return list.find(a => a.id === selected[s]) ?? list.find(a => isCurrent(a, accounts)) ?? list[0] ?? null; };
   const account = routeId ? routed : accountFor(stage);
+  // A stage the wallet has no account in (only practice so far, an evaluation that ended) would show the terminal and
+  // account pages empty: once the accounts are known, the best stage that has one opens instead, and a stage link is
+  // replaced so Back does not return to the empty page. An explicit account (?id=) and a stage chosen by hand stay.
+  useEffect(() => {
+    if (!signedIn || routeId || !accountsQuery.isSuccess || accountFor(stage)) return;
+    const next = ['funded', 'evaluation', 'practice'].find(accountFor);
+    if (!next) return;
+    setStage(next);
+    const link = path.match(/^\/(trade|account)(?:\/(?:funded|evaluation|practice))?$/);
+    if (link) location.replace(`#/${link[1]}/${next}`);
+  }, [signedIn, routeId, accountsQuery.data, stage, path]);
   const tiers = config.data?.tiers ?? [];
   const tier = tiers.find(t => t.id === tierId && t.enabled) ?? tiers.find(t => t.enabled) ?? null;
   const selectMarket = (symbol) => { setMarketSymbol(symbol); closeModal(); navigate(`/trade/${stage}`); };
