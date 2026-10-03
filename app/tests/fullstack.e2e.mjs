@@ -126,7 +126,11 @@ try {
     assert.deepEqual(markets.filter(m => m.tradable).map(m => m.symbol).sort(), ['BTC', 'ETH', 'SOL', 'XAU']);
     const sol = rows.filter({ hasText: 'SOL / USD' }).first();
     await sol.getByText('Crypto', { exact: false }).waitFor();
-    await rows.filter({ hasText: 'DOGE / USD' }).getByText('Not available for funded trading').waitFor();
+    // A fresh wallet has only a practice account, so the terminal is in the practice stage, where every listed market
+    // (all have a USDC-only pool) is tradable: no restriction label. The funded-stage labels are checked in step 7.
+    const doge = rows.filter({ hasText: 'DOGE / USD' });
+    await doge.getByText('Dogecoin', { exact: false }).waitFor();
+    assert.equal(await doge.getByText('Not available', { exact: false }).count(), 0, 'a practice-stage market shows a funded restriction');
   });
 
   await step('3 practice market order fills at a live price, then closes', async () => {
@@ -172,21 +176,25 @@ try {
   });
 
   await step('5 the evaluation trades to a pass and record_evaluation_result lands onchain', async () => {
-    const btc = await (await fetch(`${stack.apiUrl}/v1/markets/BTC`)).json();
-    const entry = Math.round(Number(btc.price));
-    await api('PUT', '/v1/test/prices/BTC', { price: String(entry) });
-    await selectMarket('BTC', 'evaluation');
+    // The exchange's pools are the counterparty: a side with no room (capacity 0, as BTC longs on 2026-10-03) refuses
+    // the order on every stage, so the step trades the launch market with the most room for a long.
+    const launch = (await (await fetch(`${stack.apiUrl}/v1/markets`)).json()).filter(m => ['BTC', 'ETH', 'SOL', 'XAU'].includes(m.symbol) && Number(m.maxSizeLong ?? 0) >= 1_000);
+    assert.ok(launch.length, 'no launch market has room for a $200 long right now');
+    const sym = launch.sort((x, y) => Number(y.maxSizeLong) - Number(x.maxSizeLong))[0].symbol;
+    const entry = Math.round(Number(launch[0].price));
+    await api('PUT', `/v1/test/prices/${sym}`, { price: String(entry) });
+    await selectMarket(sym, 'evaluation');
     await page.getByLabel('Order size in USD').fill('200');
-    await page.locator('.order-panel').getByRole('button', { name: 'Buy / Long BTC' }).click();
+    await page.locator('.order-panel').getByRole('button', { name: `Buy / Long ${sym}` }).click();
     await page.locator('.order-panel').getByText('Simulated order filled at the live price.').waitFor({ timeout: 20_000 });
     const [open] = await sql`select price from sim_fills where account_id = ${evaluation.toBase58()} and is_increase`;
     assert.ok(Math.abs(Number(open.price) / entry - 1) < 0.001, `opened at ${open.price}, pinned ${entry}`);
-    await api('PUT', '/v1/test/prices/BTC', { price: String(Math.round(entry * 1.01)) });
-    const row = page.locator('.position-table tbody tr').filter({ hasText: 'BTC / USD' });
+    await api('PUT', `/v1/test/prices/${sym}`, { price: String(Math.round(entry * 1.01)) });
+    const row = page.locator('.position-table tbody tr').filter({ hasText: `${sym} / USD` });
     await row.getByRole('button', { name: /Close/ }).click();
     await page.getByRole('dialog').getByRole('button', { name: 'Confirm close' }).click();
     await row.waitFor({ state: 'detached', timeout: 20_000 });
-    await api('PUT', '/v1/test/prices/BTC', { price: null });
+    await api('PUT', `/v1/test/prices/${sym}`, { price: null });
     const [result] = await until('the evaluation result', () => sql`select passed, final_equity, recorded_signature from sim_results where evaluation = ${evaluation.toBase58()} and recorded_signature is not null`.then(r => r.length && r), 60_000);
     assert.equal(result.passed, true);
     const [job] = await sql`select status, signature from chain_jobs where kind = 'record_evaluation_result' and subject = ${evaluation.toBase58()}`;
@@ -197,10 +205,10 @@ try {
     assert.ok(BigInt(onchain.finalEquity.toString()) >= toMicro('1001'), 'final equity reached the 1 USD target');
     facts.resultSignature = job.signature;
     // Notices name the account they are about: its route carries the id, its text the label and short id.
-    const notices = await sql`select title, body, href from notifications where wallet = ${trader.address} and title in ('Long BTC opened', 'Evaluation passed')`;
+    const notices = await sql`select title, body, href from notifications where wallet = ${trader.address} and title in (${'Long ' + sym + ' opened'}, 'Evaluation passed')`;
     const byTitle = Object.fromEntries(notices.map(n => [n.title, n]));
-    assert.equal(byTitle['Long BTC opened'].href, `/account/evaluation?id=${evaluation.toBase58()}`);
-    assert.match(byTitle['Long BTC opened'].body, new RegExp(`^Evaluation 1K PT-${evaluation.toBase58().slice(0, 4)}…: \\$200\\.00 at [\\d,]+\\.\\d{2}, P&L [+−]\\$\\d+\\.\\d{2} \\(simulated\\)$`));
+    assert.equal(byTitle[`Long ${sym} opened`].href, `/account/evaluation?id=${evaluation.toBase58()}`);
+    assert.match(byTitle[`Long ${sym} opened`].body, new RegExp(`^Evaluation 1K PT-${evaluation.toBase58().slice(0, 4)}…: \\$200\\.00 at [\\d,]+\\.\\d+, P&L [+−]\\$\\d+\\.\\d{2} \\(simulated\\)$`));
     assert.equal(byTitle['Evaluation passed'].href, `/result?id=${evaluation.toBase58()}`);
     await page.goto(`${app}/#/result`);
     await main.getByText('Evaluation passed', { exact: true }).waitFor();
@@ -249,6 +257,13 @@ try {
     const stat = label => main.locator('.stat').filter({ has: page.locator('.stat-label', { hasText: label }) }).locator('strong');
     await stat('Remaining loss allowance').getByText('$50.00').waitFor();
     await stat('Account equity').getByText('$1,000.00').waitFor();
+    // In the funded stage the markets page shows the onchain allowlist: DOGE has no MarketConfig, SOL does.
+    await page.goto(`${app}/#/markets`);
+    const marketRows = page.locator('.markets-table tbody tr');
+    await marketRows.filter({ hasText: 'DOGE / USD' }).getByText('Not available for funded trading').waitFor();
+    assert.equal(await marketRows.filter({ hasText: 'SOL / USD' }).first().getByText('Not available', { exact: false }).count(), 0);
+    await page.goto(`${app}/#/account/funded`);
+    await main.getByRole('heading', { name: 'Funded 1K' }).waitFor();
   });
 
   await step('8 funded open with TP + SL creates real GMTrade orders; canceled through the UI, the keeper and indexer clear them', async () => {
