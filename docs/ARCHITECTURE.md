@@ -36,7 +36,7 @@ If implementation proves a statement here wrong, fix the code to the facts AND u
 | Per-market max leverage (size / collateral) | from `MarketConfig.max_leverage_bps`: crypto ≤ 25×, FX ≤ 20×, metals/oil ≤ 15×, stocks/ETFs ≤ 8× | GMTrade liquidates stocks at the close at ~10× (live: 23–36× NVDA liquidated 13 s after close); fees push the safe line to ≤ 8× |
 | Closed-session leverage | `MarketConfig.closed_max_leverage_bps` (stocks/ETFs/FX 8×) | risk service closes positions above it before the session ends (US stocks ≈19:55 UTC) |
 | Profit split | 80% trader / 20% vault (`Config.trader_share_bps = 8000`) | |
-| Payout | when flat (no open positions, no pending orders), min 50 USDC trader share, reviewed by risk service, paid in USDC to the trader's wallet; account continues, allowance resets to L | |
+| Payout | when flat (no open positions, no pending orders), min 10 USDC trader share, reviewed by risk service, paid in USDC to the trader's wallet; account continues, allowance resets to L | |
 | Funded accounts per person | 1 active (enforced by `IdentityLock`) | KYC authority sets identity; v1 = manual review |
 | Order types | Market, Limit (increase); Take-profit (LimitDecrease), Stop-loss (StopLossDecrease) | GMTrade has no stop-entry: the "Stop" entry tab is removed |
 | Tradable markets | GMTrade **pure USDC-USDC** markets only, on the allowlist (`MarketConfig.enabled`) | Every asset with a pure USDC-USDC pool is listed and browsable (55 of GMTrade's 68 on 2026-09-25; the rest could never be traded here, so they are not listed); non-allowlisted ones show "Not available for funded trading" |

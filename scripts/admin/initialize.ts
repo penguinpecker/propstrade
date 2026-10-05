@@ -9,7 +9,7 @@ main(async () => {
   const ctx = setUp('node scripts/admin/initialize.ts [--cluster ...] [--execute]');
   const params = {
     traderShareBps: 8000, // 80% trader / 20% vault
-    minPayout: new BN(toMicro('50').toString()), // 50 USDC trader share
+    minPayout: new BN(toMicro('10').toString()), // 10 USDC trader share
     // Owner PDA float: a position prepays ≈0.026 SOL and each pending order ≈0.02 SOL (refundable).
     ownerSolTarget: new BN(0.25 * LAMPORTS_PER_SOL),
     ownerSolMin: new BN(0.1 * LAMPORTS_PER_SOL),

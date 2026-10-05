@@ -36,7 +36,7 @@ flowchart LR
   program controls (one per funded account). Every order the trader places is created by the program with that account
   as owner and receiver, so profits, refunds and liquidation proceeds can only ever land back in it. The trader can open,
   close, set take-profit and stop-loss orders, and request payouts. There is no withdrawal instruction.
-- **Payout.** When the account is flat and the trader's share is at least 50 USDC, the trader requests a payout; the risk
+- **Payout.** When the account is flat and the trader's share is at least 10 USDC, the trader requests a payout; the risk
   service reviews it (identity verified, requested profit reconciles with indexed fills, no hedge or mirror positions
   across accounts) and the program pays the trader's share to the registered wallet and the vault's share to the capital
   vault. The account continues with its allowance reset.
@@ -49,7 +49,7 @@ US persons and sanctioned regions are blocked (edge middleware and identity veri
 ```mermaid
 flowchart TD
     T["Trader"] -->|"evaluation fee (USDC)"| FV["Fee vault"]
-    T -->|"Props order fee: 2 USD + 0.1 % of order size,<br/>charged only when the order executes"| FV
+    T -->|"Props order fee: 0.10 USD + 0.1 % of order size,<br/>charged only when the order executes"| FV
     CV["Capital vault<br/>(seed capital, owner's money)"] -->|"loss allowance posted<br/>as collateral"| OA["Funded account<br/>(program-owned USDC)"]
     OA <-->|"trade P&L, exchange fees"| EX["Exchange pools<br/>(the counterparty)"]
     OA -->|"80 % of realized profit"| T
@@ -65,7 +65,7 @@ Revenue lines:
 |---|---|---|
 | Evaluation fee | one tier: a 1,000 USD account for 9.99 USDC (tiers are admin-configurable onchain) | fee vault |
 | Profit share | 20 % of realized profit at each payout | capital vault |
-| Props order fee | 2 USD + 0.1 % (10 bps) of the order's size, per order, on every account stage; assessed when the order is placed, charged only when it executes, on the size it fills; never for cancelled orders, orders the exchange does not execute, liquidations or the forced close of a breached account | fee vault (funded); simulated on practice and evaluation accounts, where it lowers the virtual balance but is not revenue |
+| Props order fee | 0.10 USD + 0.1 % (10 bps) of the order's size, per order, on every account stage; assessed when the order is placed, charged only when it executes, on the size it fills; never for cancelled orders, orders the exchange does not execute, liquidations or the forced close of a breached account | fee vault (funded); simulated on practice and evaluation accounts, where it lowers the virtual balance but is not revenue |
 | Referral rewards (a cost) | 10 % of the Props fee charged on a referred trader's funded orders; nothing on simulated fees, waived fees or charges on a breached account | paid by hand in USDC to identity-verified referrers |
 
 Where losses go. The vault never takes the other side of a trade. Positions are opened on the exchange's isolated GM
@@ -79,7 +79,7 @@ Vault P&L = evaluation fees + order fees + 20 % of funded profits − allowances
 |---|---|---|---|---|
 | Practice | free | positions, fills, balance (1,000 USD virtual with the same 10 % allowance, reset any time) | prices, the exchange's fee and liquidation model, the Props fee (as a deduction only) | never |
 | Evaluation | tier fee in USDC | positions, fills, balance | the fee payment, prices and cost model, the recorded result and trades root onchain | never |
-| Funded | nothing further; Props fee per executed order | nothing | USDC collateral, positions on the exchange, fees, payouts | 80 % of realized profit when flat, minimum 50 USDC |
+| Funded | nothing further; Props fee per executed order | nothing | USDC collateral, positions on the exchange, fees, payouts | 80 % of realized profit when flat, minimum 10 USDC |
 
 ## Architecture
 

@@ -110,7 +110,7 @@ test('upsert-tiers: every tier\'s published terms name the Props fee, and its on
     const { stdout } = await script('./upsert-tiers.ts', ['--print-for', key().toBase58()]);
     const rules = {
       profitTargetBps: 800, maxDrawdownBps: 1000, maxExposureBps: 10_000, traderShareBps: 8000, drawdown: 'static', includesOpenPnl: true, dailyLossLimit: null,
-      timeLimit: null, minTradingDays: null, orderFee: { usdc: '2', bps: 10, charged: 'executed orders, on the size executed' },
+      timeLimit: null, minTradingDays: null, orderFee: { usdc: '0.10', bps: 10, charged: 'executed orders, on the size executed' },
     };
     const terms = createHash('sha256').update(JSON.stringify({ tier: '1K', sizeUsd: '1000', feeUsdc: '9.99', ...rules })).digest();
     assert.match(stdout, new RegExp(`tier 1 1K: size 1000 USD, fee 9.99 USDC, target 8%, enabled, terms ${terms.toString('hex')}\\n`));

@@ -294,11 +294,11 @@ node scripts/admin/status.ts
 ### 5.1 Initialize
 
 Creates the Config, the fee vault and the capital vault, pins USDC and the GMTrade program and store, and sets the
-spec §1 parameters (80 % trader share, 50 USDC minimum payout, owner float 0.25 SOL topped up below 0.1 SOL) and a
+spec §1 parameters (80 % trader share, 10 USDC minimum payout, owner float 0.25 SOL topped up below 0.1 SOL) and a
 daily principal cap of 2,500 USDC: `activate_funded` posts at most that much principal per day (the window opens with
 the first activation after the previous one ended). It bounds what a compromised risk or KYC key, or a tampered server
 database, can put at risk; raise it as the vault grows with
-`set-params.ts --trader-share-bps 8000 --min-payout 50 --owner-sol-target 0.25 --owner-sol-min 0.1 --max-daily-principal <USDC>`
+`set-params.ts --trader-share-bps 8000 --min-payout 10 --owner-sol-target 0.25 --owner-sol-min 0.1 --max-daily-principal <USDC>`
 (every parameter named, as a Squads proposal needs after section 13: section 12; the other four are the current values,
 which `status.ts` prints). All three pauses start **on**.
 
@@ -447,7 +447,7 @@ the Node provider (without it Railpack sees the root `Cargo.toml` and builds the
    | `HEARTBEAT_URL` | the Better Stack heartbeat URL |
    | `SENTRY_DSN` | optional |
    | `RAILPACK_NODE_NPM_INSTALL` | `npm ci` (build-time only: makes Railpack install exactly the lockfile instead of `npm install`) |
-   | `ORDER_FEE_USDC`, `ORDER_FEE_BPS` | `2`, `10`: the owner's Props fee per order ($2 + 10 bps), charged (simulated) on practice and evaluation until the program is live; the code's default is 0 (section 10.1) |
+   | `ORDER_FEE_USDC`, `ORDER_FEE_BPS` | `0.10`, `10`: the owner's Props fee per order ($0.10 + 10 bps), charged (simulated) on practice and evaluation until the program is live; the code's default is 0 (section 10.1) |
 
    Leave `PORT` (Railway sets it), `HOST`, `LOG_LEVEL`, `TRUST_PROXY_HOPS` (1 = Railway's edge; set 2 when the API is
    reached through the app's Vercel rewrite, section 7), `SIM_FILL_DELAY_MS` and `REFERRAL_REWARD_BPS` (1000: referrers
@@ -458,7 +458,7 @@ the Node provider (without it Railpack sees the root `Cargo.toml` and builds the
    ```sh
    railway variable set 'DATABASE_URL=${{Postgres.DATABASE_URL}}' APP_ORIGIN=https://<DOMAIN> SOLANA_CLUSTER=mainnet-beta \
      PROGRAM_ID=7qYRWwpmj3j3exVoBUJHzigcWmMN8ruPEdZdZrGzTJ7 GMTRADE_DEPLOY_SLOT=<SLOT> 'RAILPACK_NODE_NPM_INSTALL=npm ci' \
-     ORDER_FEE_USDC=2 ORDER_FEE_BPS=10 --service <SERVER_SERVICE> --skip-deploys
+     ORDER_FEE_USDC=0.10 ORDER_FEE_BPS=10 --service <SERVER_SERVICE> --skip-deploys
    openssl rand -hex 32 | tr -d '\n' | railway variable set SESSION_SECRET --stdin --service <SERVER_SERVICE> --skip-deploys
    ```
 
@@ -632,7 +632,7 @@ position's profit is cents (below). Then lift the pauses:
 
 ```sh
 node scripts/admin/set-params.ts --min-payout 0.000001 --execute
-# current trader share 8000 bps, min payout 50 USDC, owner float 0.25 SOL (top-up below 0.1 SOL)
+# current trader share 8000 bps, min payout 10 USDC, owner float 0.25 SOL (top-up below 0.1 SOL)
 # new     trader share 8000 bps, min payout 0.000001 USDC, owner float 0.25 SOL (top-up below 0.1 SOL)
 node scripts/admin/set-pauses.ts --new-evaluations off --trading off --payouts off --execute
 # current { newEvaluations: true, trading: true, payouts: true } → new { newEvaluations: false, trading: false, payouts: false }
@@ -697,11 +697,11 @@ then fails with that reason: retry it with `POST /v1/admin/jobs/<JOB>/retry`.
 ```sh
 node scripts/admin/set-pauses.ts --new-evaluations on --execute     # no new smoke-tier purchases while switching
 node scripts/admin/upsert-tiers.ts --execute                        # the spec tier: 1K for 9.99 USDC, 10 % allowance; its terms name the Props fee
-node scripts/admin/set-order-fee.ts --usdc 2 --bps 10 --execute     # the Props fee: section 10.1 first
-node scripts/admin/set-params.ts --min-payout 50 --execute
+node scripts/admin/set-order-fee.ts --usdc 0.10 --bps 10 --execute     # the Props fee: section 10.1 first
+node scripts/admin/set-params.ts --min-payout 10 --execute
 node scripts/admin/deposit-capital.ts --amount <USDC_AMOUNT> --execute
 node scripts/admin/fund-sol-treasury.ts --sol <SOL_AMOUNT> --execute
-node scripts/admin/status.ts        # tier 1 enabled with "capital covers" ≥ 1 (100 USDC of principal per account); min payout 50 USDC; order fee 2 USDC + 10 bps; no warnings
+node scripts/admin/status.ts        # tier 1 enabled with "capital covers" ≥ 1 (100 USDC of principal per account); min payout 10 USDC; order fee 2 USDC + 10 bps; no warnings
 node scripts/admin/set-pauses.ts --new-evaluations off --trading off --payouts off --execute
 curl -s https://api.<DOMAIN>/v1/config | jq '.paused, .orderFeeUsd, .orderFeeBps'   # all false, "2", 10 (cached up to 30 s)
 ```
@@ -723,7 +723,7 @@ it closes. On the 1K tier's 100 USD allowance this rate is heavy: a $500 order p
 20 such orders burn half of it in Props fees alone (see the owner note in learnings, 2026-10-05).
 
 Where the rate comes from:
-- Before the program exists: the server's `ORDER_FEE_USDC=2` and `ORDER_FEE_BPS=10` (section 6; the code's default is
+- Before the program exists: the server's `ORDER_FEE_USDC=0.10` and `ORDER_FEE_BPS=10` (section 6; the code's default is
   0), on practice and evaluation; `/v1/order-fee` answers them with `"orderFeeSource":"server"`.
 - From `initialize` (section 5) until `set-order-fee.ts` in section 10: the program's rate, which `initialize` leaves at
   0, on every stage. Only the smoke test runs then, and it needs the 0 (section 9); practice is free meanwhile.
@@ -749,9 +749,9 @@ and closure while any are due), check each:
 Then, with the admin key (`--print-for <SQUADS_VAULT>` after the handover; both values are always named):
 
 ```sh
-node scripts/admin/set-order-fee.ts --usdc 2 --bps 10             # dry run: current off, new 2 USDC + 10 bps per order (3 USDC on a $1,000 order, 12 on $10,000)
-node scripts/admin/set-order-fee.ts --usdc 2 --bps 10 --execute
-node scripts/admin/status.ts | grep 'order fee'                   # order fee 2 USDC + 10 bps of the size, per order
+node scripts/admin/set-order-fee.ts --usdc 0.10 --bps 10             # dry run: current off, new 0.10 USDC + 10 bps per order (1.10 USDC on a $1,000 order, 12 on $10,000)
+node scripts/admin/set-order-fee.ts --usdc 0.10 --bps 10 --execute
+node scripts/admin/status.ts | grep 'order fee'                   # order fee 0.10 USDC + 10 bps of the size, per order
 curl -s https://api.<DOMAIN>/v1/order-fee                        # {"orderFeeUsd":"2","orderFeeBps":10,"orderFeeSource":"program"} (cached up to 30 s)
 ```
 
@@ -964,7 +964,7 @@ variable that is not documented there and here):
 | `TRUST_PROXY_HOPS` | no | trusted reverse proxies (1 = Railway's edge; 2 when the app's Vercel rewrite fronts the API, see section 7) |
 | `SIM_FILL_DELAY_MS` | no | sim keeper delay (2000, minimum 1000) |
 | `REFERRAL_REWARD_BPS` | no | referrers' share of the Props fee each settlement charges a funded order of the traders they referred, bps (1000 = 10 %, at most 5000; 0 stops new rewards; read when the indexer applies the settlement) |
-| `ORDER_FEE_USDC`, `ORDER_FEE_BPS` | no (2 and 10 at launch) | Props.trade's fee per order on practice and evaluation accounts until the program is live (flat USDC ≤ 2, bps ≤ 10; 0 = off, the default); the owner's rate is 2 and 10; then every stage reads the program's rate (section 10.1) |
+| `ORDER_FEE_USDC`, `ORDER_FEE_BPS` | no (0.10 and 10 at launch) | Props.trade's fee per order on practice and evaluation accounts until the program is live (flat USDC ≤ 2, bps ≤ 10; 0 = off, the default); the owner's rate is 2 and 10; then every stage reads the program's rate (section 10.1) |
 | `RISK_AUTHORITY_KEYPAIR` | yes on mainnet | risk authority secret key (JSON byte array or base58) |
 | `KYC_AUTHORITY_KEYPAIR` | yes on mainnet | KYC authority secret key |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | no | keeper alerts to Telegram |
