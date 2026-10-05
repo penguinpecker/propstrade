@@ -100,7 +100,7 @@ try {
     const context = await signedIn();
     const page = await context.newPage();
     await page.goto(`${siteUrl}/#/trade/evaluation`);
-    await page.locator('.account-strip').getByText('Evaluation 25K').waitFor();
+    await page.locator('.account-strip').getByText('Evaluation 1K').waitFor();
     await page.goto(`${siteUrl}/#/result`);
     await page.locator('.pending-mark').first().waitFor();
     const [done, pending] = await page.evaluate(() => ['.checkmark', '.pending-mark'].map(s => getComputedStyle(document.querySelector(s)).color));

@@ -109,11 +109,11 @@ test('upsert-tiers: every tier\'s published terms name the Props fee, and its on
   await withChain(async (script) => {
     const { stdout } = await script('./upsert-tiers.ts', ['--print-for', key().toBase58()]);
     const rules = {
-      profitTargetBps: 800, maxDrawdownBps: 500, maxExposureBps: 10_000, traderShareBps: 8000, drawdown: 'static', includesOpenPnl: true, dailyLossLimit: null,
+      profitTargetBps: 800, maxDrawdownBps: 1000, maxExposureBps: 10_000, traderShareBps: 8000, drawdown: 'static', includesOpenPnl: true, dailyLossLimit: null,
       timeLimit: null, minTradingDays: null, orderFee: { usdc: '2', bps: 10, charged: 'executed orders, on the size executed' },
     };
-    const terms = createHash('sha256').update(JSON.stringify({ tier: '10K', sizeUsd: '10000', feeUsdc: '79', ...rules })).digest();
-    assert.match(stdout, new RegExp(`tier 1 10K: .*, terms ${terms.toString('hex')}\\n`));
+    const terms = createHash('sha256').update(JSON.stringify({ tier: '1K', sizeUsd: '1000', feeUsdc: '9.99', ...rules })).digest();
+    assert.match(stdout, new RegExp(`tier 1 1K: size 1000 USD, fee 9.99 USDC, target 8%, enabled, terms ${terms.toString('hex')}\\n`));
     const [first] = Transaction.from(bs58.decode(stdout.trim().split('\n').at(-1)!)).instructions;
     const { data } = client.program.coder.instruction.decode(first!.data) as unknown as { data: { params: { termsHash: number[] } } };
     assert.deepEqual(Buffer.from(data.params.termsHash), terms);

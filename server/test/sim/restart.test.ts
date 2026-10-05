@@ -29,7 +29,7 @@ it('takes over the open book after a restart and redelivers unrecorded results u
   const heard: Record<'a' | 'b' | 'c', EvaluationResult[]> = { a: [], b: [], c: [] };
   const a = await startSim('restart', { onResolved: (r) => heard.a.push(r) });
   const user = await a.user();
-  const practice = `practice:${user.wallet}`;
+  const practice = await a.practice(user);
   const evaluations = [Keypair.generate(), Keypair.generate()].map((k) => k.publicKey.toBase58());
   let pendingMarket: { id: string };
   let pendingLimit: { id: string };

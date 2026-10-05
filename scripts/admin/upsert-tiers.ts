@@ -1,8 +1,8 @@
-// Upserts the spec §1 tiers. Each tier's terms hash is sha256 of its canonical rules JSON (printed), so the
-// published rules can be checked against the onchain tier.
-// --smoke-test instead makes tier 1 a tiny account for the mainnet smoke test (docs/runbooks/launch.md) and disables
-// the others: 200 USD size (a 10 USDC loss allowance), 1 USDC fee, 0.1% target. Purchased evaluations keep the terms
-// they were bought with, so running this script again without the flag restores the spec tiers for everyone else.
+// Upserts the spec §1 tier (one: 1K for 9.99 USDC, the owner's decision of 2026-10-05). Its terms hash is sha256 of its
+// canonical rules JSON (printed), so the published rules can be checked against the onchain tier.
+// --smoke-test instead makes tier 1 a tiny account for the mainnet smoke test (docs/runbooks/launch.md): 200 USD size
+// (a 20 USDC loss allowance), 1 USDC fee, 0.1% target. Purchased evaluations keep the terms they were bought with, so
+// running this script again without the flag restores the spec tier for everyone else.
 // --test-tier adds one more, small tier for local rehearsals (scripts/local-stack.ts); it is refused on mainnet.
 import { createHash } from 'node:crypto';
 import BN from 'bn.js';
@@ -11,7 +11,7 @@ import { main, setUp, submit } from './lib.ts';
 
 const RULES = {
   profitTargetBps: 800, // 8% of S, evaluation only, net of costs
-  maxDrawdownBps: 500, // loss allowance L = 5% of S, static floor S − L, includes open P&L and costs
+  maxDrawdownBps: 1000, // loss allowance L = 10% of S, static floor S − L, includes open P&L and costs
   maxExposureBps: 10_000, // Σ open notional ≤ 1.0 × S
   traderShareBps: 8000,
   drawdown: 'static',
@@ -23,16 +23,8 @@ const RULES = {
   orderFee: { usdc: '2', bps: 10, charged: 'executed orders, on the size executed' },
 } as const;
 
-const TIERS = [
-  { id: 1, name: '10K', sizeUsd: '10000', feeUsdc: '79', enabled: true, rules: RULES },
-  { id: 2, name: '25K', sizeUsd: '25000', feeUsdc: '149', enabled: true, rules: RULES },
-  { id: 3, name: '50K', sizeUsd: '50000', feeUsdc: '249', enabled: false, rules: RULES }, // pool depth limits size at launch
-  { id: 4, name: '100K', sizeUsd: '100000', feeUsdc: '449', enabled: false, rules: RULES },
-];
-const SMOKE_TEST_TIERS = [
-  { id: 1, name: 'smoke test', sizeUsd: '200', feeUsdc: '1', enabled: true, rules: { ...RULES, profitTargetBps: 10 } },
-  ...TIERS.slice(1).map((t) => ({ ...t, enabled: false })),
-];
+const TIERS = [{ id: 1, name: '1K', sizeUsd: '1000', feeUsdc: '9.99', enabled: true, rules: RULES }];
+const SMOKE_TEST_TIERS = [{ id: 1, name: 'smoke test', sizeUsd: '200', feeUsdc: '1', enabled: true, rules: { ...RULES, profitTargetBps: 10 } }];
 
 const MAINNET_GENESIS = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d';
 

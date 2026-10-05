@@ -110,7 +110,7 @@ async function opened(u: User, id: string, body: Partial<SimOrderRequest>) {
 describe('scenario 1: a gap through the stop loss and through the liquidation level in one tick', () => {
   it('refuses the stop as insolvent, liquidates at the gap price with the liquidation fee, loses exactly the collateral, fails the account once', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const stop = priceAt('SOL', 970n);
     const { position, account } = await opened(u, id, { sizeUsd: '25000', collateralUsd: '1250', stopLoss: stop }); // 20x, the whole allowance
@@ -158,7 +158,7 @@ describe('scenario 1: a gap through the stop loss and through the liquidation le
 
   it('shows equity no lower than the floor while an insolvent position waits for its liquidation (no debt, ever)', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await opened(u, id, { sizeUsd: '25000', collateralUsd: '1250' }); // no stop: the tick path has nothing to do
     await t.tick(at('SOL', pct(mid(), 800n))); // −20%: the position is worth nothing, it is not liquidated until the rules pass
     const during = await summary(u, id);
@@ -170,7 +170,7 @@ describe('scenario 1: a gap through the stop loss and through the liquidation le
 
   it('a gap through the stop loss but short of the liquidation level fills the stop at the gap price, not at the stop price', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const stop = priceAt('SOL', 970n);
     const { position, account } = await opened(u, id, { sizeUsd: '10000', collateralUsd: '1000', stopLoss: stop }); // 10x
@@ -192,7 +192,7 @@ describe('scenario 1: a gap through the stop loss and through the liquidation le
 
   it('a gap between the liquidation level and insolvency: the stop loss still closes, without the liquidation fee', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const stop = priceAt('SOL', 970n);
     const { position, account } = await opened(u, id, { sizeUsd: '10000', collateralUsd: '1000', stopLoss: stop });
@@ -221,7 +221,7 @@ describe('scenario 3: what wins when a stop loss and a liquidation trigger on th
    */
   async function raced(first: 'BTC' | 'SOL') {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('BTC');
     await base('SOL');
     const stop = priceAt('SOL', 970n);
@@ -253,7 +253,7 @@ describe('scenario 3: what wins when a stop loss and a liquidation trigger on th
   it('in a correlated crash each position\'s stop loss fills on its own report, whichever market\'s report is processed first', async () => {
     const outcome = async (first: 'BTC' | 'SOL') => {
       const u = await t.user();
-      const id = practiceOf(u);
+      const id = await t.practice(u);
       await base('BTC');
       await base('SOL');
       await placed(u, id, { symbol: 'SOL', sizeUsd: '5000', collateralUsd: '500', stopLoss: priceAt('SOL', 970n) }); // 10x each
@@ -280,7 +280,7 @@ describe('scenario 3: what wins when a stop loss and a liquidation trigger on th
     // with a −30% report: the stop (placed first) is refused as insolvent, the close is outside its slippage, and the
     // position is liquidated in the same step. One exit fill, one loss of exactly the collateral.
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const { position } = await opened(u, id, { sizeUsd: '25000', collateralUsd: '1250', takeProfit: priceAt('SOL', 1050n), stopLoss: priceAt('SOL', 970n) });
     const close = await u.post(`${path(id)}/positions/${position.id}/close`, { clientId: clientId(), percent: 100, slippageBps: 50 });
@@ -298,7 +298,7 @@ describe('scenario 3: what wins when a stop loss and a liquidation trigger on th
 
   it('with a pending close and a take profit, a +30% report fills the take profit (older) and tells the close the position is gone', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const { position } = await opened(u, id, { sizeUsd: '10000', collateralUsd: '1000', takeProfit: priceAt('SOL', 1050n) });
     await u.post(`${path(id)}/positions/${position.id}/close`, { clientId: clientId(), percent: 100, slippageBps: 50 });
@@ -316,7 +316,7 @@ describe('scenario 6: closes placed between two ticks 30% apart', () => {
   it('a practice close is cancelled by its slippage limit (0.5% and the 5% maximum alike) and the position is liquidated instead', async () => {
     for (const slippageBps of [50, 500]) {
       const u = await t.user();
-      const id = practiceOf(u);
+      const id = await t.practice(u);
       const { position } = await opened(u, id, { sizeUsd: '25000', collateralUsd: '1250' });
       const close = await u.post(`${path(id)}/positions/${position.id}/close`, { clientId: clientId(), percent: 100, slippageBps });
       expect(close.statusCode, close.body).toBe(200);
@@ -336,7 +336,7 @@ describe('scenario 6: closes placed between two ticks 30% apart', () => {
 
   it('at low leverage the cancelled close leaves the position open through the gap; only a stop loss (no acceptable price) exits at the gap price', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const { position } = await opened(u, id, { sizeUsd: '2500', collateralUsd: '1250' }); // 2x: −30% is a loss, not a liquidation
     await u.post(`${path(id)}/positions/${position.id}/close`, { clientId: clientId(), percent: 100, slippageBps: 500 });
@@ -354,7 +354,7 @@ describe('scenario 6: closes placed between two ticks 30% apart', () => {
     expect(await positions(u, id)).toEqual([]);
 
     const v = await t.user();
-    const vid = practiceOf(v);
+    const vid = await t.practice(v);
     await base('SOL');
     const entry = mid();
     const { position: guarded } = await opened(v, vid, { sizeUsd: '2500', collateralUsd: '1250' });

@@ -39,7 +39,8 @@ async function cohort(withStop: boolean) {
   for (let i = 0; i < 300; i++) {
     const wallet = Keypair.generate().publicKey.toBase58();
     let id = `practice:${wallet}`;
-    if (i >= 200) {
+    if (i < 200) await t.practice({ wallet });
+    else {
       id = Keypair.generate().publicKey.toBase58();
       await t.sim.createEvaluation({ evaluation: id, wallet, terms, purchasedAt: Date.now(), signature: '4'.repeat(87) });
     }
@@ -98,7 +99,7 @@ function solventLiquidatable(market: { market: string; virtualInventories: Recor
 
 it('DB statements for one account: an open, a stop-loss close, a liquidation with the breach', async () => {
   const wallet = Keypair.generate().publicKey.toBase58();
-  const id = `practice:${wallet}`;
+  const id = await t.practice({ wallet });
   await t.tick(t.md.scaled('SOL', 1, later()));
   const stop = fromUnitPrice((mid() * 97n) / 100n, 9);
   await t.sim.engine.placeOrder(wallet, id, { clientId: clientId(), symbol: 'SOL', side: 'Long', kind: 'Market', sizeUsd: '10000', collateralUsd: '500', slippageBps: 50, stopLoss: stop });
@@ -106,6 +107,7 @@ it('DB statements for one account: an open, a stop-loss close, a liquidation wit
   const close = await counted(() => t.tick(at((mid() * 96n) / 100n)));
   expect((await t.db.select().from(simFills).where(eq(simFills.accountId, id)))).toHaveLength(2);
   const other = Keypair.generate().publicKey.toBase58();
+  await t.practice({ wallet: other });
   await t.tick(t.md.scaled('SOL', 1, later()));
   await t.sim.engine.placeOrder(other, `practice:${other}`, { clientId: clientId(), symbol: 'SOL', side: 'Long', kind: 'Market', sizeUsd: '25000', collateralUsd: '1250', slippageBps: 50 });
   await t.tick(t.md.scaled('SOL', 1, later()));

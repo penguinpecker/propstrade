@@ -344,20 +344,19 @@ node scripts/admin/status.ts
 
 ### 5.3 Tiers
 
-For the smoke test (section 9) tier 1 becomes a tiny account and the others are disabled; section 10 restores the
-spec tiers. Purchased evaluations keep the terms they were bought with.
+There is one tier: 1K, a 1,000 USD account for 9.99 USDC with a 10 % loss allowance (owner decision 2026-10-05;
+`scripts/admin/upsert-tiers.ts` TIERS). For the smoke test (section 9) tier 1 becomes a tiny account instead; section 10
+restores the spec tier. Purchased evaluations keep the terms they were bought with.
 
 ```sh
 node scripts/admin/upsert-tiers.ts --smoke-test
 node scripts/admin/upsert-tiers.ts --smoke-test --execute
-# tier 1 smoke test: size 200 USD, fee 1 USDC, target 0.1%, enabled, terms 862084be…
-# tier 2 25K: size 25000 USD, fee 149 USDC, target 8%, disabled, terms 9b57bf02…
-# tier 3 50K: …, disabled    tier 4 100K: …, disabled
+# tier 1 smoke test: size 200 USD, fee 1 USDC, target 0.1%, enabled, terms 393c195f…
 ```
 
-(Straight to launch without a smoke test: run it without `--smoke-test`; the printed terms hashes of the spec tiers are
-`7acf2c0f…` (10K), `9b57bf02…` (25K), `7ec641a6…` (50K), `c81865de…` (100K). Every tier's rules name the Props fee,
-$2 + 10 bps per executed order, so these hashes commit to it: section 10.1.)
+(Straight to launch without a smoke test: run it without `--smoke-test`; the printed line is
+`tier 1 1K: size 1000 USD, fee 9.99 USDC, target 8%, enabled, terms 8c0c94e5…`. The tier's rules name the Props fee,
+$2 + 10 bps per executed order, so the hash commits to it: section 10.1. `scripts/admin/order-fee.test.ts` pins it.)
 
 ### 5.4 Markets
 
@@ -378,8 +377,8 @@ node scripts/admin/upsert-markets.ts --symbols BTC,ETH,SOL,XAU --max-position-us
 
 ### 5.5 Capital
 
-The operator's USDC account must hold the amount. For the smoke test deposit only what the tiny tier needs (10 USDC of
-principal per funded account):
+The operator's USDC account must hold the amount. For the smoke test deposit only what the tiny tier needs (20 USDC of
+principal per funded account: 10 % of its 200 USD):
 
 ```sh
 node scripts/admin/deposit-capital.ts --amount 20
@@ -387,8 +386,11 @@ node scripts/admin/deposit-capital.ts --amount 20 --execute
 node scripts/admin/status.ts
 #   capital vault       <CAPITAL_VAULT> 20 USDC (unallocated)
 #   id  size USD …  principal  capital covers …
-#   1   200      …  10         2
+#   1   200      …  20         1
 ```
+
+At go-live (section 10) the 1K tier posts 100 USDC of principal per funded account: `capital covers` is the deposit
+divided by 100, so 1,000 USDC funds 10 accounts at a time.
 
 ### 5.6 SOL treasury
 
@@ -595,7 +597,7 @@ Load the admin token into the shell once (paste it from the password manager; no
 read -rs ADMIN_API_TOKEN && export ADMIN_API_TOKEN
 node scripts/admin/status.ts
 # program upgrade authority <OPERATOR>; admin <OPERATOR>; risk and KYC authorities funded; pauses all PAUSED;
-# smoke-test tier 1 enabled, 2–4 disabled; 4 markets enabled; capital 20 USDC; treasury 0.5 SOL; "no warnings"
+# smoke-test tier 1 enabled; 4 markets enabled; capital 20 USDC; treasury 0.5 SOL; "no warnings"
 
 curl -s https://api.<DOMAIN>/v1/health | jq '{status, db, modules, leader: .keeper.leader}'
 # {"status":"ok","db":"ok","modules":{…all "running"},"leader":true}
@@ -642,7 +644,7 @@ node scripts/admin/set-pauses.ts --new-evaluations off --trading off --payouts o
 | 2 | Buy the "$200" evaluation (1 USDC) | fee transfer to the fee vault; indexer picks up `EvaluationPurchased`; sim account created | yes (validator e2e) |
 | 3 | Trade the simulated evaluation to +0.1 % (≈ $0.20 net) and go flat | live GMTrade prices, sim fills, pass decided, risk key records `record_evaluation_result` | yes, with recorded prices |
 | 4 | On the Activation page start identity verification; approve it (below) | admin API, `set_identity` chain job signed by the KYC key | yes (validator e2e) |
-| 5 | Activate | 10 USDC principal to the owner PDA's USDC account; 0.25 SOL owner float from the treasury | yes |
+| 5 | Activate | 20 USDC principal to the owner PDA's USDC account; 0.25 SOL owner float from the treasury | yes |
 | 6 | Open a $20 SOL long with $2 collateral (10×) and a stop-loss 2 % below | CPI `create_order_v2` accepted **and filled by GMTrade's keeper within seconds**; keeper `sync` | **no**: keepers do not run locally |
 | 7 | Set a take-profit at least 0.1 % (10 bp) above the fill | **TP trigger** executed by GMTrade's keeper; keeper cancels the orphaned stop-loss | **no** |
 | 8 | Close anything left; wait for the account to show flat | close fills; owner USDC = principal ± P&L; order escrows returned | **no** (fills) |
@@ -682,7 +684,7 @@ Payout review (step 9) is automatic; a payout the keeper holds shows up (with it
 `POST /v1/admin/payouts/<PAYOUT_ID>/approve` or `…/reject` (`{"reasonCode": <n>}`).
 
 After each step check the Activity page, the Verify page (every record links to the explorer) and `status.ts`
-(allocated principal 10 USDC and 1 open funded account after step 5; payouts paid and vault profit share after step 9).
+(allocated principal 20 USDC and 1 open funded account after step 5; payouts paid and vault profit share after step 9).
 
 Close the smoke-test funded account once it is flat: `POST /v1/admin/funded/<FUNDED_ACCOUNT>/close` (admin token)
 queues `close_funded`, signed by the risk key, which returns its USDC to the capital vault and its SOL
@@ -694,12 +696,12 @@ then fails with that reason: retry it with `POST /v1/admin/jobs/<JOB>/retry`.
 
 ```sh
 node scripts/admin/set-pauses.ts --new-evaluations on --execute     # no new smoke-tier purchases while switching
-node scripts/admin/upsert-tiers.ts --execute                        # spec tiers: 10K and 25K on, 50K and 100K off; their terms name the Props fee
+node scripts/admin/upsert-tiers.ts --execute                        # the spec tier: 1K for 9.99 USDC, 10 % allowance; its terms name the Props fee
 node scripts/admin/set-order-fee.ts --usdc 2 --bps 10 --execute     # the Props fee: section 10.1 first
 node scripts/admin/set-params.ts --min-payout 50 --execute
 node scripts/admin/deposit-capital.ts --amount <USDC_AMOUNT> --execute
 node scripts/admin/fund-sol-treasury.ts --sol <SOL_AMOUNT> --execute
-node scripts/admin/status.ts        # tiers 1–2 enabled with "capital covers" ≥ 1; min payout 50 USDC; order fee 2 USDC + 10 bps; no warnings
+node scripts/admin/status.ts        # tier 1 enabled with "capital covers" ≥ 1 (100 USDC of principal per account); min payout 50 USDC; order fee 2 USDC + 10 bps; no warnings
 node scripts/admin/set-pauses.ts --new-evaluations off --trading off --payouts off --execute
 curl -s https://api.<DOMAIN>/v1/config | jq '.paused, .orderFeeUsd, .orderFeeBps'   # all false, "2", 10 (cached up to 30 s)
 ```
@@ -716,8 +718,9 @@ program assesses it when an order is placed (the trader signs the most they acce
 signed again at once), holds an increase's fee in the account's USDC, and the keeper charges it only once the order
 executes (the rate on the size executed; an order the exchange cancelled, the trader cancelled or a breach close pays
 nothing). On practice and evaluation accounts it is simulated at the fills. A $1,000 order costs $3.00, a $10,000 one
-$12.00; a take profit or stop loss is assessed up to the account's exposure cap ($12 on a 10K account, $27 on a 25K one)
-and charged on what it closes.
+$12.00; a take profit or stop loss is assessed up to the account's exposure cap ($3 on the 1K account) and charged on what
+it closes. On the 1K tier's 100 USD allowance this rate is heavy: a $500 order pays $2.50, 2.5 % of the allowance, so
+20 such orders burn half of it in Props fees alone (see the owner note in learnings, 2026-10-05).
 
 Where the rate comes from:
 - Before the program exists: the server's `ORDER_FEE_USDC=2` and `ORDER_FEE_BPS=10` (section 6; the code's default is

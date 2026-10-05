@@ -76,7 +76,7 @@ async function openedAtCap(u: User, id: string, body: Partial<SimOrderRequest> =
 describe('scenario 4: the closed-market liquidation factor', () => {
   it('an 8x stock long 3% down is safe while open (1% factor) and is liquidated at the close on the frozen price (10% factor), report age notwithstanding', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     const { position, account } = await openedAtCap(u, id);
     expect(position.leverage).toBeCloseTo(8, 1);
     await t.tick(nvda(970n, 'open'));
@@ -103,7 +103,7 @@ describe('scenario 4: the closed-market liquidation factor', () => {
 
   it('at the cap with the price flat, the close does not liquidate (12.5% > 10%); the buffer is about 2.5% of size less fees', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     const { account } = await openedAtCap(u, id);
     t.md.closed.set('NVDA', true);
     await t.tick(nvda(1000n, 'closed'));
@@ -121,7 +121,7 @@ describe('scenario 4: the closed-market liquidation factor', () => {
 
   it('nothing executes while closed; a weekend gap at the reopen refuses the stop as insolvent and liquidates for exactly the collateral', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     const stop = priceAt(950n);
     const { position } = await openedAtCap(u, id, { stopLoss: stop });
     expect(position.stopLoss).toMatchObject({ price: stop });
@@ -147,7 +147,7 @@ describe('scenario 4: the closed-market liquidation factor', () => {
 
   it('a gap reported while the market is still flagged closed liquidates on the frozen session (10% factor); the stop loss never gets a turn', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     const { position } = await openedAtCap(u, id, { stopLoss: priceAt(970n) });
     t.md.closed.set('NVDA', true);
     await t.tick(nvda(960n, 'closed')); // −4%: through the stop, under the closed factor's line
@@ -162,7 +162,7 @@ describe('scenario 4: the closed-market liquidation factor', () => {
 
   it('when the report says open but the Market account still carries the Closed flag, nothing executes and the closed factor still applies', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     const { position } = await openedAtCap(u, id, { stopLoss: priceAt(980n) });
     t.md.closed.set('NVDA', true);
     await t.tick(nvda(970n, 'open')); // the price feed reopened, the account flag lags

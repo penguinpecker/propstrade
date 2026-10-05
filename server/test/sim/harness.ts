@@ -11,7 +11,8 @@ import { buildApp } from '../../src/app.js';
 import { loadConfig } from '../../src/config.js';
 import { createDb } from '../../src/db/client.js';
 import { runMigrations } from '../../src/db/migrate.js';
-import { notifications } from '../../src/db/schema.js';
+import { eq } from 'drizzle-orm';
+import { accounts, equitySnapshots, notifications } from '../../src/db/schema.js';
 import { createConnection } from '../../src/lib/solana.js';
 import register from '../../src/modules/sim/index.js';
 import type { OrderFeeRateInfo } from '../../src/lib/order-fee.js';
@@ -179,6 +180,17 @@ export async function startSim(name: string, { fillDelayMs = 2_000, databaseUrl,
     async user() {
       const u = await signIn(app);
       return { ...u, ...as(u.cookie) };
+    },
+    /**
+     * The wallet's practice account resized to what these suites were recorded on: 25,000 USD with a 1,250 USD allowance
+     * (the practice default is 1,000 / 100 since 2026-10-05; accounts opened before it keep their stored size until reset).
+     */
+    async practice(u: { wallet: string }, sizeUsd = '25000', lossAllowanceUsd = '1250') {
+      const id = `practice:${u.wallet}`;
+      await sim.engine.ensurePractice(u.wallet);
+      await db.update(accounts).set({ sizeUsd, lossAllowanceUsd }).where(eq(accounts.id, id));
+      await db.update(equitySnapshots).set({ equity: sizeUsd }).where(eq(equitySnapshots.accountId, id));
+      return id;
     },
     /** Pushes ticks one by one and waits until the engine has processed each. */
     async tick(...ticks: PriceTick[]) {

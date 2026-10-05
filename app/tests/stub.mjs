@@ -38,8 +38,8 @@ const feeRate = ({ usd, bps }) => ({ feeUsdc: toMicro(usd), feeBps: bps });
 /** An order's Props fee in USDC base units, as the server and the program compute it (a decrease: at most `capGm`). */
 const propsFee = (state, sizeGm, capGm) => orderFee(feeRate(state.orderFee), sizeGm, capGm);
 const propsFeeUsd = (state, sizeUsd) => (Number(propsFee(state, usdToGm(Number(sizeUsd).toFixed(6)))) / 1e6).toFixed(6);
-/** The fixture funded account's exposure cap: 25K terms at 100% (fundedAccount below). */
-const FUNDED_CAP = 25_000n * 10n ** 20n;
+/** The fixture funded account's exposure cap: 1K terms at 100% (fundedAccount below). */
+const FUNDED_CAP = 1_000n * 10n ** 20n;
 /**
  * The program's OrderFeeChanged: the logs of a simulation refused because an order's Props fee at the current rate is
  * above the max_fee it carries (an increase on its size, a decrease on at most the account's exposure cap), else null.
@@ -59,10 +59,10 @@ function feeRefusal(state, tx) {
 
 // ---------- tiers (the API's /v1/config and the onchain Tier accounts agree) ----------
 const TERMS_HASH = 'a1b2c3d4'.repeat(8);
-export const TIERS = [[1, '10K', 10_000, 79, true], [2, '25K', 25_000, 149, true], [3, '50K', 50_000, 249, false], [4, '100K', 100_000, 449, false]]
-  .map(([id, name, size, fee, enabled]) => ({ id, name, sizeUsd: String(size), feeUsdc: String(fee), profitTargetBps: 800, maxDrawdownBps: 500, maxExposureBps: 10_000, traderShareBps: 8000, enabled, termsHash: TERMS_HASH, version: 1 }));
+export const TIERS = [[1, '1K', 1_000, '9.99', true]]
+  .map(([id, name, size, fee, enabled]) => ({ id, name, sizeUsd: String(size), feeUsdc: fee, profitTargetBps: 800, maxDrawdownBps: 1000, maxExposureBps: 10_000, traderShareBps: 8000, enabled, termsHash: TERMS_HASH, version: 1 }));
 const tierAccount = t => encodeAccount('tier', {
-  id: t.id, sizeUsd: new BN(Number(t.sizeUsd) * 1e6), feeUsdc: new BN(Number(t.feeUsdc) * 1e6), profitTargetBps: t.profitTargetBps, maxDrawdownBps: t.maxDrawdownBps,
+  id: t.id, sizeUsd: new BN(Number(t.sizeUsd) * 1e6), feeUsdc: new BN(Math.round(Number(t.feeUsdc) * 1e6)), profitTargetBps: t.profitTargetBps, maxDrawdownBps: t.maxDrawdownBps,
   maxExposureBps: t.maxExposureBps, enabled: t.enabled, termsHash: [...Buffer.from(t.termsHash, 'hex')], version: t.version, bump: 255,
 });
 
@@ -106,7 +106,7 @@ export function market([symbol, name, category, subcategory, price, priceDecimal
     maxLeverage, closedMaxLeverage: ['Forex', 'Stocks'].includes(category) ? 8 : null,
     // What the exchange takes for a new position now: ETH's long room is small and its shorts are capped lower (the ticket's limits).
     maxLeverageLong: maxLeverage, maxLeverageShort: symbol === 'ETH' ? 10 : maxLeverage,
-    maxSizeLong: symbol === 'ETH' ? '2500' : String(volume * 0.02), maxSizeShort: String(volume * 0.013), minCollateralUsd: symbol === 'XAU' ? null : '1',
+    maxSizeLong: symbol === 'ETH' ? '500' : String(volume * 0.02), maxSizeShort: String(volume * 0.013), minCollateralUsd: symbol === 'XAU' ? null : '1',
     session: symbol === 'NVDA' ? 'closed' : 'open', ...(category === 'Stocks' ? { sessionNote: 'US regular market hours, Mon–Fri 9:30–16:00 New York time' } : {}),
     freshness: 'live', updatedAt: now,
   };
@@ -160,7 +160,7 @@ export function candles(m, interval) {
 
 // ---------- per-wallet accounts ----------
 const rules = (size, target) => ({
-  sizeUsd: String(size), lossAllowanceUsd: String(size * 0.05), floorUsd: String(size * 0.95), profitTargetUsd: target ? String(size * 0.08) : null,
+  sizeUsd: String(size), lossAllowanceUsd: String(size * 0.1), floorUsd: String(size * 0.9), profitTargetUsd: target ? String(size * 0.08) : null,
   maxExposureUsd: String(size), traderShareBps: 8000, drawdownType: 'static', includesOpenPnl: true, dailyLossLimit: null, timeLimit: null,
   termsHash: target === null ? null : 'a1b2c3d4'.repeat(8), version: target === null ? null : 1,
 });
@@ -181,26 +181,26 @@ function createWallet(state, wallet) {
   const w = {
     wallet, funded, evalActive, kyc: 'verified', orderSeq: 4, payoutSeq: 1, nextId: 1,
     accounts: [
-      summary({ id: `practice:${wallet}`, stage: 'practice', label: 'Practice account', shortId: 'PRACTICE', rules: rules(25_000, null), equity: '25000', allowanceRemaining: '1250', availableMargin: '1250', createdAt: now - 9 * DAY }),
-      summary({ id: evalActive, stage: 'evaluation', label: 'Evaluation 25K', shortId: short(evalActive), rules: rules(25_000, true), equity: '26185.25', realizedPnl: '992.73', unrealizedPnl: '192.52', allowanceRemaining: '2435.25', availableMargin: '2242.73', openNotional: '4600', targetProgressPct: 59.3, createdAt: now - 6 * DAY, evidence: { evaluation: evalActive, purchaseSignature: fakeSignature(`buy:${evalActive}`) } }),
-      summary({ id: evalFunded, stage: 'evaluation', status: 'passed', label: 'Evaluation 25K', shortId: short(evalFunded), rules: rules(25_000, true), equity: '27064.10', realizedPnl: '2064.10', allowanceRemaining: '3314.10', availableMargin: '3314.10', targetProgressPct: 103.2, createdAt: now - 30 * DAY, resolvedAt: now - 20 * DAY, evidence: { evaluation: evalFunded, purchaseSignature: fakeSignature(`buy:${evalFunded}`), resultSignature: fakeSignature(`result:${evalFunded}`) } }),
-      summary({ id: funded, stage: 'funded', label: 'Funded 25K', shortId: short(funded), rules: rules(25_000, null), equity: '25312.50', realizedPnl: '312.50', allowanceRemaining: '1562.50', availableMargin: '1562.50', eligiblePayout: '250', createdAt: now - 19 * DAY, activatedAt: now - 19 * DAY, evidence: { evaluation: evalFunded, funded, owner: fakeKey(`owner:${funded}`), activationSignature: fakeSignature(`activate:${funded}`) } }),
+      summary({ id: `practice:${wallet}`, stage: 'practice', label: 'Practice account', shortId: 'PRACTICE', rules: rules(1_000, null), equity: '1000', allowanceRemaining: '100', availableMargin: '100', createdAt: now - 9 * DAY }),
+      summary({ id: evalActive, stage: 'evaluation', label: 'Evaluation 1K', shortId: short(evalActive), rules: rules(1_000, true), equity: '1047.41', realizedPnl: '39.71', unrealizedPnl: '7.70', allowanceRemaining: '147.41', availableMargin: '78.38', openNotional: '184', targetProgressPct: 59.3, createdAt: now - 6 * DAY, evidence: { evaluation: evalActive, purchaseSignature: fakeSignature(`buy:${evalActive}`) } }),
+      summary({ id: evalFunded, stage: 'evaluation', status: 'passed', label: 'Evaluation 1K', shortId: short(evalFunded), rules: rules(1_000, true), equity: '1082.56', realizedPnl: '82.56', allowanceRemaining: '182.56', availableMargin: '182.56', targetProgressPct: 103.2, createdAt: now - 30 * DAY, resolvedAt: now - 20 * DAY, evidence: { evaluation: evalFunded, purchaseSignature: fakeSignature(`buy:${evalFunded}`), resultSignature: fakeSignature(`result:${evalFunded}`) } }),
+      summary({ id: funded, stage: 'funded', label: 'Funded 1K', shortId: short(funded), rules: rules(1_000, null), equity: '1012.50', realizedPnl: '12.50', allowanceRemaining: '112.50', availableMargin: '112.50', eligiblePayout: '10', createdAt: now - 19 * DAY, activatedAt: now - 19 * DAY, evidence: { evaluation: evalFunded, funded, owner: fakeKey(`owner:${funded}`), activationSignature: fakeSignature(`activate:${funded}`) } }),
     ],
     positions: { [evalActive]: [], [funded]: [], [`practice:${wallet}`]: [] },
     orders: { [evalActive]: [], [funded]: [], [`practice:${wallet}`]: [] },
     history: { [evalActive]: [], [funded]: [], [`practice:${wallet}`]: [] },
     payouts: [],
     notifications: [
-      { id: '6f0c5d0e-0000-4000-8000-000000000001', title: 'Order executed', body: 'SOL long · Evaluation 25K', href: '/trade/evaluation', ts: now - 12 * 60_000, read: false, kind: 'fill' },
-      { id: '6f0c5d0e-0000-4000-8000-000000000002', title: 'Payout paid', body: '250.00 USDC sent to your wallet', href: '/payouts', ts: now - 2 * DAY, read: true, kind: 'payout' },
+      { id: '6f0c5d0e-0000-4000-8000-000000000001', title: 'Order executed', body: 'SOL long · Evaluation 1K', href: '/trade/evaluation', ts: now - 12 * 60_000, read: false, kind: 'fill' },
+      { id: '6f0c5d0e-0000-4000-8000-000000000002', title: 'Payout paid', body: '10.00 USDC sent to your wallet', href: '/payouts', ts: now - 2 * DAY, read: true, kind: 'payout' },
     ],
   };
   const sol = state.markets.find(m => m.symbol === 'SOL');
-  w.positions[evalActive].push({ id: 'pos-sol', symbol: 'SOL', side: 'Long', sizeUsd: '4600', sizeTokens: '30.2944', collateralUsd: '1533.33', leverage: 3, entryPrice: '145.49', markPrice: sol.price, liquidationPrice: '98.12', unrealizedPnl: '192.52', pendingFeesUsd: '3.60', pendingBorrowUsd: '0.62', pendingFundingUsd: '0.22', closeFeeUsd: '2.76', closing: false, takeProfit: { price: '168', orderId: 'tp-sol', status: 'awaiting_price' }, stopLoss: null, openedAt: now - 5 * HOUR, venue: 'simulated' });
-  w.orders[evalActive].push({ id: 'ord-eth', symbol: 'ETH', side: 'Long', kind: 'Limit', isIncrease: true, sizeUsd: '3000', collateralUsd: '1000', triggerPrice: '2580', acceptablePrice: null, status: 'awaiting_price', createdAt: now - 3 * HOUR, updatedAt: now - 3 * HOUR });
+  w.positions[evalActive].push({ id: 'pos-sol', symbol: 'SOL', side: 'Long', sizeUsd: '184', sizeTokens: '1.2647', collateralUsd: '61.33', leverage: 3, entryPrice: '145.49', markPrice: sol.price, liquidationPrice: '98.12', unrealizedPnl: '7.70', pendingFeesUsd: '0.14', pendingBorrowUsd: '0.02', pendingFundingUsd: '0.01', closeFeeUsd: '0.11', closing: false, takeProfit: { price: '168', orderId: 'tp-sol', status: 'awaiting_price' }, stopLoss: null, openedAt: now - 5 * HOUR, venue: 'simulated' });
+  w.orders[evalActive].push({ id: 'ord-eth', symbol: 'ETH', side: 'Long', kind: 'Limit', isIncrease: true, sizeUsd: '120', collateralUsd: '40', triggerPrice: '2580', acceptablePrice: null, status: 'awaiting_price', createdAt: now - 3 * HOUR, updatedAt: now - 3 * HOUR });
   for (const [i, [symbol, side, pnl]] of [['BTC', 'Long', '73.25'], ['XAU', 'Short', '36.20'], ['ETH', 'Long', '-49.86']].entries())
-    w.history[evalActive].push({ id: `trade-${i}`, symbol, side, openedAt: now - (i + 2) * DAY, closedAt: now - (i + 1) * DAY, sizeUsd: '5200', entryPrice: '100', exitPrice: '101', ...(i ? costs('3.12', '2.60', '0', '0.31', '0.21', '-0.45') : costs('4.52', '2.60', '1.40', '0.31', '0.21', '-0.45')), netPnl: pnl, venue: 'simulated', signatures: [] });
-  w.history[funded].push({ id: 'funded-trade-0', symbol: 'BTC', side: 'Long', openedAt: now - 3 * DAY, closedAt: now - 2 * DAY, sizeUsd: '8200', entryPrice: '63842.5', exitPrice: '64412.8', ...costs('7.06', '4.10', '2.14', '0.50', '0.32', '0.18'), netPnl: '312.50', venue: 'exchange', signatures: [fakeSignature('funded-open'), fakeSignature('funded-close')] });
+    w.history[evalActive].push({ id: `trade-${i}`, symbol, side, openedAt: now - (i + 2) * DAY, closedAt: now - (i + 1) * DAY, sizeUsd: '208', entryPrice: '100', exitPrice: '101', ...(i ? costs('3.12', '2.60', '0', '0.31', '0.21', '-0.45') : costs('4.52', '2.60', '1.40', '0.31', '0.21', '-0.45')), netPnl: pnl, venue: 'simulated', signatures: [] });
+  w.history[funded].push({ id: 'funded-trade-0', symbol: 'BTC', side: 'Long', openedAt: now - 3 * DAY, closedAt: now - 2 * DAY, sizeUsd: '328', entryPrice: '63842.5', exitPrice: '64412.8', ...costs('0.28', '0.16', '0.09', '0.02', '0.01', '0.01'), netPnl: '12.50', venue: 'exchange', signatures: [fakeSignature('funded-open'), fakeSignature('funded-close')] });
   w.payouts.push(payout(w, 0, 'paid', now - 2 * DAY));
   w.payoutSeq = 1;
   // Referrals: three traders signed up with this wallet's code; the Props fees charged on the funded one's orders paid these
@@ -226,9 +226,9 @@ function createWallet(state, wallet) {
 function practiceFixture(state, w) {
   const id = `practice:${w.wallet}`, now = Date.now();
   const at = (symbol, factor) => { const m = state.markets.find(x => x.symbol === symbol); return (Number(m.price) * factor).toFixed(m.priceDecimals); };
-  const position = (symbol, entry, liq, takeProfit) => ({ id: `pos-practice-${symbol}`, symbol, side: 'Long', sizeUsd: '3000', sizeTokens: String(3000 / Number(at(symbol, entry))), collateralUsd: '600', leverage: 5, entryPrice: at(symbol, entry), markPrice: at(symbol, 1), liquidationPrice: at(symbol, liq), unrealizedPnl: '72.11', pendingFeesUsd: '1.80', pendingBorrowUsd: '0.40', pendingFundingUsd: '0.20', closeFeeUsd: '1.20', closing: false, takeProfit, stopLoss: null, openedAt: now - 2 * HOUR, venue: 'simulated' });
+  const position = (symbol, entry, liq, takeProfit) => ({ id: `pos-practice-${symbol}`, symbol, side: 'Long', sizeUsd: '120', sizeTokens: String(120 / Number(at(symbol, entry))), collateralUsd: '24', leverage: 5, entryPrice: at(symbol, entry), markPrice: at(symbol, 1), liquidationPrice: at(symbol, liq), unrealizedPnl: '2.88', pendingFeesUsd: '0.07', pendingBorrowUsd: '0.02', pendingFundingUsd: '0.01', closeFeeUsd: '0.05', closing: false, takeProfit, stopLoss: null, openedAt: now - 2 * HOUR, venue: 'simulated' });
   w.positions[id] = [position('SOL', 0.976, 0.95, { price: at('SOL', 1.4), orderId: 'tp-practice-SOL', status: 'awaiting_price' }), position('ETH', 0.99, 0.9, null)];
-  w.orders[id] = [{ id: 'ord-practice-SOL', symbol: 'SOL', side: 'Long', kind: 'Limit', isIncrease: true, sizeUsd: '1000', collateralUsd: '200', triggerPrice: at('SOL', 0.965), acceptablePrice: null, status: 'awaiting_price', createdAt: now - HOUR, updatedAt: now - HOUR }];
+  w.orders[id] = [{ id: 'ord-practice-SOL', symbol: 'SOL', side: 'Long', kind: 'Limit', isIncrease: true, sizeUsd: '40', collateralUsd: '8', triggerPrice: at('SOL', 0.965), acceptablePrice: null, status: 'awaiting_price', createdAt: now - HOUR, updatedAt: now - HOUR }];
   return id;
 }
 
@@ -259,17 +259,17 @@ function fundedAccount(w) {
   const noOrder = { order: PublicKey.default, slot: 0, orderType: { market: {} }, sizeUsd: new BN(0), collateral: new BN(0), placedByRisk: false };
   return {
     trader: new PublicKey(w.wallet), evaluation: evaluationPda(new PublicKey(w.wallet), 0),
-    terms: { sizeUsd: new BN(25_000_000_000), profitTargetBps: 800, maxDrawdownBps: 500, maxExposureBps: 10_000, traderShareBps: 8000, termsHash: Array(32).fill(1), tierVersion: 1 },
-    principal: new BN(1_250_000_000), status: { active: {} },
+    terms: { sizeUsd: new BN(1_000_000_000), profitTargetBps: 800, maxDrawdownBps: 1000, maxExposureBps: 10_000, traderShareBps: 8000, termsHash: Array(32).fill(1), tierVersion: 1 },
+    principal: new BN(100_000_000), status: { active: {} },
     slots: Array.from({ length: 8 }, (_, i) => w.slots?.[i] ?? free), orders: Array.from({ length: 8 }, (_, i) => w.tracked?.[i] ?? noOrder), orderSeq: new BN(w.orderSeq),
-    payoutsPaid: new BN(250_000_000), payoutSeq: w.payoutSeq, createdAt: new BN(0), lastSyncAt: new BN(0), bump: 255, ownerBump: 255,
+    payoutsPaid: new BN(10_000_000), payoutSeq: w.payoutSeq, createdAt: new BN(0), lastSyncAt: new BN(0), bump: 255, ownerBump: 255,
   };
 }
 
 function payout(w, seq, status, requestedAt) {
   return {
-    id: payoutPda(new PublicKey(w.funded), seq).toBase58(), account: w.funded, accountLabel: 'Funded 25K', seq, status,
-    balanceAtRequest: '1562.50', profit: '312.50', traderAmount: '250', vaultAmount: '62.50', networkFeeSol: status === 'paid' ? '0.000005' : null,
+    id: payoutPda(new PublicKey(w.funded), seq).toBase58(), account: w.funded, accountLabel: 'Funded 1K', seq, status,
+    balanceAtRequest: '112.50', profit: '12.50', traderAmount: '10', vaultAmount: '2.50', networkFeeSol: status === 'paid' ? '0.000005' : null,
     destination: w.wallet, requestedAt, resolvedAt: status === 'paid' ? requestedAt + HOUR : null,
     requestSignature: fakeSignature(`payout-request:${w.funded}:${seq}`), ...(status === 'paid' ? { paySignature: fakeSignature(`payout-pay:${w.funded}:${seq}`) } : {}),
   };
@@ -322,7 +322,7 @@ export async function startStub() {
       state.sent.push({ signature, name: decoded.name, data: decoded.data, wallet: w.wallet });
       if (decoded.name === 'buyEvaluation') {
         const id = evaluationPda(new PublicKey(w.wallet), decoded.data.index).toBase58();
-        later(1000, () => w.accounts.push(summary({ id, stage: 'evaluation', label: 'Evaluation 10K', shortId: `PT-${id.slice(0, 4)}…`, rules: rules(10_000, true), equity: '10000', allowanceRemaining: '500', availableMargin: '500', targetProgressPct: 0, createdAt: Date.now(), evidence: { evaluation: id, purchaseSignature: signature } })));
+        later(1000, () => w.accounts.push(summary({ id, stage: 'evaluation', label: 'Evaluation 1K', shortId: `PT-${id.slice(0, 4)}…`, rules: rules(1_000, true), equity: '1000', allowanceRemaining: '100', availableMargin: '100', targetProgressPct: 0, createdAt: Date.now(), evidence: { evaluation: id, purchaseSignature: signature } })));
       }
       if (decoded.name === 'openPosition' || decoded.name === 'closePosition') {
         const order = accountAt('gm_order'), position = accountAt('gm_position');
@@ -544,11 +544,11 @@ export async function startStub() {
         const now = Date.now();
         return send(res, 200, {
           programId: PROGRAM_ID, capitalVault: capitalVaultAddress().toBase58(), feeVault: feeVaultPda().toBase58(), solTreasury: fakeKey('sol-treasury'),
-          capitalUsdc: '48750', allocatedPrincipal: '1250', unallocated: '48750', feeVaultUsdc: '228', pendingPayouts: '0', fundedAccounts: 1, solTreasurySol: '4.5',
-          totals: { feesCollected: '377', payoutsPaid: '250', profitToVault: '62.5' },
-          series: Array.from({ length: 30 }, (_, i) => ({ ts: now - (29 - i) * DAY, capitalUsdc: String(i < 10 ? 40_000 : 50_000 - (i > 11 ? 1250 : 0)) })),
+          capitalUsdc: '49900', allocatedPrincipal: '100', unallocated: '49900', feeVaultUsdc: '228', pendingPayouts: '0', fundedAccounts: 1, solTreasurySol: '4.5',
+          totals: { feesCollected: '377', payoutsPaid: '10', profitToVault: '2.5' },
+          series: Array.from({ length: 30 }, (_, i) => ({ ts: now - (29 - i) * DAY, capitalUsdc: String(i < 10 ? 40_000 : 50_000 - (i > 11 ? 100 : 0)) })),
           ledger: [
-            { id: 'l1', event: 'Funding allocation', account: fakeKey('funded-ledger'), amountUsd: '1250', direction: 'out', ts: now - 19 * DAY, signature: fakeSignature('ledger-1') },
+            { id: 'l1', event: 'Funding allocation', account: fakeKey('funded-ledger'), amountUsd: '100', direction: 'out', ts: now - 19 * DAY, signature: fakeSignature('ledger-1') },
             { id: 'l2', event: 'Seed capital added', amountUsd: '10000', direction: 'in', ts: now - 20 * DAY, signature: fakeSignature('ledger-2') },
           ],
           freshness: 'live', updatedAt: now,
@@ -561,11 +561,11 @@ export async function startStub() {
         const owner = [...state.wallets.values()].find(x => x.funded === q);
         if (!owner) return send(res, 200, { ...base, kind: 'not_found', title: 'No record', items: [] });
         return send(res, 200, {
-          ...base, kind: 'funded', title: 'Funded 25K',
+          ...base, kind: 'funded', title: 'Funded 1K',
           items: [
-            { title: 'Evaluation purchased', description: '149 USDC fee paid to the fee vault.', state: 'confirmed', signature: fakeSignature(`buy:${evaluationPda(new PublicKey(owner.wallet), 0).toBase58()}`), slot: 311_000_001, ts: Date.now() - 30 * DAY, establishes: 'The wallet bought this evaluation under terms version 1.' },
+            { title: 'Evaluation purchased', description: '9.99 USDC fee paid to the fee vault.', state: 'confirmed', signature: fakeSignature(`buy:${evaluationPda(new PublicKey(owner.wallet), 0).toBase58()}`), slot: 311_000_001, ts: Date.now() - 30 * DAY, establishes: 'The wallet bought this evaluation under terms version 1.' },
             { title: 'Evaluation trades', description: 'Simulated fills, committed onchain as a hash when the evaluation ended.', state: 'simulated', ts: Date.now() - 20 * DAY, establishes: 'The fill list cannot be changed after the result was recorded. It does not prove the fills were at fair prices.' },
-            { title: 'Funded account activated', description: '1,250 USDC loss allowance posted from the capital vault.', state: 'confirmed', address: q, signature: fakeSignature(`activate:${q}`), slot: 311_500_000, ts: Date.now() - 19 * DAY, establishes: 'The vault posted exactly the loss allowance to the account.' },
+            { title: 'Funded account activated', description: '100 USDC loss allowance posted from the capital vault.', state: 'confirmed', address: q, signature: fakeSignature(`activate:${q}`), slot: 311_500_000, ts: Date.now() - 19 * DAY, establishes: 'The vault posted exactly the loss allowance to the account.' },
           ],
         });
       }
@@ -623,7 +623,7 @@ export async function startStub() {
           const flat = !(w.positions[id] ?? []).length && !(w.orders[id] ?? []).length;
           const pendingRequest = w.payouts.some(p => p.status === 'requested');
           const eligible = flat && !pendingRequest;
-          return send(res, 200, { account: id, eligible, reasons: eligible ? [] : [pendingRequest ? 'A payout request is already under review.' : 'Close every position and cancel working orders first.'], realizedProfit: '312.50', traderShare: '250', vaultShare: '62.50', minPayout: '50', flat, openPositions: (w.positions[id] ?? []).length, pendingOrders: (w.orders[id] ?? []).length });
+          return send(res, 200, { account: id, eligible, reasons: eligible ? [] : [pendingRequest ? 'A payout request is already under review.' : 'Close every position and cancel working orders first.'], realizedProfit: '12.50', traderShare: '10', vaultShare: '2.50', minPayout: '50', flat, openPositions: (w.positions[id] ?? []).length, pendingOrders: (w.orders[id] ?? []).length });
         }
         default: return notFound(res);
       }

@@ -61,7 +61,7 @@ async function aged(positionId: string, hours: number) {
 
 /** A 20x SOL position on the whole practice allowance, on the side that pays. */
 async function levered(u: User) {
-  const id = practiceOf(u);
+  const id = await t.practice(u);
   await base('SOL');
   await placed(u, id, { side: await payingSide() });
   await t.tick(t.md.scaled('SOL', 1, later()));
@@ -140,7 +140,7 @@ describe('scenario 5: fee accrual through a crash', () => {
   it('funding received is never credited: after six hours the receiving side shows no funding and its close realizes only costs', async () => {
     const [u, v] = [await t.user(), await t.user()];
     await base('SOL');
-    const [a, b] = [practiceOf(u), practiceOf(v)];
+    const [a, b] = await Promise.all([t.practice(u), t.practice(v)]);
     await placed(u, a, { side: 'Long', sizeUsd: '10000', collateralUsd: '500' });
     await placed(v, b, { side: 'Short', sizeUsd: '10000', collateralUsd: '500' });
     await t.tick(t.md.scaled('SOL', 1, later()));

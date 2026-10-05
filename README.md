@@ -28,7 +28,7 @@ flowchart LR
 
 - **Evaluation.** The trader pays the tier's fee in USDC to the program (`buy_evaluation`, one atomic transaction). The
   evaluation runs on the server's simulation engine, priced off the exchange's live prices with the exchange's own fee,
-  price-impact, borrowing, funding and liquidation model. Rules by default: loss allowance 5 % of the account size as a
+  price-impact, borrowing, funding and liquidation model. Rules by default: loss allowance 10 % of the account size as a
   static floor (open P&L and costs included), profit target 8 % net of costs, maximum exposure 1x the account size,
   per-market leverage caps. No daily loss limit, time limit or minimum days. The result and a Merkle root of the fill
   list are recorded onchain by the risk authority.
@@ -63,7 +63,7 @@ Revenue lines:
 
 | Line | Rule | Where it lands |
 |---|---|---|
-| Evaluation fee | per tier; defaults 10K / 79 USDC and 25K / 149 USDC enabled, 50K / 249 and 100K / 449 disabled by default (all admin-configurable onchain) | fee vault |
+| Evaluation fee | one tier: a 1,000 USD account for 9.99 USDC (tiers are admin-configurable onchain) | fee vault |
 | Profit share | 20 % of realized profit at each payout | capital vault |
 | Props order fee | 2 USD + 0.1 % (10 bps) of the order's size, per order, on every account stage; assessed when the order is placed, charged only when it executes, on the size it fills; never for cancelled orders, orders the exchange does not execute, liquidations or the forced close of a breached account | fee vault (funded); simulated on practice and evaluation accounts, where it lowers the virtual balance but is not revenue |
 | Referral rewards (a cost) | 10 % of the Props fee charged on a referred trader's funded orders; nothing on simulated fees, waived fees or charges on a breached account | paid by hand in USDC to identity-verified referrers |
@@ -77,7 +77,7 @@ Vault P&L = evaluation fees + order fees + 20 % of funded profits − allowances
 
 | Stage | Cost to the trader | What is simulated | What is real | Paid out |
 |---|---|---|---|---|
-| Practice | free | positions, fills, balance (25K virtual, reset any time) | prices, the exchange's fee and liquidation model, the Props fee (as a deduction only) | never |
+| Practice | free | positions, fills, balance (1,000 USD virtual with the same 10 % allowance, reset any time) | prices, the exchange's fee and liquidation model, the Props fee (as a deduction only) | never |
 | Evaluation | tier fee in USDC | positions, fills, balance | the fee payment, prices and cost model, the recorded result and trades root onchain | never |
 | Funded | nothing further; Props fee per executed order | nothing | USDC collateral, positions on the exchange, fees, payouts | 80 % of realized profit when flat, minimum 50 USDC |
 

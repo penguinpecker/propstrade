@@ -88,7 +88,7 @@ function recomputeRoot(list: Fill[]): string {
 describe('fills', () => {
   it('fills a practice market order on the first tick published after it, at the price GMTrade\'s model gives', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const seen = t.md.price('SOL')!; // the latest tick when the order is placed
     const { order, account } = await placed(u, id);
@@ -167,7 +167,7 @@ describe('fills', () => {
 
   it('closes a practice position on the first tick published after the close, an evaluation one after the keeper delay', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     const ev = await evaluation(u);
     const close = (account: string, position: string) =>
       u.post(`${path(account)}/positions/${position}/close`, { clientId: clientId(), percent: 100, slippageBps: 50 });
@@ -198,7 +198,7 @@ describe('fills', () => {
 
   it('never fills a limit set through the price on a tick older than the request, nor on the tick it was placed on', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const seen = t.md.price('SOL')!;
     const mid = toUnitPrice(seen.mid, 9);
@@ -216,7 +216,7 @@ describe('fills', () => {
 
   it('cancels a market order whose execution price is worse than its acceptable price', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const { order } = await placed(u, id, { slippageBps: 10 });
     await t.tick(t.md.scaled('SOL', 1.01, order.createdAt + 2_000));
@@ -229,7 +229,7 @@ describe('fills', () => {
 
   it('triggers limit orders with GMTrade\'s rule on both sides', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const mid = toUnitPrice(t.md.price('SOL')!.mid, 9);
     const long = await placed(u, id, { kind: 'Limit', triggerPrice: fromUnitPrice((mid * 99n) / 100n, 9) });
@@ -251,7 +251,7 @@ describe('fills', () => {
 
   it('arms take-profit and stop-loss when their order fills and closes positions with them on both sides', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const mid = toUnitPrice(t.md.price('SOL')!.mid, 9);
     const price = (pct: bigint) => fromUnitPrice((mid * pct) / 100n, 9);
@@ -305,7 +305,7 @@ describe('fills', () => {
 describe('fees over time', () => {
   it('charges the borrowing and funding GMTrade accrues while a position is open, realized when it closes', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const rates = model.marketStatus(await input('SOL', units(t.md.price('SOL')!, 'SOL')));
     const long = rates.borrowingRatePerSecondForLong >= rates.borrowingRatePerSecondForShort;
@@ -355,7 +355,7 @@ describe('fees over time', () => {
 describe('liquidation', () => {
   it('liquidates exactly where GMTrade\'s model does, and never loses more than the collateral', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     await placed(u, id);
     await t.tick(t.md.scaled('SOL', 1, later()));
@@ -411,7 +411,7 @@ describe('liquidation', () => {
 
   it('applies GMTrade\'s closed-market liquidation factor, read from the real closed NVDA Market account', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     t.md.closed.set('NVDA', false); // the same market while open
     await base('NVDA');
     await placed(u, id, { symbol: 'NVDA', sizeUsd: '8000', collateralUsd: '1000' }); // 8x: NVDA's limit
@@ -434,7 +434,7 @@ describe('liquidation', () => {
 describe('sessions and limits', () => {
   it('refuses opens, closes and protection while the market is closed and executes nothing until it reopens', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     const closed = await place(u, id, { symbol: 'NVDA', sizeUsd: '1000', collateralUsd: '200' });
     expect([closed.statusCode, closed.json().error.code]).toEqual([409, 'market_closed']);
 
@@ -467,7 +467,7 @@ describe('sessions and limits', () => {
 
   it('takes no orders and decides nothing on a price the feed stopped updating', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     await placed(u, id, { sizeUsd: '25000', collateralUsd: '1250' });
     await t.tick(t.md.scaled('SOL', 1, later()));
@@ -483,7 +483,7 @@ describe('sessions and limits', () => {
 
   it('enforces per-market leverage, available margin, total exposure and GMTrade\'s own limits', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const reject = async (body: Partial<SimOrderRequest>) => (await place(u, id, body)).json().error as { code: string; message: string };
     expect(await reject({ sizeUsd: '26000', collateralUsd: '1000' })).toEqual({ code: 'order_rejected', message: 'Leverage 26.00x is above the 25x limit for longs on SOL' });
@@ -506,6 +506,7 @@ describe('sessions and limits', () => {
   it('lets practice trade every listed market and evaluations only allowlisted ones; an unlisted market is unknown', async () => {
     const u = await t.user();
     const ev = await evaluation(u);
+    await t.practice(u);
     await base('BTC');
     const btc = t.md.market('BTC')!;
     t.md.setRow('BTC', { tradable: false, unavailableReason: 'Not available for funded trading' });
@@ -524,7 +525,7 @@ describe('sessions and limits', () => {
 describe('exchange limits', () => {
   it('refuses an increase the exchange would not accept on that side right now, naming the market, side and limit', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const sol = t.md.market('SOL')!;
     const reject = async (body: Partial<SimOrderRequest>) => {
@@ -547,7 +548,7 @@ describe('exchange limits', () => {
 
   it('cancels a pending increase the exchange no longer accepts when it would fill, with the same reason', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const sol = t.md.market('SOL')!;
     const { order } = await placed(u, id, { sizeUsd: '10000', collateralUsd: '500' });
@@ -566,7 +567,7 @@ describe('exchange limits', () => {
 
   it("words the exchange's own refusals of an order within the row's limits: the minimum margin counts after fees, and its leverage limit", async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const sol = t.md.market('SOL')!;
     const reject = async (body: Partial<SimOrderRequest>) => {
@@ -588,7 +589,7 @@ describe('exchange limits', () => {
 
   it('cancels a pending increase the exchange refuses when it would fill, in the same plain words', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const { order } = await placed(u, id, { sizeUsd: '25', collateralUsd: '1.02' });
     // The fill price is 2% wide: a long bought at the ask and valued at the bid is down $0.50, below the $1 minimum.
@@ -680,9 +681,9 @@ describe('account rules', () => {
     expect((await place(u, ev)).json().error.code).toBe('account_inactive');
   });
 
-  it('warns near the limit, breaches a practice account at the floor, and resets it into a fresh one', async () => {
+  it('warns near the limit, breaches a practice account at the floor, and resets it into a fresh one of the current size', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u); // opened under the old 25,000 / 1,250 rules: it keeps them until the reset
     await base('SOL');
     await placed(u, id, { sizeUsd: '25000', collateralUsd: '1250' });
     await t.tick(t.md.scaled('SOL', 1, later()));
@@ -698,23 +699,25 @@ describe('account rules', () => {
 
     const reset = await u.post('/v1/practice/reset');
     expect(reset.statusCode, reset.body).toBe(200);
-    expect(reset.json()).toMatchObject({ id, status: 'active', equity: '25000', realizedPnl: '0', availableMargin: '1250', resolvedAt: null });
+    expect(reset.json()).toMatchObject({ id, status: 'active', equity: '1000', realizedPnl: '0', availableMargin: '100', resolvedAt: null });
+    expect(reset.json().rules).toMatchObject({ sizeUsd: '1000', lossAllowanceUsd: '100', floorUsd: '900', maxExposureUsd: '1000' });
     expect(await t.sim.history(u.wallet, id)).toEqual([]);
     expect(await fills(u, id)).toEqual([]);
     const archived = await t.db.select().from(accounts).where(like(accounts.id, `${id}:%`));
     expect(archived).toHaveLength(1);
-    expect(archived[0]).toMatchObject({ status: 'breached', realizedPnl: '-1250.000000', wallet: u.wallet });
+    expect(archived[0]).toMatchObject({ status: 'breached', realizedPnl: '-1250.000000', sizeUsd: '25000.000000', wallet: u.wallet });
     expect(await t.db.select().from(simFills).where(eq(simFills.accountId, archived[0]!.id))).toHaveLength(2);
     expect((await t.sim.list(u.wallet))!.map((a) => a.id)).toEqual([id]);
     await base('SOL');
-    expect((await place(u, id)).statusCode).toBe(200);
+    expect((await place(u, id, { sizeUsd: '1000', collateralUsd: '100' })).statusCode, 'the whole fresh account').toBe(200);
+    expect((await place(u, id, { sizeUsd: '1000', collateralUsd: '100' })).statusCode, 'nothing beyond its 1,000 USD exposure').toBe(422);
   });
 });
 
 describe('requests', () => {
   it('is idempotent per client id', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const body = { clientId: clientId(), sizeUsd: '1000', collateralUsd: '100' };
     const [a, b] = [await placed(u, id, body), await placed(u, id, body)];
@@ -734,7 +737,7 @@ describe('requests', () => {
 
   it('cancels pending orders and the protection placed with them', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const mid = toUnitPrice(t.md.price('SOL')!.mid, 9);
     const { order } = await placed(u, id, { kind: 'Limit', triggerPrice: fromUnitPrice(mid / 2n, 9), takeProfit: fromUnitPrice(mid, 9) });
@@ -749,6 +752,7 @@ describe('requests', () => {
 
   it('keeps every wallet to its own accounts', async () => {
     const [a, b] = [await t.user(), await t.user()];
+    await Promise.all([t.practice(a), t.practice(b)]);
     const ev = await evaluation(a);
     await base('SOL');
     const { order } = await placed(a, practiceOf(a));

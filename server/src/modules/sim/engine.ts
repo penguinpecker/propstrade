@@ -47,7 +47,7 @@ import {
   unitOf, usd, usdText, withinAcceptable,
 } from './model.ts';
 
-const PRACTICE = { sizeUsd: '25000', lossAllowanceUsd: '1250', maxExposureBps: 10_000 } as const;
+const PRACTICE = { sizeUsd: '1000', lossAllowanceUsd: '100', maxExposureBps: 10_000 } as const; // mirrors the 1K tier: 10% allowance
 const MARKET_ORDER_TTL_MS = 30 * 60_000; // GMTrade store request_expiration
 const SNAPSHOT_MS = 5 * 60_000;
 const PASS_MS = 1_000;
@@ -294,7 +294,7 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
     if (!created) return;
     await db.insert(equitySnapshots).values({ accountId: created.id, ts: now, equity: PRACTICE.sizeUsd, realizedPnl: '0', unrealizedPnl: '0' });
     await db.insert(accountEvents).values({
-      accountId: created.id, type: 'account', title: 'Practice account opened', detail: '25,000 USD of simulated capital',
+      accountId: created.id, type: 'account', title: 'Practice account opened', detail: '1,000 USD of simulated capital',
       status: 'confirmed', simulated: true, ts: now,
     });
   }
@@ -348,9 +348,13 @@ export function createEngine({ db, log, marketdata: md, publish, notify, fillDel
       for (const table of [simPositions, simOrders, simFills, closedTrades, equitySnapshots, accountEvents]) {
         await tx.update(table).set({ accountId: archive }).where(eq(table.accountId, id));
       }
-      await tx.update(accounts).set({ status: 'active', realizedPnl: '0', platformFeesUsd: '0', createdAt: now, resolvedAt: null, updatedAt: now }).where(eq(accounts.id, id));
-      await tx.insert(equitySnapshots).values({ accountId: id, ts: now, equity: account.sizeUsd, realizedPnl: '0', unrealizedPnl: '0' });
-      await event(tx, id, 'account', 'Practice account reset', 'A fresh 25,000 USD practice account; the previous one is archived', { ts: now });
+      // The fresh account takes the current practice size: one opened under older rules moves to them here.
+      await tx.update(accounts).set({
+        status: 'active', realizedPnl: '0', platformFeesUsd: '0', sizeUsd: PRACTICE.sizeUsd, lossAllowanceUsd: PRACTICE.lossAllowanceUsd,
+        maxExposureBps: PRACTICE.maxExposureBps, createdAt: now, resolvedAt: null, updatedAt: now,
+      }).where(eq(accounts.id, id));
+      await tx.insert(equitySnapshots).values({ accountId: id, ts: now, equity: PRACTICE.sizeUsd, realizedPnl: '0', unrealizedPnl: '0' });
+      await event(tx, id, 'account', 'Practice account reset', 'A fresh 1,000 USD practice account; the previous one is archived', { ts: now });
       fx.onCommit.push(() => lastSnapshot.delete(id));
       fx.changed = true;
     });

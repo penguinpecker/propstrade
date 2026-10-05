@@ -68,7 +68,7 @@ async function evaluation(u: User) {
 describe('scenario 2: reports that repeat a second or go backwards', () => {
   it('an armed stop loss ignores an older report and a same-second report through it, and fills on the next second\'s', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const stop = priceAt('SOL', 970n);
     await placed(u, id, { stopLoss: stop });
@@ -92,7 +92,7 @@ describe('scenario 2: reports that repeat a second or go backwards', () => {
 
   it('an order placed between two same-second reports fills on the next second\'s report at its price', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     const seenAt = later();
     await t.tick(t.md.scaled('SOL', 1, seenAt));
     const { order } = await placed(u, id);
@@ -107,7 +107,7 @@ describe('scenario 2: reports that repeat a second or go backwards', () => {
   it('the engine itself would liquidate on a backwards report under 20 s old: it relies on the feed\'s monotonic filter, which drops such a report', async () => {
     // The harness delivers whatever is pushed; production marketdata reads prices through KeeperFeed's PriceBook.
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const lastAt = later();
     await placed(u, id, { sizeUsd: '25000', collateralUsd: '1250' });
@@ -127,7 +127,7 @@ describe('scenario 2: reports that repeat a second or go backwards', () => {
 
   it('never liquidates twice: two concurrent rules passes and the report\'s own fill step write one liquidation and one notice', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     await placed(u, id, { sizeUsd: '25000', collateralUsd: '1250', stopLoss: priceAt('SOL', 970n) });
     await t.tick(t.md.scaled('SOL', 1, later()));
@@ -169,7 +169,7 @@ describe('scenario 3: a feed stale for minutes, then a jump', () => {
 
   it('a wide report that spans both protective triggers fills exactly one of them: the one on the side of the quote GMTrade reads', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const [tp, sl] = [priceAt('SOL', 1050n), priceAt('SOL', 970n)];
     await placed(u, id, { takeProfit: tp, stopLoss: sl });
@@ -183,7 +183,7 @@ describe('scenario 3: a feed stale for minutes, then a jump', () => {
     expect(Number(list[1]!.realizedPnl)).toBeLessThan(-390); // −4% on 10,000 and the fees
 
     const v = await t.user();
-    const vid = practiceOf(v);
+    const vid = await t.practice(v);
     await base('SOL');
     await placed(v, vid, { side: 'Short', takeProfit: priceAt('SOL', 950n), stopLoss: priceAt('SOL', 1030n) });
     await t.tick(t.md.scaled('SOL', 1, later()));

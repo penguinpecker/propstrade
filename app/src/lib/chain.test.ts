@@ -26,8 +26,8 @@ const computeLimit = (tx: VersionedTransaction) => {
 const fake = (methods: Record<string, unknown>) => methods as unknown as Connection;
 /** The Props fee rate the trader reviewed: $0.50 + 7 bps. */
 const rate = { feeUsdc: 500_000n, feeBps: 7 };
-/** The stub's funded account: 25K terms at 100% exposure, a $25,000 cap. */
-const CAP = 25_000n * 10n ** 20n;
+/** The stub's funded account: 1K terms at 100% exposure, a $1,000 cap. */
+const CAP = 1_000n * 10n ** 20n;
 const maxFee = (ix: { data: { args: { maxFee: { toString(): string } } } }) => BigInt(ix.data.args.maxFee.toString());
 
 describe('funded transactions', () => {
@@ -125,7 +125,7 @@ describe('funded transactions', () => {
     expect(maxFee(increase!)).toBe(orderFee(rate, usdToGm('1234.5')));
     expect(maxFee(increase!)).toBe(1_364_150n); // $0.50 + 7 bps of $1,234.50
     // A take profit or stop loss closes whatever the position has grown to by then, never more than the cap.
-    expect([tp, sl].map(ix => maxFee(ix!))).toEqual([18_000_000n, 18_000_000n]); // $0.50 + 7 bps of $25,000
+    expect([tp, sl].map(ix => maxFee(ix!))).toEqual([1_200_000n, 1_200_000n]); // $0.50 + 7 bps of $1,000
     const close = await prepareClose(connection, key.publicKey, { funded: w.funded, slippageBps: 50, positions: [{ market: btc, isLong: true, markPrice: '64482', sizeUsd: 1000, percent: 50 }, { market: marketRef('SOL'), isLong: true, markPrice: '150', sizeUsd: 1000, percent: 100 }], rate });
     expect(decode(close.tx).map(maxFee)).toEqual([orderFee(rate, usdToGm('500')), orderFee(rate, CLOSE_ALL, CAP)]);
     // A moved take profit is re-assessed at the current rate: it carries its maximum again.
@@ -134,7 +134,7 @@ describe('funded transactions', () => {
     w.slots = [{ marketToken: market, gmPosition: gmPositionPda(ownerPda(new PublicKey(w.funded)), market, true), isLong: true, collateral: new BN(1), sizeUsd: new BN(1), pendingUsd: new BN(0), lastSync: new BN(0) }];
     w.tracked = [{ order, slot: 0, orderType: { takeProfit: {} }, sizeUsd: new BN(CLOSE_ALL.toString()), collateral: new BN(0), placedByRisk: false }];
     const moved = await prepareProtection(connection, key.publicKey, { funded: w.funded, market: btc, isLong: true, takeProfit: { order: order.toBase58(), price: '71000' }, stopLoss: { order: null, price: '59000' }, rate });
-    expect(decode(moved.tx).map(ix => [ix.name, maxFee(ix)])).toEqual([['updateOrder', 18_000_000n], ['setProtection', 18_000_000n]]);
+    expect(decode(moved.tx).map(ix => [ix.name, maxFee(ix)])).toEqual([['updateOrder', 1_200_000n], ['setProtection', 1_200_000n]]);
     w.slots = w.tracked = undefined;
   });
 
@@ -217,28 +217,28 @@ describe('the market an order goes to', () => {
 });
 
 describe('evaluation purchase', () => {
-  const [tier10k, tier25k] = TIERS;
+  const [tier1k] = TIERS;
   it('uses the profile\'s next evaluation index and counts only the new evaluation\'s rent when the profile exists', async () => {
     const key = Keypair.generate();
     stub.walletData(key.publicKey.toBase58()); // fixture profile with evaluationCount 2
-    const p = await prepareEvaluation(connection, key.publicKey, tier10k);
+    const p = await prepareEvaluation(connection, key.publicKey, tier1k);
     const [buy] = decode(p.tx);
     expect(buy!.name).toBe('buyEvaluation');
-    expect({ ...buy!.data, expectedFeeUsdc: BigInt(buy!.data.expectedFeeUsdc.toString()) }).toEqual({ tierId: 1, index: 2, expectedFeeUsdc: 79_000_000n, expectedTierVersion: 1 });
+    expect({ ...buy!.data, expectedFeeUsdc: BigInt(buy!.data.expectedFeeUsdc.toString()) }).toEqual({ tierId: 1, index: 2, expectedFeeUsdc: 9_990_000n, expectedTierVersion: 1 });
     expect(p.rentLamports).toBe((128 + 164) * 6960);
   });
 
   it('adds the trader profile\'s rent for a first purchase', async () => {
-    const p = await prepareEvaluation(connection, Keypair.generate().publicKey, tier25k);
-    expect(decode(p.tx)[0]!.data).toMatchObject({ tierId: 2, index: 0, expectedTierVersion: 1 });
+    const p = await prepareEvaluation(connection, Keypair.generate().publicKey, tier1k);
+    expect(decode(p.tx)[0]!.data).toMatchObject({ tierId: 1, index: 0, expectedTierVersion: 1 });
     expect(p.rentLamports).toBe((128 + 164) * 6960 + (128 + 86) * 6960);
   });
 
   it('builds nothing when the fee or terms the trader reviewed differ from the tier account the program charges', async () => {
     const trader = Keypair.generate().publicKey;
-    for (const reviewed of [{ ...tier10k, feeUsdc: '49' }, { ...tier10k, version: 2 }, { ...tier10k, termsHash: 'ff'.repeat(32) }])
+    for (const reviewed of [{ ...tier1k, feeUsdc: '49' }, { ...tier1k, version: 2 }, { ...tier1k, termsHash: 'ff'.repeat(32) }])
       await expect(prepareEvaluation(connection, trader, reviewed)).rejects.toThrow('changed since the page loaded');
-    await expect(prepareEvaluation(connection, trader, { ...tier10k, id: 9 })).rejects.toThrow('not available onchain');
+    await expect(prepareEvaluation(connection, trader, { ...tier1k, id: 9 })).rejects.toThrow('not available onchain');
   });
 });
 

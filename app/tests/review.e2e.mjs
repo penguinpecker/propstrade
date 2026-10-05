@@ -38,7 +38,7 @@ try {
   const ticket = page.locator('.order-panel');
   const opens = () => state.sent.filter(s => s.name === 'openPosition' && s.wallet === key.address);
   await page.goto(`${siteUrl}/#/trade/funded`);
-  await page.getByText('Funded 25K').first().waitFor();
+  await page.getByText('Funded 1K').first().waitFor();
   await page.getByText('Live data connected').waitFor({ timeout: 10_000 });
 
   await check('a slippage the dialog refuses to save is not used for a funded order', async () => {
@@ -49,7 +49,7 @@ try {
     await page.getByLabel('Maximum slippage (%)').fill('50');
     assert.ok(await page.getByRole('button', { name: 'Save tolerance' }).isDisabled(), 'the dialog accepts 50%');
     await page.keyboard.press('Escape'); // or the dialog's close button: both keep the typed value
-    await page.getByLabel('Order size in USD').fill('1000');
+    await page.getByLabel('Order size in USD').fill('200');
     await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
     await ticket.getByText('BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
     const [open] = opens();
@@ -61,7 +61,7 @@ try {
   await check('an open position can still be closed while another funded order awaits execution', async () => {
     const row = page.locator('.position-table tbody tr').filter({ hasText: 'BTC / USD' });
     await row.waitFor();
-    await page.getByLabel('Order size in USD').fill('500');
+    await page.getByLabel('Order size in USD').fill('100');
     await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
     await ticket.getByRole('button', { name: 'Awaiting execution…' }).waitFor({ timeout: 10_000 });
     assert.ok(await row.getByRole('button', { name: /Close/ }).isEnabled(), 'the Close button is disabled until the other order finishes (up to 90 s)');

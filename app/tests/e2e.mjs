@@ -695,8 +695,8 @@ try {
 
     await check('simulated order: submit, fill at the next price, then close', async () => {
       await page.goto(`${siteUrl}/#/trade/evaluation`);
-      await page.getByText('Evaluation 25K').first().waitFor();
-      await page.getByLabel('Order size in USD').fill('1000');
+      await page.getByText('Evaluation 1K').first().waitFor();
+      await page.getByLabel('Order size in USD').fill('200');
       await page.locator('.order-panel').getByRole('button', { name: 'Buy / Long BTC' }).click();
       await page.locator('.order-panel').getByText('Awaiting execution…').waitFor();
       await page.locator('.order-panel').getByText('Simulated order filled at the live price.').waitFor({ timeout: 10_000 });
@@ -728,15 +728,15 @@ try {
       w.payouts.find(p => p.status === 'requested').status = 'paid';
       const before = { signatures: state.signatures, simulations: state.simulations };
       await page.goto(`${siteUrl}/#/trade/funded`);
-      await page.getByText('Funded 25K').first().waitFor();
-      await page.getByLabel('Order size in USD').fill('1000');
+      await page.getByText('Funded 1K').first().waitFor();
+      await page.getByLabel('Order size in USD').fill('200');
       await page.locator('.order-panel').getByRole('button', { name: 'Buy / Long BTC' }).click();
       await page.locator('.order-panel').getByText('BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
       const [open] = sent('openPosition');
       assert.ok(open, 'no open_position transaction reached the RPC');
       assert.equal(open.data.args.isLong, true);
-      assert.equal(BigInt(open.data.args.sizeDeltaUsd.toString()), 1000n * 10n ** 20n);
-      assert.equal(BigInt(open.data.args.collateral.toString()), 200_000_000n); // 1,000 USD at 5×
+      assert.equal(BigInt(open.data.args.sizeDeltaUsd.toString()), 200n * 10n ** 20n);
+      assert.equal(BigInt(open.data.args.collateral.toString()), 40_000_000n); // 200 USD at 5×
       assert.ok(BigInt(open.data.args.acceptablePrice.toString()) > 0n);
       assert.equal(state.signatures, before.signatures + 1, 'one wallet signature');
       assert.ok(state.simulations > before.simulations, 'not simulated before signing');
@@ -757,7 +757,7 @@ try {
 
     await check('funded close: a partial close that executed gives the row its Close button back (the request over, the server says whether it is still closing)', async () => {
       const row = page.locator('.position-table tbody tr').filter({ hasText: 'BTC / USD' });
-      await row.locator('small', { hasText: /^\$2,000\.00 · / }).waitFor(); // both opens above went into one $2,000 position
+      await row.locator('small', { hasText: /^\$400\.00 · / }).waitFor(); // both opens above went into one $400 position
       await row.getByRole('button', { name: /Close/ }).click();
       const dialog = page.getByRole('dialog');
       await dialog.getByRole('slider').fill('50');
@@ -766,30 +766,29 @@ try {
       await page.getByText('Close executed by the exchange.').waitFor({ timeout: 10_000 });
       await row.getByRole('button', { name: /Close/ }).waitFor({ timeout: 5_000 }); // still here at half its size, and closable again
       assert.equal(await row.getByRole('status').count(), 0, 'the row still reads Closing…');
-      await row.locator('small', { hasText: /^\$1,000\.00 · / }).waitFor();
+      await row.locator('small', { hasText: /^\$200\.00 · / }).waitFor();
       const [close] = sent('closePosition');
-      assert.equal(BigInt(close.data.args.sizeDeltaUsd.toString()), 1000n * 10n ** 20n, 'half of the $2,000 position');
+      assert.equal(BigInt(close.data.args.sizeDeltaUsd.toString()), 200n * 10n ** 20n, 'half of the $400 position');
     });
 
     await check('checkout: exact fee, buy_evaluation signed and sent, payment tracked until the evaluation is ready', async () => {
       await page.goto(`${siteUrl}/#/get-funded`);
-      await page.getByRole('button', { name: '$10K' }).click();
-      assert.ok(await page.getByRole('button', { name: '$50K' }).isDisabled(), 'a disabled tier can be chosen');
-      await page.getByText('50K and 100K are unavailable for now.').waitFor();
-      await page.getByRole('button', { name: 'Choose 10K account' }).click();
+      await page.getByRole('button', { name: '$1K' }).click();
+      await main.getByText('$9.99').waitFor(); // the fee with its cents, never rounded to $10
+      await page.getByRole('button', { name: 'Choose 1K account' }).click();
       await page.getByRole('button', { name: 'Continue with this account' }).click();
       await page.goto(`${siteUrl}/#/checkout`);
-      await main.getByText('79.00 USDC').first().waitFor();
+      await main.getByText('9.99 USDC').first().waitFor();
       await main.getByText('0.000005 SOL').waitFor(); // network fee of the built transaction
       await main.getByText('0.002032 SOL').waitFor(); // Evaluation account rent (the profile already exists)
       await page.getByLabel(/I have read the evaluation rules/).check();
-      await page.getByRole('button', { name: 'Pay 79.00 USDC' }).click();
+      await page.getByRole('button', { name: 'Pay 9.99 USDC' }).click();
       await page.waitForURL('**/#/payment?sig=*');
       await main.getByText('Payment complete').waitFor({ timeout: 15_000 });
-      assert.deepEqual(sent('buyEvaluation').map(s => ({ ...s.data, expectedFeeUsdc: s.data.expectedFeeUsdc.toString() })), [{ tierId: 1, index: 2, expectedFeeUsdc: '79000000', expectedTierVersion: 1 }]);
+      assert.deepEqual(sent('buyEvaluation').map(s => ({ ...s.data, expectedFeeUsdc: s.data.expectedFeeUsdc.toString() })), [{ tierId: 1, index: 2, expectedFeeUsdc: '9990000', expectedTierVersion: 1 }]);
       await main.getByRole('button', { name: 'Open your evaluation' }).click();
       await page.waitForURL('**/#/trade/evaluation');
-      await page.locator('.account-strip').getByText('Evaluation 10K').waitFor();
+      await page.locator('.account-strip').getByText('Evaluation 1K').waitFor();
     });
 
     await check('verify: search finds evidence, the record dialog shows what it establishes, unknown and invalid ids are explained', async () => {
@@ -812,8 +811,8 @@ try {
 
     await check('vault: capital, allocation, series and the onchain ledger', async () => {
       await page.goto(`${siteUrl}/#/vault`);
-      await main.getByText('$48,750.00').first().waitFor();
-      await main.getByText('2.5%').waitFor(); // 1,250 allocated of 50,000
+      await main.getByText('$49,900.00').first().waitFor();
+      await main.getByText('0.2%').waitFor(); // 100 allocated of 50,000
       await main.locator('.line-graph').waitFor();
       await main.getByText('Seed capital added').waitFor();
       await main.getByRole('button', { name: 'Inspect Seed capital added' }).click();
@@ -883,7 +882,7 @@ try {
       await landed(p, '#/trade/practice');
       await p.context.close();
       // 3. Practice + evaluation: the evaluation wins; practice + funded (the saved stage evaluation): funded wins.
-      p = await open(keys[8], 'funded', '/trade', 'Evaluation 25K');
+      p = await open(keys[8], 'funded', '/trade', 'Evaluation 1K');
       await landed(p, '#/trade/evaluation');
       // 4. The switcher still picks the practice account while an evaluation exists, and the choice stays.
       await strip(p.page).click();
@@ -891,7 +890,7 @@ try {
       await strip(p.page).getByText('Practice account', { exact: true }).waitFor();
       await landed(p, '#/trade/practice');
       await p.context.close();
-      p = await open(keys[9], 'evaluation', '/trade', 'Funded 25K');
+      p = await open(keys[9], 'evaluation', '/trade', 'Funded 1K');
       await landed(p, '#/trade/funded');
       await p.context.close();
       // 5. Signed out: the saved stage stays, with the strip asking for a wallet.
@@ -968,8 +967,8 @@ try {
 
     await check('activity: rows from the API and a CSV export of exactly the shown rows', async () => {
       await page.goto(`${siteUrl}/#/trade/evaluation`);
-      await page.getByRole('button', { name: /Evaluation 10K/ }).first().click();
-      await page.getByRole('dialog').getByRole('button', { name: /Evaluation 25K/ }).click();
+      await page.getByRole('button', { name: /Evaluation 1K/ }).first().click(); // the strip: the evaluation bought at checkout
+      await page.getByRole('dialog').getByRole('button').filter({ hasText: `PT-${w.evalActive.slice(0, 4)}` }).click(); // the fixture's active evaluation
       await page.goto(`${siteUrl}/#/activity`);
       await page.getByRole('tab', { name: 'Trades' }).click();
       const rows = main.locator('tbody tr');
@@ -982,17 +981,17 @@ try {
     });
 
     await check('positions show where the exchange liquidates them and the margin backing them', async () => {
-      await page.goto(`${siteUrl}/#/trade/evaluation`); // Evaluation 25K, selected by the activity check
+      await page.goto(`${siteUrl}/#/trade/evaluation`); // the fixture's active Evaluation 1K, selected by the activity check
       const row = page.locator('.position-table tbody tr').filter({ hasText: 'SOL / USD' });
       await row.waitFor();
       assert.deepEqual(await page.locator('.position-table thead th').allTextContents(), ['Market / side', 'Position size', 'Entry price', 'Mark price', 'Liq. price', 'Unrealized P&L', 'Fees accrued', 'TP / SL', '']);
       await row.getByText('98.12', { exact: true }).waitFor();
-      await row.getByText('$4,600.00 · $1,533.33 margin').waitFor();
+      await row.getByText('$184.00 · $61.33 margin').waitFor();
       // Accrued costs with their split as the hover, and the market's rates for the position's side as the market cell's
       // hover: the row keeps two lines (touch screens, without hover, show the rates under the leverage badge).
       const fees = row.locator('td[title^="Borrowing"]');
-      assert.equal(await fees.innerText(), '$3.60');
-      assert.equal(await fees.getAttribute('title'), "Borrowing $0.62 · funding $0.22 · close fee $2.76: settled at this position's next fill");
+      assert.equal(await fees.innerText(), '$0.14');
+      assert.equal(await fees.getAttribute('title'), "Borrowing $0.02 · funding $0.01 · close fee $0.11: settled at this position's next fill");
       assert.equal(await row.locator('td').first().getByRole('button').getAttribute('title'), 'Long rates per hour: funding +0.0012% · borrow 0.0008%\nFunding: Longs pay when positive, shorts when negative. Per 8h: L +0.0096% · S -0.0072% · per year: L +10.5120% · S -7.8840%');
       assert.equal(await row.locator('.side-rate').count(), 0, 'the rates line is back in the desktop row');
     });
@@ -1011,7 +1010,7 @@ try {
         await page.goto(`${siteUrl}/#/trade/evaluation`);
         await showMarket('BTC');
         for (const clear of await ticket.getByRole('button', { name: 'Clear' }).all()) if (await clear.isEnabled()) await clear.click(); // TP/SL empty
-        await page.getByLabel('Order size in USD').fill('1000');
+        await page.getByLabel('Order size in USD').fill('200');
         await ticket.getByRole('button', { name: '5×', exact: true }).click();
         await page.waitForFunction(() => /\$\d/.test(document.querySelector('.order-summary')?.innerText.split('Liq. price')[1] ?? ''), null, { timeout: 5_000 });
         assert.deepEqual(await ticket.locator('.order-summary .data-row > span').allInnerTexts(), ['Liq. price', 'Margin', 'Fees']);
@@ -1077,18 +1076,19 @@ try {
       const ticket = page.locator('.order-panel');
       const rowValue = label => ticket.locator('.execution-details .data-row', { has: page.locator('span', { hasText: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`) }) }).locator('strong').innerText();
       await openDetails();
-      await page.getByLabel('Order size in USD').fill('1000');
+      await page.getByLabel('Order size in USD').fill('200');
+      await expectEventually(async () => await rowValue('Order value') === '$200.00', 'the quote rows follow the typed size (quoted 300 ms after the last keystroke)');
       await ticket.getByText('5× leverage').waitFor();
-      assert.equal(await rowValue('Margin'), '$200.00');
+      assert.equal(await rowValue('Margin'), '$40.00');
       await ticket.getByRole('button', { name: '10×', exact: true }).click();
       await ticket.getByText('10× leverage').waitFor();
-      assert.equal(await rowValue('Margin'), '$100.00');
+      assert.equal(await rowValue('Margin'), '$20.00');
       assert.equal(await page.getByRole('dialog').count(), 0, 'a dialog opened');
       await ticket.getByLabel('Leverage', { exact: true }).focus(); // the slider: the arrow keys step it by 1× (Crypto allows up to 25×)
       for (let i = 0; i < 10; i += 1) await page.keyboard.press('ArrowRight');
       await ticket.getByText('20× leverage').waitFor();
       assert.equal(await ticket.getByLabel('Leverage', { exact: true }).getAttribute('aria-valuetext'), '20×');
-      assert.equal(await rowValue('Margin'), '$50.00');
+      assert.equal(await rowValue('Margin'), '$10.00');
       // Page Up / Page Down move to the next label's value either way (not a tenth of the track, stuck at 1×).
       for (const [key, shown] of [['PageDown', '10×'], ['PageDown', '5×'], ['Home', '1×'], ['PageUp', '2×'], ['PageUp', '5×'], ['End', '25×'], ['PageDown', '10×'], ['PageUp', '25×']]) {
         await page.keyboard.press(key);
@@ -1102,8 +1102,8 @@ try {
       const rows = await ticket.locator('.execution-details .data-row span').allInnerTexts();
       for (const label of ['Liq. price', 'Margin', 'Fees', 'Estimated entry', 'Order value', 'Open fee', 'Est. close fee', 'Price impact', 'Borrow + funding · long', 'Slippage tolerance']) assert.ok(rows.some(r => r.startsWith(label)), `missing row ${label}: ${rows.join(' | ')}`);
       await ticket.getByText('Props.trade charges no fee per order').waitFor();
-      assert.equal(await rowValue('Fees'), '$1.20'); // round trip: 6 bps a leg on $1,000 in the stub
-      assert.match(await rowValue('Borrow + funding · long'), /^≈ \$0\.02\/h · \$0\.48\/day$/); // (0.0012 + 0.0008)% of $1,000
+      assert.equal(await rowValue('Fees'), '$0.24'); // round trip: 6 bps a leg on $200 in the stub
+      assert.match(await rowValue('Borrow + funding · long'), /^≈ \$0\.00\/h · \$0\.10\/day$/); // (0.0012 + 0.0008)% of $200: $0.004 an hour
       assert.equal(await ticket.getByText('Network fee').count(), 0, 'a simulated ticket shows a network fee');
     });
 
@@ -1111,23 +1111,26 @@ try {
       const ticket = page.locator('.order-panel');
       const guides = () => page.locator('.chart-section .price-chart').getAttribute('data-guides');
       await ticket.getByRole('button', { name: '5×', exact: true }).click();
+      await page.getByLabel('Order size in USD').fill('200');
+      await openDetails();
+      await ticket.locator('.execution-details .data-row').filter({ hasText: /^Order value/ }).getByText('$200.00').waitFor(); // the estimates use this size's quote
       await ticket.getByRole('button', { name: '+2%', exact: true }).first().click(); // take profit, 2% above the entry for a long
       const tpPct = ticket.getByLabel('Take profit distance in percent');
       assert.equal(await tpPct.inputValue(), '2.00');
       const tpEst = ticket.locator('.protection-leg').first().locator('.leg-head b');
-      await tpEst.filter({ hasText: /^Est\. P&L ≈ \+\$1[0-9]\.\d\d \(\+\d+\.\d% on margin\)$/ }).waitFor(); // $20 of price move less $1.20 of fees and the impact
+      await tpEst.filter({ hasText: /^Est\. P&L ≈ \+\$3\.\d\d \(\+\d+\.\d% on margin\)$/ }).waitFor(); // $4 of price move on $200 less $0.24 of fees and the impact
       await ticket.getByLabel('Stop loss distance in percent').fill('-1');
       const sl = ticket.getByLabel('Stop loss price');
       assert.ok(Math.abs(Number(await sl.inputValue()) / 64600 - 0.99) < 0.0002, `stop loss price ${await sl.inputValue()}`);
       const slEst = ticket.locator('.protection-leg').nth(1).locator('.leg-head b');
-      await slEst.filter({ hasText: /^Est\. P&L ≈ −\$1[0-9]\.\d\d/ }).waitFor();
+      await slEst.filter({ hasText: /^Est\. P&L ≈ −\$2\.\d\d/ }).waitFor();
       assert.equal(await ticket.getByText(/correct sides of the current price/).count(), 0);
-      await expectEventually(async () => /^TP ≈ \+\$1\d\|SL ≈ −\$1\d$/.test(await guides()), `chart guides: ${await guides()}`);
+      await expectEventually(async () => /^TP ≈ \+\$4\|SL ≈ −\$2$/.test(await guides()), `chart guides: ${await guides()}`); // the chip rounds +$3.5x
       // The same prices on a short are on the wrong sides: the copy says so, the order cannot be sent, the estimates flip sign.
       await ticket.getByRole('button', { name: 'Sell / Short' }).click();
       await ticket.getByText('Set take profit and stop loss on the correct sides of the current price.').waitFor();
-      await tpEst.filter({ hasText: /^Est\. P&L ≈ −\$2[0-9]\.\d\d/ }).waitFor();
-      await slEst.filter({ hasText: /^Est\. P&L ≈ \+\$[0-9]\.\d\d/ }).waitFor();
+      await tpEst.filter({ hasText: /^Est\. P&L ≈ −\$4\.\d\d/ }).waitFor();
+      await slEst.filter({ hasText: /^Est\. P&L ≈ \+\$1\.\d\d/ }).waitFor();
       assert.ok(await ticket.getByRole('button', { name: 'Sell / Short BTC' }).isDisabled());
       await ticket.getByRole('button', { name: 'Clear' }).first().click();
       await ticket.getByRole('button', { name: 'Clear' }).nth(1).click();
@@ -1137,22 +1140,22 @@ try {
 
     await check('ticket: the side\'s leverage and size limits from the market row cap both sliders, a size or margin outside them is explained right above the order button and blocks the order, and a stream update moves them', async () => {
       await page.goto(`${siteUrl}/#/trade/evaluation`);
-      await showMarket('ETH'); // the fixture's ETH: $2,500 of room for a new long, shorts up to 10×
+      await showMarket('ETH'); // the fixture's ETH: $500 of room for a new long, shorts up to 10×
       const ticket = page.locator('.order-panel');
       const size = page.getByLabel('Order size in USD');
       const submit = ticket.getByRole('button', { name: /^Buy \/ Long ETH/ });
       const side = name => ticket.getByRole('button', { name, exact: true });
       await ticket.getByRole('button', { name: 'Max 25×' }).click();
       await ticket.getByText('25× leverage').waitFor();
-      await size.fill('3000');
-      await ticket.getByText('Up to $2,500 can be opened long on ETH right now.').waitFor();
+      await size.fill('600'); // above the exchange's room, within the account's buying power ($696 at 25×)
+      await ticket.getByText('Up to $500 can be opened long on ETH right now.').waitFor();
       assert.ok(await submit.isDisabled(), 'an order above the exchange\'s room can be sent');
       // The message sits right above the order button, in the ticket's error style.
       assert.ok(await ticket.locator('p.field-error').evaluate(e => e.checkVisibility() && e.nextElementSibling?.classList.contains('order-submit')), 'the message is not right above the order button');
       // The size slider's 100% is the room (below this account's buying power), and the size input's max.
       await ticket.getByRole('button', { name: '100%', exact: true }).click();
-      assert.equal(await size.inputValue(), '2500');
-      assert.equal(await size.getAttribute('max'), '2500');
+      assert.equal(await size.inputValue(), '500');
+      assert.equal(await size.getAttribute('max'), '500');
       assert.equal(await ticket.getByText(/can be opened long/).count(), 0);
       await submit.and(page.locator(':enabled')).waitFor();
       await size.fill('4'); // $0.16 of margin at 25×, below the exchange's $1 minimum
@@ -1169,7 +1172,7 @@ try {
       await ticket.getByText(/after fees/).waitFor({ state: 'detached' });
       await submit.and(page.locator(':enabled')).waitFor();
       // Shorts are capped at 10×: switching side clamps the chosen leverage, and switching back keeps the clamp.
-      await size.fill('1000');
+      await size.fill('400');
       await side('Sell / Short').click();
       await ticket.getByText('10× leverage').waitFor();
       await ticket.getByRole('button', { name: 'Max 10×' }).waitFor();
@@ -1179,10 +1182,10 @@ try {
       await ticket.getByText('10× leverage').waitFor();
       // A market row from the stream lowers the long limits: the ticket follows at once.
       const eth = state.markets.find(m => m.symbol === 'ETH');
-      stub.publish({ type: 'market', market: { ...eth, maxLeverageLong: 8, maxSizeLong: '800' } });
+      stub.publish({ type: 'market', market: { ...eth, maxLeverageLong: 8, maxSizeLong: '300' } });
       await ticket.getByRole('button', { name: 'Max 8×' }).waitFor();
       await ticket.getByText('8× leverage').waitFor();
-      await ticket.getByText('Up to $800 can be opened long on ETH right now.').waitFor();
+      await ticket.getByText('Up to $300 can be opened long on ETH right now.').waitFor();
       assert.ok(await submit.isDisabled());
       // No room left on the side: the ticket says so as the server does, not "Up to $0".
       stub.publish({ type: 'market', market: { ...eth, maxSizeLong: '0.4' } });
@@ -1194,10 +1197,10 @@ try {
       // A funded ticket takes the same limits.
       await page.goto(`${siteUrl}/#/trade/funded`);
       await ticket.locator('.badge').getByText('Funded', { exact: true }).waitFor();
-      await size.fill('3000');
-      await ticket.getByText('Up to $2,500 can be opened long on ETH right now.').waitFor();
+      await size.fill('600');
+      await ticket.getByText('Up to $500 can be opened long on ETH right now.').waitFor();
       assert.ok(await submit.isDisabled(), 'a funded order above the exchange\'s room can be sent');
-      await size.fill('1000');
+      await size.fill('200');
       await showMarket('BTC');
       await ticket.getByRole('button', { name: '5×', exact: true }).click();
     });
@@ -1210,7 +1213,7 @@ try {
         try {
           if (width < 800) await page.locator('.mobile-trade-action').click();
           const ticket = page.locator('.order-panel');
-          await page.getByLabel('Order size in USD').fill('1000');
+          await page.getByLabel('Order size in USD').fill('200');
           for (const [name, row] of [['Leverage', ticket.locator('.leverage-presets')], ['Percentage of buying power', ticket.locator('.size-presets:not(.leverage-presets)')]]) {
             const slider = ticket.getByLabel(name, { exact: true });
             const labels = row.getByRole('button');
@@ -1397,7 +1400,7 @@ try {
       try {
         await page.goto(`${siteUrl}/#/trade/evaluation`);
         await showMarket('SOL');
-        await page.getByLabel('Order size in USD').fill('1000');
+        await page.getByLabel('Order size in USD').fill('200');
         await page.locator('.order-panel').getByRole('button', { name: 'Buy / Long SOL' }).click();
         await page.locator('.order-panel').getByText('Simulated order filled at the live price.').waitFor({ timeout: 10_000 });
         const rows = page.locator('.position-table tbody tr').filter({ hasText: 'SOL / USD' });
@@ -1485,7 +1488,7 @@ try {
       await section('Accounts').getByText('Funded', { exact: true }).waitFor();
       assert.equal(await results.locator('.trader-address code').innerText(), keys[0].address);
       assert.equal(await section('Accounts').locator('tbody tr').count(), w.accounts.length);
-      await section('Open positions').locator('tbody tr').filter({ hasText: 'SOL / USD' }).getByText('+$192.52').waitFor();
+      await section('Open positions').locator('tbody tr').filter({ hasText: 'SOL / USD' }).getByText('+$7.70').waitFor();
       await section('Recent trades').locator('tbody tr').filter({ hasText: 'XAU / USD' }).getByText('+$36.20').waitFor();
       assert.equal(await section('Payouts').locator('tbody tr').filter({ hasText: 'Paid' }).count(), w.payouts.length);
       await section('Payouts').getByRole('link', { name: 'Transaction' }).first().waitFor(); // the fixture payout paid onchain
@@ -1625,7 +1628,7 @@ try {
         await showMarket('BTC');
         await openDetails();
         await clearLegs(ticket);
-        await page.getByLabel('Order size in USD').fill('1000');
+        await page.getByLabel('Order size in USD').fill('200');
         await ticket.getByRole('button', { name: '5×', exact: true }).click();
         await ticket.getByLabel('Take profit price').fill('70000');
         await page.waitForFunction(() => /\$\d/.test(document.querySelector('.order-summary')?.innerText.split('Fees')[1] ?? ''), null, { timeout: 5_000 });
@@ -1638,37 +1641,37 @@ try {
         assert.equal(await ticket.getByText(/^Props fee/).count(), 0, 'a Props fee shows at rate 0');
         assert.match(await breakdown(), /while open · No Props\.trade fee per order$/);
         const powerOff = await ticket.locator('.size-equivalent b').innerText();
-        // $0.50 + 2 bps: on $1,000 that is $0.70 an order; a take profit's maximum is the rate on the 25K account's $25,000 cap.
+        // $0.50 + 2 bps: on $200 that is $0.54 an order; a take profit's maximum is the rate on the 1K account's $1,000 cap.
         setFee('0.5', 2);
         await page.reload();
         await fillTicket();
         const propsRow = details.locator('.data-row').filter({ hasText: /^Props fee/ });
-        await propsRow.getByText('$0.70').waitFor();
+        await propsRow.getByText('$0.54').waitFor();
         assert.match(await propsRow.locator('span').innerText(), /^Props fee · \$0\.50 \+ 0\.02%\s*Simulated · charged only if the order executes$/);
         assert.equal(await details.getByText('Props.trade charges no fee per order').count(), 0);
         const help = await breakdown();
-        assert.match(help, /^Open fee \$0\.60 · Est\. close fee \$0\.60 · Props fee \$0\.70 to open, \$0\.70 to close · Borrow \+ funding/);
+        assert.match(help, /^Open fee \$0\.12 · Est\. close fee \$0\.12 · Props fee \$0\.54 to open, \$0\.54 to close · Borrow \+ funding/);
         const parts = [...help.matchAll(/\$([\d.]+)(?![\d.]|\/h)/g)].map(m => Number(m[1])); // open, close, Props to open, Props to close (not the hourly carry)
         const feesRow = Number((await ticket.locator('.order-summary .data-row').nth(2).locator('strong').innerText()).replace(/[$,]/g, ''));
         assert.equal(parts.length, 4, help);
         assert.ok(Math.abs(parts.reduce((a, b) => a + b, 0) - feesRow) < 0.011, `${parts.join(' + ')} is not the Fees row ${feesRow}: ${help}`);
-        assert.equal(feesRow, 2.6);
-        await ticket.getByText('Props fee ≈ $0.70, at most $5.50: charged only if it executes, on the size it closes.').waitFor();
+        assert.equal(feesRow, 1.32);
+        await ticket.getByText('Props fee ≈ $0.54, at most $0.70: charged only if it executes, on the size it closes.').waitFor();
         await ticket.getByLabel('Stop loss price').fill('60000');
-        await ticket.getByText('Props fee ≈ $0.70 each, at most $5.50: only the one that executes is charged, on the size it closes.').waitFor();
-        // 2,242.73 available at 5×: (2,242.73 − 0.50) × 5 / (1 + 0.0002 × 5) ≈ $11,200 instead of $11,214.
-        assert.deepEqual([powerOff, await ticket.locator('.size-equivalent b').innerText()], ['$11,214', '$11,200']);
+        await ticket.getByText('Props fee ≈ $0.54 each, at most $0.70: only the one that executes is charged, on the size it closes.').waitFor();
+        // 78.38 available at 5×: (78.38 − 0.50) × 5 / (1 + 0.0002 × 5) ≈ $389 instead of $392.
+        assert.deepEqual([powerOff, await ticket.locator('.size-equivalent b').innerText()], ['$392', '$389']);
         assert.deepEqual(await brandLeaks(page), []);
         await ticket.getByRole('button', { name: 'View account rules' }).click();
         await page.getByRole('dialog').locator('.data-row').filter({ hasText: 'Props fee per executed order' }).getByText('$0.50 + 0.02%').waitFor();
         await page.keyboard.press('Escape');
         await clearLegs(ticket);
-        // A take profit closes the whole position on its side: adding $1,000 to the $4,600 SOL long, it is assessed on
-        // $5,600 ($0.50 + 2 bps = $1.62), not on the new $1,000 alone.
+        // A take profit closes the whole position on its side: adding $200 to the $184 SOL long, it is assessed on
+        // $384 ($0.50 + 2 bps = $0.58), not on the new $200 alone.
         await showMarket('SOL');
-        await page.getByLabel('Order size in USD').fill('1000');
+        await page.getByLabel('Order size in USD').fill('200');
         await ticket.getByLabel('Take profit price').fill('500');
-        await ticket.getByText('Props fee ≈ $1.62, at most $5.50: charged only if it executes, on the size it closes.').waitFor();
+        await ticket.getByText('Props fee ≈ $0.58, at most $0.70: charged only if it executes, on the size it closes.').waitFor();
         await clearLegs(ticket);
         // A pending order shows its fee (a decrease its maximum), and the fees held off the margin are named.
         const evaluation = w.accounts.find(a => a.id === w.evalActive);
@@ -1697,13 +1700,13 @@ try {
         await showMarket('BTC');
         await openDetails();
         await clearLegs(ticket);
-        await page.getByLabel('Order size in USD').fill('1000');
+        await page.getByLabel('Order size in USD').fill('200');
         await ticket.getByRole('button', { name: '5×', exact: true }).click();
         const propsRow = ticket.locator('.order-details .data-row').filter({ hasText: /^Props fee · \$0\.50 \+ 0\.02%/ });
-        await propsRow.getByText('$0.70').waitFor();
+        await propsRow.getByText('$0.54').waitFor();
         assert.equal(await ticket.getByText('Props.trade charges no fee per order').count(), 0);
-        assert.match(await ticket.getByRole('button', { name: 'Fee breakdown' }).getAttribute('title'), /Props fee \$0\.70 to open, \$0\.70 to close/);
-        assert.equal(await ticket.locator('.size-equivalent b').innerText(), '$11,200', 'buying power leaves the fee beside the margin');
+        assert.match(await ticket.getByRole('button', { name: 'Fee breakdown' }).getAttribute('title'), /Props fee \$0\.54 to open, \$0\.54 to close/);
+        assert.equal(await ticket.locator('.size-equivalent b').innerText(), '$389', 'buying power leaves the fee beside the margin');
         await ticket.getByRole('button', { name: 'View account rules' }).click();
         await page.getByRole('dialog').locator('.data-row').filter({ hasText: 'Props fee per executed order' }).getByText('$0.50 + 0.02%').waitFor();
         await page.keyboard.press('Escape');
@@ -1722,15 +1725,15 @@ try {
         await page.reload();
         await showMarket('BTC');
         await clearLegs(ticket);
-        await page.getByLabel('Order size in USD').fill('1000');
+        await page.getByLabel('Order size in USD').fill('200');
         await ticket.getByRole('button', { name: '5×', exact: true }).click();
         await ticket.getByLabel('Take profit price').fill('70000');
         await ticket.getByLabel('Stop loss price').fill('60000');
         const opens = sent('openPosition').length, protections = sent('setProtection').length;
         await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
         await ticket.getByText('BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
-        assert.equal(maxFees(sent('openPosition')[opens]), '700000'); // $0.50 + 2 bps of $1,000
-        assert.deepEqual(sent('setProtection').slice(protections).map(maxFees), ['5500000', '5500000']); // $0.50 + 2 bps of the $25,000 cap
+        assert.equal(maxFees(sent('openPosition')[opens]), '540000'); // $0.50 + 2 bps of $200
+        assert.deepEqual(sent('setProtection').slice(protections).map(maxFees), ['700000', '700000']); // $0.50 + 2 bps of the $1,000 cap
         // The rate goes up after the page read it: the program refuses the open before the wallet is asked, and the order
         // waits for the trader, who sees the new fee (the ticket re-quotes) and places it again.
         await clearLegs(ticket);
@@ -1741,11 +1744,11 @@ try {
         assert.equal(state.signatures, signatures, 'the wallet was asked to sign an order the trader has not seen the fee of');
         assert.equal(sent('openPosition').length, opens + 1, 'the open was sent again at the new fee without a review');
         await openDetails();
-        await ticket.locator('.order-details .data-row').filter({ hasText: /^Props fee · \$0\.60 \+ 0\.03%/ }).getByText('$0.90').waitFor(); // re-quoted
+        await ticket.locator('.order-details .data-row').filter({ hasText: /^Props fee · \$0\.60 \+ 0\.03%/ }).getByText('$0.66').waitFor(); // re-quoted
         await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
         await ticket.getByText('BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
         assert.equal(state.signatures, signatures + 1);
-        assert.deepEqual(sent('openPosition').slice(opens + 1).map(maxFees), ['900000']); // $0.60 + 3 bps of $1,000
+        assert.deepEqual(sent('openPosition').slice(opens + 1).map(maxFees), ['660000']); // $0.60 + 3 bps of $200
         // The server still serves the old rate (its copy lags the program's): the refusal names the program's own rate,
         // which the ticket shows and the next order signs.
         const stale = route => route.fulfill({ json: { orderFeeUsd: '0.6', orderFeeBps: 3, orderFeeSource: 'program' } });
@@ -1753,10 +1756,10 @@ try {
         setFee('0.7', 4);
         await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
         await ticket.getByRole('alert').getByText('The Props fee changed to $0.70 + 0.04%: review the new fee and place the order again.').waitFor({ timeout: 10_000 });
-        await ticket.locator('.order-details .data-row').filter({ hasText: /^Props fee · \$0\.70 \+ 0\.04%/ }).getByText('$1.10').waitFor();
+        await ticket.locator('.order-details .data-row').filter({ hasText: /^Props fee · \$0\.70 \+ 0\.04%/ }).getByText('$0.78').waitFor();
         await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
         await ticket.getByText('BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
-        assert.deepEqual(sent('openPosition').slice(opens + 2).map(maxFees), ['1100000']); // $0.70 + 4 bps of $1,000
+        assert.deepEqual(sent('openPosition').slice(opens + 2).map(maxFees), ['780000']); // $0.70 + 4 bps of $200
         await page.unroute('**/v1/order-fee', stale);
         // A close only reduces risk: refused at a raised rate, it is signed again at once at the new fee, with a notice.
         setFee('0.8', 5);
@@ -1777,7 +1780,7 @@ try {
     await check('Props fee: a funded open signs at most the fee its quote showed, so a quote older than the rate is refused rather than charge more than the ticket showed', async () => {
       const ticket = page.locator('.order-panel');
       const quotes = /\/v1\/quote\?/;
-      const older = async route => { const response = await route.fetch(); await route.fulfill({ response, json: { ...(await response.json()), platformFeeUsd: '1.1', maxFeeMicro: '1100000' } }); };
+      const older = async route => { const response = await route.fetch(); await route.fulfill({ response, json: { ...(await response.json()), platformFeeUsd: '0.7', maxFeeMicro: '700000' } }); };
       try {
         setFee('0.8', 5);
         await page.route(quotes, older);
@@ -1786,20 +1789,21 @@ try {
         await showMarket('BTC');
         await openDetails();
         await clearLegs(ticket);
-        await page.getByLabel('Order size in USD').fill('1000');
+        await page.getByLabel('Order size in USD').fill('200');
         await ticket.getByRole('button', { name: '5×', exact: true }).click();
         const propsRow = ticket.locator('.order-details .data-row').filter({ hasText: /^Props fee · \$0\.80 \+ 0\.05%/ });
-        await propsRow.getByText('$1.10').waitFor(); // the quote's fee, older than the rate's $1.30
+        await propsRow.getByText('$0.70').waitFor(); // the quote's fee, older than the rate's $0.90
+        await ticket.locator('.order-details .data-row').filter({ hasText: /^Order value/ }).getByText('$200.00').waitFor(); // the quote priced this size (300 ms after the last keystroke): the open signs its fee
         const [signatures, opens] = [state.signatures, sent('openPosition').length];
         await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
         await ticket.getByRole('alert').getByText('The Props fee changed to $0.80 + 0.05%: review the new fee and place the order again.').waitFor({ timeout: 10_000 });
         assert.deepEqual([state.signatures, sent('openPosition').length], [signatures, opens], 'the open signed more than the fee the ticket showed');
         await page.unroute(quotes, older);
-        await page.getByLabel('Order size in USD').fill('1001'); // quoted again: $0.80 + 5 bps of $1,001
-        await propsRow.getByText('$1.30').waitFor();
+        await page.getByLabel('Order size in USD').fill('201'); // quoted again: $0.80 + 5 bps of $201
+        await propsRow.getByText('$0.90').waitFor();
         await ticket.getByRole('button', { name: 'Buy / Long BTC' }).click();
         await ticket.getByText('BTC long executed on the exchange.').waitFor({ timeout: 10_000 });
-        assert.deepEqual(sent('openPosition').slice(opens).map(s => s.data.args.maxFee.toString()), ['1300500']);
+        assert.deepEqual(sent('openPosition').slice(opens).map(s => s.data.args.maxFee.toString()), ['900500']);
       } finally {
         await page.unroute(quotes, older);
         setFee('0', 0);

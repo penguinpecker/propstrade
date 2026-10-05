@@ -134,9 +134,14 @@ try {
   });
 
   await step('3 practice market order fills at a live price, then closes', async () => {
+    // The exchange's pools are the counterparty on every stage: when SOL longs have no room (capacity 0, as on 2026-10-05) the
+    // practice order goes short instead; a $100 order fits the 1,000 USD practice account either way.
+    const sol = await (await fetch(`${stack.apiUrl}/v1/markets/SOL`)).json();
+    const side = Number(sol.maxSizeLong ?? 0) >= 100 ? 'Buy / Long' : 'Sell / Short';
+    assert.ok(side === 'Buy / Long' || Number(sol.maxSizeShort ?? 0) >= 100, 'SOL has no room either way for a $100 order right now');
     await selectMarket('SOL', 'practice');
     await page.getByLabel('Order size in USD').fill('100');
-    await page.locator('.order-panel').getByRole('button', { name: 'Buy / Long SOL' }).click();
+    await page.locator('.order-panel').getByRole('button', { name: `${side} SOL` }).click();
     await page.locator('.order-panel').getByText('Simulated order filled at the live price.').waitFor({ timeout: 20_000 });
     const [fill] = await sql`select f.price from sim_fills f where f.account_id = ${`practice:${trader.address}`} and f.is_increase`;
     const live = await (await fetch(`${stack.apiUrl}/v1/markets/SOL`)).json();
@@ -154,7 +159,7 @@ try {
   await step('4 checkout: buy_evaluation confirms, the indexer creates the evaluation, the UI shows it', async () => {
     const feeVaultBefore = await tokenBalance(feeVaultPda());
     await page.goto(`${app}/#/get-funded`);
-    await page.getByRole('button', { name: '$1K' }).click();
+    await page.getByRole('button', { name: '$1K' }).last().click(); // tiers are listed by id: the spec 1K tier (id 1) then the 1,000 USD rehearsal tier (TEST_TIER, id 9), both labelled by size
     await page.getByRole('button', { name: 'Choose 1K account' }).click();
     await page.getByRole('button', { name: 'Continue with this account' }).click();
     await page.goto(`${app}/#/checkout`);
@@ -244,18 +249,18 @@ try {
     await page.getByRole('button', { name: 'Activate funded account' }).click();
     await page.waitForURL('**/#/account/funded', { timeout: 60_000 }); // the page opens the new account once it is indexed
     await main.getByRole('heading', { name: 'Funded 1K' }).waitFor();
-    const principal = toMicro(TEST_TIER.sizeUsd) * 500n / 10_000n;
+    const principal = toMicro(TEST_TIER.sizeUsd) * 1000n / 10_000n; // the 10 % allowance every tier shares (upsert-tiers.ts RULES)
     const account = await vault.fetchFunded(funded);
     assert.equal(enumName(account.status), 'active');
     assert.equal(BigInt(account.principal.toString()), principal);
     assert.equal(await tokenBalance(ownerUsdcAddress(funded)), principal);
     assert.equal(capitalBefore - await tokenBalance(capitalVaultAddress()), principal);
     const [row] = await sql`select principal, status, activation_signature from funded_accounts where address = ${funded.toBase58()}`;
-    assert.equal(Number(row.principal), 50);
+    assert.equal(Number(row.principal), 100);
     assert.equal(row.status, 'active');
     facts.activationSignature = row.activation_signature;
     const stat = label => main.locator('.stat').filter({ has: page.locator('.stat-label', { hasText: label }) }).locator('strong');
-    await stat('Remaining loss allowance').getByText('$50.00').waitFor();
+    await stat('Remaining loss allowance').getByText('$100.00').waitFor(); // the 10 % allowance of the 1,000 USD test tier
     await stat('Account equity').getByText('$1,000.00').waitFor();
     // In the funded stage the markets page shows the onchain allowlist: DOGE has no MarketConfig, SOL does.
     await page.goto(`${app}/#/markets`);
@@ -268,11 +273,13 @@ try {
 
   await step('8 funded open with TP + SL creates real GMTrade orders; canceled through the UI, the keeper and indexer clear them', async () => {
     await selectMarket('SOL', 'funded');
-    const price = Number((await (await fetch(`${stack.apiUrl}/v1/markets/SOL`)).json()).price);
+    const sol = await (await fetch(`${stack.apiUrl}/v1/markets/SOL`)).json();
+    const price = Number(sol.price);
+    const long = Number(sol.maxSizeLong ?? 0) >= 50; // the side with room on the exchange (SOL longs had none on 2026-10-05)
     await page.getByLabel('Order size in USD').fill('50');
-    await page.locator('.order-panel').getByLabel('Take profit price').fill(String(Math.round(price * 1.2)));
-    await page.locator('.order-panel').getByLabel('Stop loss price').fill(String(Math.round(price * 0.8)));
-    await page.locator('.order-panel').getByRole('button', { name: 'Buy / Long SOL' }).click();
+    await page.locator('.order-panel').getByLabel('Take profit price').fill(String(Math.round(price * (long ? 1.2 : 0.8))));
+    await page.locator('.order-panel').getByLabel('Stop loss price').fill(String(Math.round(price * (long ? 0.8 : 1.2))));
+    await page.locator('.order-panel').getByRole('button', { name: `${long ? 'Buy / Long' : 'Sell / Short'} SOL` }).click();
     await page.locator('.order-panel').getByRole('status').getByText('Awaiting execution…').waitFor({ timeout: 30_000 });
     const tracked = (await vault.fetchFunded(funded)).orders.filter(o => !o.order.equals(PublicKey.default));
     assert.equal(tracked.length, 3, 'open + take profit + stop loss tracked onchain');
@@ -284,14 +291,14 @@ try {
     await page.getByRole('tab', { name: /Open orders/ }).click();
     const orderRows = page.locator('.positions-panel tbody tr');
     await until('three open orders in the UI', async () => (await orderRows.count()) === 3);
-    await orderRows.filter({ hasText: 'Long · Market' }).getByRole('button', { name: 'Cancel' }).click();
+    await orderRows.filter({ hasText: `${long ? 'Long' : 'Short'} · Market` }).getByRole('button', { name: 'Cancel' }).click();
     await page.getByText('Order canceled on the exchange.').waitFor({ timeout: 30_000 });
     await page.locator('.order-panel').getByRole('status').waitFor({ state: 'detached' }); // the ticket stops waiting for an execution
     assert.equal(await page.locator('.order-panel').getByText(/did not execute/).count(), 0, 'a trader cancel is not reported as a venue failure');
     await until('every tracked order to be gone onchain', async () => (await vault.fetchFunded(funded)).orders.every(o => o.order.equals(PublicKey.default)), 90_000);
     for (const o of tracked) assert.equal(await connection.getAccountInfo(o.order), null, `order ${o.order.toBase58()} closed`);
     await main.getByText('No working orders').waitFor({ timeout: 30_000 });
-    assert.equal(await tokenBalance(ownerUsdcAddress(funded)), toMicro('50'), 'the collateral came back to the owner account');
+    assert.equal(await tokenBalance(ownerUsdcAddress(funded)), toMicro('100'), 'the collateral came back to the owner account'); // the whole 100 USDC principal
     const statuses = await sql`select kind, status from gm_orders where funded_account = ${funded.toBase58()} order by kind`;
     assert.ok(statuses.every(s => s.status === 'canceled'), JSON.stringify(statuses));
   });
@@ -332,11 +339,11 @@ try {
     await main.locator('.vault-allocation .data-row').filter({ hasText: 'Fee vault' }).getByText(usd(fee), { exact: true }).waitFor();
     const treasury = await connection.getBalance(solTreasuryPda());
     await main.locator('.vault-allocation .data-row').filter({ hasText: 'SOL treasury' }).getByText(`${(treasury / 1e9).toFixed(4)} SOL`, { exact: true }).waitFor();
-    for (const [event, amount] of [['Capital deposited', '+1,000.00 USDC'], ['Evaluation fee', '+1.00 USDC'], ['Principal allocated', '−50.00 USDC']]) {
+    for (const [event, amount] of [['Capital deposited', '+1,000.00 USDC'], ['Evaluation fee', '+1.00 USDC'], ['Principal allocated', '−100.00 USDC']]) {
       await main.locator('tbody tr').filter({ hasText: event }).getByText(amount, { exact: true }).waitFor();
     }
-    assert.equal(allocated, toMicro('50'));
-    assert.equal(capital, toMicro('950'));
+    assert.equal(allocated, toMicro('100'));
+    assert.equal(capital, toMicro('900')); // 1,000 deposited less the 100 USDC principal
   });
 
   await step('no unexpected console errors', async () => {

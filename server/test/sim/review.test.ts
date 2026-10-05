@@ -44,7 +44,7 @@ describe('hand derivation', () => {
     //   tokens = (10,000 + impact) / max 118.5574 = 84.347926404;  price = 10,000 / tokens = 118.55656002855
     //   collateral = 500 − 1 / USDC min 0.999902 = 498.999902 USDC → realized −1.000098
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const { order } = await placed(u, id);
     await t.tick({ ...t.md.recorded('SOL').at(-1)!, ts: order.createdAt + 2_000 });
@@ -61,7 +61,7 @@ describe('fees over time', () => {
     // them the larger side. The open snapshot accrues the hour at the rate without the position (0), every later
     // valuation re-accrues the same hour at the rate with it, and the difference is charged to the new position.
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     t.md.clockAgeSeconds = 3_600;
     try {
       await base('SOL');
@@ -84,7 +84,7 @@ describe('fees over time', () => {
 describe('closes', () => {
   it('a 100% close leaves the account flat even when an earlier increase fills on the same tick', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     await placed(u, id, { sizeUsd: '10000', collateralUsd: '500' });
     await t.tick(t.md.scaled('SOL', 1, later()));
@@ -101,7 +101,7 @@ describe('closes', () => {
 describe('protection', () => {
   it('a stop loss placed with an increase does not shrink the protection of the position it joins', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     await placed(u, id, { sizeUsd: '10000', collateralUsd: '500', stopLoss: priceAt(980n) });
     await t.tick(t.md.scaled('SOL', 1, later()));
@@ -119,7 +119,7 @@ describe('protection', () => {
 
   it('protection set on a position also covers what is added to it later', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     await placed(u, id, { sizeUsd: '10000', collateralUsd: '500' });
     await t.tick(t.md.scaled('SOL', 1, later()));
@@ -149,7 +149,7 @@ describe('funded parity', () => {
 
   it('counts each take profit and stop loss as an order, and limits positions to the 8 slots a funded account has', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const far = fromUnitPrice(mid() / 2n, 9);
     for (let i = 0; i < 6; i++) await placed(u, id, { kind: 'Limit', triggerPrice: far, sizeUsd: '100', collateralUsd: '10' });
@@ -226,7 +226,7 @@ describe('capacity', () => {
 describe('fault isolation', () => {
   it('a liquidation the model refuses does not undo a fill made on the same tick', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     await base('BTC');
     await placed(u, id, { symbol: 'BTC', sizeUsd: '10000', collateralUsd: '500' });
@@ -254,7 +254,7 @@ describe('fault isolation', () => {
 describe('requests', () => {
   it('does not answer a close with an unrelated order that reused its client id', async () => {
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base('SOL');
     const reused = clientId();
     const body = { clientId: reused, sizeUsd: '1000', collateralUsd: '100' };

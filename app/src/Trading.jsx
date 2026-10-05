@@ -92,7 +92,7 @@ export default function Trading() {
   const [take, setTake] = useState('');
   const [stop, setStop] = useState('');
   const [side, setSide] = useState('Long');
-  const [size, setSize] = useState('1000');
+  const [size, setSize] = useState('100'); // a tenth of the 1,000 USD account: inside every stage's buying power at the default 5×
   const [slippage, setSlippage] = useState('0.5');
   // The rest of the ticket lives here too: the quote is priced at its margin and limit, and the chart draws its TP/SL.
   const [ticket, setTicket] = useState({ leverage: 5, orderType: 'Market', limitPrice: '', take: '', stop: '' });

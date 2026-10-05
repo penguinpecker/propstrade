@@ -55,7 +55,7 @@ describe('practice: the program\'s fee rule, simulated', () => {
   it('assesses an open on its size and its take profit and stop loss on the exposure cap, holds the open\'s fee while it is pending, and charges each fill what it executed', async () => {
     rate = RATE_A;
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base();
     const { order, account } = await placed(u, id, { takeProfit: price(1.05), stopLoss: price(0.95) });
     expect(order.platformFeeUsd).toBe(fee(RATE_A, 10_000)); // 0.5 + 2 bps of $10,000 = 2.5
@@ -100,7 +100,7 @@ describe('practice: the program\'s fee rule, simulated', () => {
   it('an order the rate changed under is charged at the rate it was assessed at; a new order at the new rate', async () => {
     rate = RATE_A;
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base();
     const limit = (await placed(u, id, { kind: 'Limit', triggerPrice: price(0.99) })).order;
     expect(limit.platformFeeUsd).toBe('2.5');
@@ -118,7 +118,7 @@ describe('practice: the program\'s fee rule, simulated', () => {
   it('an order that adds exposure must leave its own fee and the pending increases\' in the margin, as the program requires', async () => {
     rate = RATE_A;
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base();
     const all = await place(u, id, { sizeUsd: '10000', collateralUsd: '1250' });
     expect([all.statusCode, all.json().error]).toEqual([422, { code: 'order_rejected', message: 'Margin $1,250.00 and the $2.50 Props fee are more than the $1,250.00 available' }]);
@@ -133,7 +133,7 @@ describe('practice: the program\'s fee rule, simulated', () => {
     const referrer = await t.user();
     const u = await t.user();
     expect((await u.post('/v1/me/referrer', { code: referrer.wallet.slice(0, 8) })).statusCode).toBe(200);
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base();
     await placed(u, id);
     await t.tick(at(1));
@@ -144,7 +144,7 @@ describe('practice: the program\'s fee rule, simulated', () => {
   it('a liquidation pays no Props fee', async () => {
     rate = RATE_A;
     const u = await t.user();
-    const id = practiceOf(u);
+    const id = await t.practice(u);
     await base();
     await placed(u, id, { sizeUsd: '20000', collateralUsd: '1000' }); // 20x
     await t.tick(at(1));
@@ -166,7 +166,7 @@ describe('practice: the program\'s fee rule, simulated', () => {
     const referrer = await t.user();
     const [a, b] = [await t.user(), await t.user()];
     expect((await a.post('/v1/me/referrer', { code: referrer.wallet.slice(0, 8) })).statusCode).toBe(200);
-    const [idA, idB] = [practiceOf(a), practiceOf(b)];
+    const [idA, idB] = await Promise.all([t.practice(a), t.practice(b)]);
     const open = async (u: User, id: string, r: OrderFeeRateInfo) => { rate = r; return placed(u, id, { sizeUsd: '1000', collateralUsd: '100' }); };
     const close = async (u: User, id: string, percent: number, r: OrderFeeRateInfo) => {
       rate = r;

@@ -27,8 +27,8 @@ If implementation proves a statement here wrong, fix the code to the facts AND u
 
 | Rule | Default | Notes |
 |---|---|---|
-| Tiers (account size S / fee) | 10K / 79 USDC, 25K / 149 USDC enabled; 50K / 249, 100K / 449 disabled (shown as "unavailable") | Pool depth (≈$0.8–1.8M per major market) limits size at launch |
-| Loss allowance L | 5% of S, **static** floor `S − L`, includes open P&L and costs | Funded: L is the USDC principal actually posted |
+| Tiers (account size S / fee) | one tier: 1K / 9.99 USDC (owner decision 2026-10-05; the earlier 10K–100K ladder is gone) | Pool depth (≈$0.8–1.8M per major market) limits size at launch; a disabled tier shows as "unavailable" |
+| Loss allowance L | 10% of S (100 USD on the 1K tier), **static** floor `S − L`, includes open P&L and costs | Funded: L is the USDC principal actually posted |
 | Profit target | 8% of S (evaluation only), net of costs | |
 | Daily loss limit / time limit / min days | none / none / none | |
 | Max total exposure | 1.0 × S (sum of open position notional) | `Tier.max_exposure_bps = 10000` |
@@ -41,7 +41,7 @@ If implementation proves a statement here wrong, fix the code to the facts AND u
 | Order types | Market, Limit (increase); Take-profit (LimitDecrease), Stop-loss (StopLossDecrease) | GMTrade has no stop-entry: the "Stop" entry tab is removed |
 | Tradable markets | GMTrade **pure USDC-USDC** markets only, on the allowlist (`MarketConfig.enabled`) | Every asset with a pure USDC-USDC pool is listed and browsable (55 of GMTrade's 68 on 2026-09-25; the rest could never be traded here, so they are not listed); non-allowlisted ones show "Not available for funded trading" |
 | Sessions | stock/ETF and FX markets close outside hours; risk service closes positions above the closed-market leverage cap before the close; decreases are impossible while closed | |
-| Practice | free, 25K virtual, same engine and rules, reset anytime, never paid out | |
+| Practice | free, 1K virtual with the same 10% allowance (mirrors the tier), same engine and rules, reset anytime (a reset moves an older account to the current size), never paid out | |
 | Acceptable price | every order carries one; default slippage 0.5% (user-editable ≤ 5%) | protects against GMTrade's scheduled price-impact windows |
 | Geo | block US persons and sanctioned regions (edge middleware + KYC country and region) | GMTrade terms bar US persons |
 | Costs | GMTrade's, in every stage: order fee on each open and close (the market's factor by impact direction: lower when the order improves the long/short balance, higher when it worsens it), price impact (in the execution price), borrowing (the larger side pays), funding (the paying side only: received funding is never credited), liquidation fee. Props.trade: the evaluation fee, the profit share and its own fee per order (`Config.order_fee_usdc` + `order_fee_bps` of the size: $2 + 10 bps, the launch rate and the program's caps, set by the operator at launch (0 = off, the code's default); the same on every stage; charged only when the order executes, on the size it executes: see §8 "Props order fee"; on practice and evaluation accounts simulated) | The order ticket previews open, close and round-trip fees (the Props fee included), the side's hourly rates and cost, and the liquidation price (`GET /v1/quote`); every trip's breakdown is in `ClosedTrade` |

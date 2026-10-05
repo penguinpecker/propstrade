@@ -135,7 +135,7 @@ export interface PriceImpactQuote {
 
 // ---------- programs / config ----------
 export interface Tier {
-  id: number; name: string;    // "10K"
+  id: number; name: string;    // "1K" (one tier since 2026-10-05: 1,000 USD for 9.99 USDC)
   sizeUsd: Decimal; feeUsdc: Decimal;
   profitTargetBps: number; maxDrawdownBps: number; maxExposureBps: number;
   traderShareBps: number; enabled: boolean; termsHash: string; version: number;
@@ -222,7 +222,7 @@ export interface AccountRules {
 export interface AccountSummary {
   id: string;                  // practice: "practice:<wallet>", evaluation/funded: onchain PDA
   stage: Stage; status: AccountStatus;
-  label: string;               // "Evaluation 25K"
+  label: string;               // "Evaluation 1K"
   shortId: string;             // display id, e.g. "PT-9Kq3…"
   rules: AccountRules;
   equity: Decimal; realizedPnl: Decimal; unrealizedPnl: Decimal;
