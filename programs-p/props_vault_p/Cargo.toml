@@ -15,7 +15,7 @@ no-entrypoint = []
 pinocchio = { version = "=0.11.2", default-features = false, features = ["cpi", "copy"] }
 
 [dev-dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
 solana-address = { version = "2.8", features = ["curve25519", "decode"] }
 
 [lints.rust]
