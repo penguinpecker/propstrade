@@ -7,7 +7,7 @@
   "rewrites": [
     {
       "source": "/v1/:path*",
-      "destination": "https://server-production-fbe8.up.railway.app/v1/:path*"
+      "destination": "https://server-production-56d7.up.railway.app/v1/:path*"
     },
     {
       "source": "/(.*)",
