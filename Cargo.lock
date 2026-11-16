@@ -796,9 +796,9 @@ dependencies = [
 
 [[package]]
 name = "gmsol-programs"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8013a9509763d5f982842610da5f8eafabc90a4f087ebbd535b7e178791566c"
+checksum = "5d744a7cbea7b3e4495395c661da899a5bd0d2a54d3e2c5449a76376fbc11077"
 dependencies = [
  "anchor-lang",
  "bs58",
